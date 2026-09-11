@@ -151,6 +151,41 @@ public class PdfRenderService : IDisposable
     }
 
     /// <summary>
+    /// Render a sub-rectangle of a page's device space (tile) to raw BGRA pixels —
+    /// the <c>RenderCache::Render</c> → <c>engine->RenderPage(RenderPageArgs{pageRect})</c>
+    /// counterpart: only the tile rect is rasterized, so zoom-in never re-renders the
+    /// whole page. (devW/devH) is the full-page pixel size at the render density;
+    /// (x0,y0)-(x1,y1) the tile rect within it.
+    /// </summary>
+    public async Task<(byte[] Pixels, int Width, int Height)> RenderPageRegionBgraAsync(
+        uint pageIndex, uint devW, uint devH,
+        uint x0, uint y0, uint x1, uint y1,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureReady();
+        await AcquireSlotAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(() =>
+            {
+                var resp = GlanceNative.mu_render_page_region_bgra(
+                    _engine, pageIndex, devW, devH, x0, y0, x1, y1,
+                    out IntPtr data, out ulong len, out uint w, out uint h);
+                GlanceNative.ThrowIfFailed(resp, "Render page region");
+                var (buf, length, width, height) = CopyOut(data, len, w, h);
+                byte[] owned = new byte[length];
+                Buffer.BlockCopy(buf, 0, owned, 0, length);
+                ReturnPixelBuffer(buf);
+                return (owned, width, height);
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _slot!.Release();
+        }
+    }
+
+    /// <summary>
     /// Reload the MuPDF document to flush its parsed-page/object cache, keeping
     /// scanned-PDF memory from climbing to the whole file size. Page count /
     /// indices / dimensions are unchanged.
