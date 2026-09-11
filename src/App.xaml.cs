@@ -37,6 +37,11 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+#if DEBUG
+        // Sumatra 内核策略自测（1:1 对应 sumatrapdf-master 的 PageRenderPolicy_UnitTests，
+        // DEBUG 构建启动时跑一次；断言失败即 Debug.Assert 中断，暴露调度/淘汰策略回归）。
+        Glance.Rendering.PageRenderPolicy.UnitTests();
+#endif
     }
 
     /// <summary>
