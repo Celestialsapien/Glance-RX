@@ -196,13 +196,6 @@ internal sealed class PageRenderService : IDisposable
         }
     }
 
-    /// <summary>Cache byte size of one page at the given pt dimensions and key zoom.</summary>
-    public long EstimatePageBytes(int pageNo, float zoom)
-    {
-        PageDims(pageNo, out float w, out float h);
-        return (long)Math.Ceiling(w * zoom * _dpiFactor) * (long)Math.Ceiling(h * zoom * _dpiFactor) * 4;
-    }
-
     // ---- worker ------------------------------------------------------------
 
     // Sumatra: RenderWorker — pick by policy, render off-lock, accept only if the generation

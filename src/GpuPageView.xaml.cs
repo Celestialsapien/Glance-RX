@@ -3585,7 +3585,10 @@ public sealed partial class GpuPageView : UserControl
     }
 
     /// <summary>向内核请求某页出图。缩放动画期：已有底图可显示的可见页不追新键（等落定后精确重渲，
-    /// 防 churn）；完全空白页仍立即请求，保证冷页尽快出图。</summary>
+    /// 防 churn）；完全空白页仍立即请求，保证冷页尽快出图。
+    /// 1:1 DrawPage 语义补全：内核已缓存该键时 <see cref="PageRenderService.Request"/> 会被去重
+    /// 吞掉且不再通知（Sumatra 是 DrawPage 命中即画）→ 外壳对应动作 = 直接取缓存上传一次，
+    /// 否则"滑出窗口又滚回"的页会永远卡在占位色。</summary>
     private void RequestKernelRender(int pageNo, double z, PageRenderPriority priority)
     {
         var kernel = _renderKernel;
@@ -3602,11 +3605,30 @@ public sealed partial class GpuPageView : UserControl
             }
             scale = QuantizeScaleOctave(scale);
         }
-        kernel.Request(new PageRenderKey(pageNo, (float)scale, 0), priority);
+        var key = new PageRenderKey(pageNo, (float)scale, 0);
+
+        if (kernel.TryGetPage(key, out var cached))
+        {
+            // 缓存命中：仅在"矢量未就绪 且 无同键底图 且 无上传在途"时补一次上传；
+            // TryGetPage 每次触碰 lastUse，与 Sumatra DrawPage 每帧绘制的行为一致。
+            bool schedule = false;
+            lock (_lock)
+            {
+                if (_pageComp.TryGetValue(pageNo, out var pc) && !pc.VectorSceneReady &&
+                    !pc.PreviewBuilding && !(pc.Preview != null && pc.PreviewScale == key.Zoom))
+                {
+                    pc.PreviewBuilding = true;
+                    schedule = true;
+                }
+            }
+            if (schedule) _ = UploadKernelPageAsync(key, cached);
+            return;
+        }
+        kernel.Request(key, priority);
     }
 
     /// <summary>内核出图完成回调（DispatcherQueue → UI 线程）。从内核缓存取出位图，
-    /// 仅对仍在窗口内的页上传 GPU（窗口外页留在内核 CPU 缓存，由 LRU 管理，不占显存）。</summary>
+    /// 仅对仍在窗口内、且矢量未就绪的页上传 GPU（窗口外页留在内核 CPU 缓存，由 LRU 管理，不占显存）。</summary>
     private void OnKernelPageReady(PageRenderKey key)
     {
         var kernel = _renderKernel;
@@ -3614,19 +3636,31 @@ public sealed partial class GpuPageView : UserControl
         if (kernel == null || device == null) return;
         if (!kernel.TryGetPage(key, out var cached)) return; // 可能已被 NewGeneration 清除
 
+        bool schedule = false;
         lock (_lock)
         {
-            if (!_windowSet.Contains(key.PageNo)) return;
+            if (_windowSet.Contains(key.PageNo) &&
+                _pageComp.TryGetValue(key.PageNo, out var pc) && !pc.VectorSceneReady &&
+                !pc.PreviewBuilding && !(pc.Preview != null && pc.PreviewScale == key.Zoom))
+            {
+                pc.PreviewBuilding = true;   // 与 Draw 帧的缓存命中上传共用同一在途去重标记
+                schedule = true;
+            }
         }
-        _ = UploadKernelPageAsync(key, cached);
+        if (schedule) _ = UploadKernelPageAsync(key, cached);
     }
 
     /// <summary>内核位图上传 GPU 并锁内提交到 <see cref="PageComposite.Preview"/>（与旧预览提交路径
-    /// 相同的提交语义：换新弃旧、设备重建/换文档自废、提交后 Invalidate）。</summary>
+    /// 相同的提交语义：换新弃旧、设备重建/换文档自废、提交后 Invalidate）。
+    /// 所有退出路径都必须清 <see cref="PageComposite.PreviewBuilding"/>，否则该页的上传通道被卡死。</summary>
     private async Task UploadKernelPageAsync(PageRenderKey key, CachedPageBitmap cached)
     {
         var device = ScreenCanvas?.Device;
-        if (device == null) return;
+        if (device == null)
+        {
+            lock (_lock) { if (_pageComp.TryGetValue(key.PageNo, out var pc)) pc.PreviewBuilding = false; }
+            return;
+        }
 
         int gen;
         lock (_lock) { gen = _docGeneration; }
@@ -3641,34 +3675,46 @@ public sealed partial class GpuPageView : UserControl
         }
         catch { bmp = null; }
         finally { _gpuUploadGate.Release(); }
-        if (bmp == null) return;
+        if (bmp == null)
+        {
+            lock (_lock) { if (_pageComp.TryGetValue(key.PageNo, out var pc)) pc.PreviewBuilding = false; }
+            return;
+        }
 
         bool invalidate = false;
         lock (_lock)
         {
             if (gen != _docGeneration || !_pageComp.TryGetValue(key.PageNo, out var pc))
             {
-                // 换文档/页已出窗：直接弃（GPU 资源走 UI 线程释放）。
-                ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { bmp!.Dispose(); } catch { } });
-            }
-            else if (pc.PreviewScale == key.Zoom && pc.Preview != null)
-            {
-                // 迟到的重复通知（同键已上屏）：弃新保旧。
+                // 换文档/页已出窗：直接弃（GPU 资源走 UI 线程释放）；在途标记随条目作废，无需清理。
                 ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { bmp!.Dispose(); } catch { } });
             }
             else
             {
-                var oldPreview = pc.Preview;
-                if (oldPreview != null)
-                    ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { oldPreview.Dispose(); } catch { } });
-                pc.Preview = bmp;
-                pc.PreviewReady = true;
-                pc.PreviewBuilding = false;
-                pc.PreviewScale = key.Zoom;
-                pc.PreviewW = cached.Width;
-                pc.PreviewH = cached.Height;
-                pc.PreviewMs = sw.ElapsedMilliseconds;
-                invalidate = true;
+                pc.PreviewBuilding = false; // 条目存活：无论下面走哪个分支都要放行后续上传
+                if (pc.VectorSceneReady)
+                {
+                    // 矢量已就绪：底图已完成使命，弃（免得被已就绪页白占显存）。
+                    ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { bmp!.Dispose(); } catch { } });
+                }
+                else if (pc.Preview != null && pc.PreviewScale == key.Zoom)
+                {
+                    // 迟到的重复通知（同键已上屏）：弃新保旧。
+                    ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { bmp!.Dispose(); } catch { } });
+                }
+                else
+                {
+                    var oldPreview = pc.Preview;
+                    if (oldPreview != null)
+                        ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { oldPreview.Dispose(); } catch { } });
+                    pc.Preview = bmp;
+                    pc.PreviewReady = true;
+                    pc.PreviewScale = key.Zoom;
+                    pc.PreviewW = cached.Width;
+                    pc.PreviewH = cached.Height;
+                    pc.PreviewMs = sw.ElapsedMilliseconds;
+                    invalidate = true;
+                }
             }
         }
         if (invalidate) InvalidateBoth();
