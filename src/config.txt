@@ -1,0 +1,163 @@
+# ============================================================================
+# Glance 设计手感调参文件 / Glance Design-Feel Tuning
+# ----------------------------------------------------------------------------
+# 改完本文件后【重启 Glance】即可生效，无需重新编译。
+# Edit this file and RESTART Glance to apply — no recompile needed.
+#
+# 每行格式 / Format:   键名 = 值   # 注释
+#   - 以 # 开头的行是注释，忽略。/ Lines starting with # are ignored.
+#   - 只写你想要的键即可；没写的键自动保留默认值（=下方初始值）。
+#     Only list the keys you want to change; omitted keys keep their default.
+#   - 想回退某项：直接删掉那一行（或改回"默认"列的值）。
+#     To revert a key: delete its line (or set it back to the default value).
+#
+# 一键回退（恢复出厂）/ One-click factory reset:
+#   直接删除本文件即可。下次打开 Glance 会以【全部默认值】运行，并在本目录
+#   （或默认位置）自动重新生成一份【全默认值】的 config.txt —— 等价于"恢复出厂设置"。
+#   Simply delete this file. Next launch runs with ALL defaults and auto-regenerates a
+#   full-default config.txt in this (or the default) location — i.e. a factory reset.
+#   注：重新生成的文件本身就是所有默认值，可随便改、搞乱了再删一次即可。
+#   Note: the regenerated file IS all-defaults; edit freely, and delete again to reset.
+#
+# 默认值对照 / Defaults (identical to the shipped build):
+# ============================================================================
+
+
+# ---------------- 缩放范围 / Zoom range ----------------
+# 最小缩放比例（0.1 = 10%）。调小可整页预览超大跨页杂志。
+# Min zoom ratio (0.1 = 10%). Lower = fit huge spreads on screen.
+MinZoom = 0.1                     # 默认 0.1 | default
+
+# 最大缩放比例（4.0 = 400%）。
+# Max zoom ratio (4.0 = 400%).
+MaxZoom = 4.0                     # 默认 4.0 | default
+
+
+# ---------------- 布局留白 / Layout margins (DIP) ----------------
+# 文档四周留白（DIP）。/ Margin around the document (DIP).
+DocMargin = 16.0                  # 默认 16.0 | default
+
+# 纵向连续布局页间距（DIP）。/ Vertical continuous layout page gap (DIP).
+PageGap = 16.0                    # 默认 16.0 | default
+
+# 横向连续布局页间距（DIP）。书本/杂志横向串页时更"贴"，破坏感更小。
+# Horizontal continuous layout page gap (DIP). Tighter for cross-page reading.
+PageGapHorizontal = 6.0           # 默认 6.0 | default
+
+
+# ---------------- 缓存与场景窗口 / Cache & scene window ----------------
+# 矢量场景缓存页数（每页命令列表几十 KB ~ 数 MB）。调大 → 滚动方向前方更多页提前构建好
+# 场景、进视口即清晰；代价是缓存内存随页数增长。
+# Vector scene cache capacity (pages). Larger = more ahead pages built before they enter the
+# viewport; cost is scene memory growing with the page count.
+MaxCachedPages = 10                # 默认 10 | default
+
+# ---------------- 矢量直绘 / Vector direct render ----------------
+VectorMaxCommandBytes = 536870912 # 默认 536870912 (512MB) | default
+
+# 矢量直绘 OSD 调试层：0=关 1=开（逐页显示 V-Rdy/V-Bld/V-Fail/构建ms/场景KB）。
+VectorDebugOverlay = 0             # 默认 0 | default
+
+# ---------------- 滚动 / Scrolling ----------------
+# 判定滚动方向的死区(DIP)。远小于一次滚轮位移(~100)，但吃掉触控板抖动。
+# Deadzone for scroll direction (DIP). Smaller than a wheel notch (~100) but kills jitter.
+ScrollDirDeadzone = 8.0           # 默认 8.0 | default
+
+# ---------------- 淡入 / Fade-in ----------------
+# 页面从无到有时的淡入时长(ms)。分辨率升级直接替换、不闪。
+# Fade-in duration for a page appearing from nothing (ms).
+FadeInMs = 180                    # 默认 180 | default
+
+
+# ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
+# 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动下方收敛阈值。
+# ~99% settle time ≈ 6.6/ω. Want faster? Raise ω only; leave settle thresholds alone.
+
+# 滚轮滚动弹簧硬度：≈315ms 收敛，跟手且顺滑。
+# Wheel scroll spring: ~315ms settle, responsive & smooth.
+ScrollSpringOmega = 21.0          # 默认 21.0 | default
+
+# 双击/按钮/Ctrl+滚轮缩放弹簧：≈370ms，有"推进感"。
+# Double-click / button / Ctrl+wheel zoom spring: ~370ms, with a sense of push.
+ZoomSpringOmega = 18.0            # 默认 18.0 | default
+
+# 右键拖拽缩放弹簧：≈165ms，以跟手为主、只滤输入抖动。
+# Right-drag zoom spring: ~165ms, follows hand, only filters jitter.
+RightZoomSpringOmega = 40.0       # 默认 40.0 | default
+
+
+# ---------------- 滚轮与缩放步进 / Wheel & zoom step ----------------
+# 滚轮一格位移系数。负值=前推往回看。幅度 3.0 → 一档≈360px（视口约1/3）。
+# Wheel notch factor (negative = push forward = scroll back). 3.0 → ~360px/notch.
+# 2.0≈240px 偏稳，4.0≈480px 更奔放。/ 2.0 steady, 4.0 snappier.
+WheelScrollFactor = -3.0          # 默认 -3.0 | default
+
+# Ctrl+滚轮缩放强度（每档 120 delta 约缩放 3%）。越大滚轮缩放越猛。
+# Ctrl+wheel zoom strength (~3% per notch). Higher = more aggressive.
+CtrlWheelZoomStrength = 0.25      # 默认 0.25 | default
+
+# 缩放按钮(+/-)每按一次步进（百分比点：100%→110%）。
+# Zoom in/out button step per click (percentage points: 100%→110%).
+ZoomButtonStep = 10.0             # 默认 10.0 | default
+
+
+# ---------------- 收敛阈值（按"屏幕看得见"判定） / Settle thresholds ----------------
+# 残差 ≤ 约 1~2 屏幕像素即落定，消除"看着停了其实还在跑"的拖尾。
+# Settle when residual ≤ ~1-2 on-screen px; kills the "looks stopped but still running" tail.
+
+# 滚动收敛残差(px)。/ Scroll settle residual (px).
+ScrollSettlePx = 1.5              # 默认 1.5 | default
+
+# 滚动收敛速度(px/帧)。/ Scroll settle velocity.
+ScrollSettleVel = 40.0            # 默认 40.0 | default
+
+# 缩放收敛残差(log 空间)。/ Zoom settle residual (log space).
+ZoomSettleLog = 0.002             # 默认 0.002 | default
+
+# 缩放收敛速度。/ Zoom settle velocity.
+ZoomSettleVel = 0.08              # 默认 0.08 | default
+
+
+# ---------------- 提交落地（ChangeView 异步窗口） / Commit window ----------------
+# 缩放/偏移经 ScrollViewer.ChangeView 异步落地，下面是容差与兜底。
+# Zoom/offset land asynchronously via ChangeView; tolerances & safety net below.
+
+# 缩放提交容差。/ Zoom commit epsilon.
+CommitZoomEps = 0.001             # 默认 0.001 | default
+
+# 偏移提交容差(px)。夹断造成的偏差几十~几百px，1.5px 足以区分。
+# Offset commit epsilon (px). Clip-induced error is tens~hundreds px; 1.5px tells apart.
+CommitOffsetEps = 1.5             # 默认 1.5 | default
+
+# 最大补发偏移次数。/ Max commit nudges.
+MaxCommitNudges = 4               # 默认 4 | default
+
+# 提交落地超时(墙钟兜底 ms)。zoom 通常 <20ms 落地；远超此值才视为真死锁强制关窗。
+# Commit wait deadline (ms wall-clock). Usually <20ms; only past this = real deadlock.
+CommitWaitDeadlineMs = 250.0      # 默认 250.0 | default
+
+
+# ---------------- 锚点 / 双击 / Anchor & double-tap ----------------
+# 落定后仍复用锚点的宽限(ms)。/ Anchor reuse grace after settle (ms).
+ZoomReuseAnchorGraceMs = 200.0    # 默认 200.0 | default
+
+# 双击去重窗口(ms)，吃掉手势识别器的重复派发。
+# Double-tap dedupe window (ms) to swallow recognizer double-fire.
+DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default
+
+
+# 这是"双击缩放看起来只有十几帧"的真因：每帧 UI 线程建整页位图太重。
+# This is the real cause of "double-click zoom looks like only ~10 frames": per-frame bitmap build is too heavy.
+
+
+#     (见 GpuPageView AnimateRaster* 常量)，不开放 config.txt。
+# Note: re-raster step/threshold & speed-adaptive lead are core-feel constants (AnimateRaster* in
+#     GpuPageView), NOT configurable by design.
+
+
+# ---------------- UI / 工具栏 / UI & toolbar ----------------
+# 工具栏滑入滑出时长(ms)。/ Toolbar slide-in/out duration (ms).
+UiTransitionMs = 150              # 默认 150 | default
+
+# 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。/ Auto-hide delay after pointer leaves (ms).
+ToolbarHideDelayMs = 180         # 默认 180 | default

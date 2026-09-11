@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Glance.GpuPageView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Glance"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!--
+      Phase 2.3 视口画布架构（内存硬上限）：
+      - ScreenCanvas：仅视口大小的 CanvasControl（~25MB 固定），每次滚动/缩放重画可见页。
+        画 2-3 张已缓存的 GPU 位图是微秒级操作，60fps 无压力。
+      - Viewer(ScrollViewer)：只承载一个透明 Spacer 撑出文档尺寸 → 提供原生滚动条/惯性/缩放手势。
+        ScrollViewer 叠在画布上层(自身透明)，滚动条可见、输入正常。
+      - 内存 = 视口画布(固定) + 页位图 LRU(5页±240MB 封顶) + 像素池(~128MB 封顶)，
+        与滚动距离/文档长度无关。彻底替代"整文档一块虚拟表面"(其分块只标脏不释放，
+        滚完全本必然 ~950MB)。
+    -->
+    <!-- 跟随深浅主题：浅色 #F3F3F3 / 深色 #202020（与 MainPage 视图区一致） -->
+    <Grid x:Name="RootGrid" SizeChanged="RootGrid_SizeChanged"
+          Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+        <canvas:CanvasControl x:Name="ScreenCanvas"
+                              IsHitTestVisible="False"
+                              CreateResources="ScreenCanvas_CreateResources"
+                              Draw="ScreenCanvas_Draw"/>
+
+        <ScrollViewer x:Name="Viewer"
+                      Background="Transparent"
+                      HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled"
+                      VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled"
+                      ZoomMode="Disabled" MinZoomFactor="0.1" MaxZoomFactor="4.0"
+                      SizeChanged="Viewer_SizeChanged"
+                      ViewChanged="Viewer_ViewChanged"
+                      DoubleTapped="Viewer_DoubleTapped">
+            <!-- 透明占位：撑出文档总尺寸，提供滚动范围；Background=Transparent 保证可命中(手势/滚轮) -->
+            <Grid x:Name="Spacer" Background="Transparent"/>
+        </ScrollViewer>
+
+    </Grid>
+</UserControl>

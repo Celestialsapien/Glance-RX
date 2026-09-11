@@ -1,0 +1,25 @@
+<Page
+    x:Class="Glance.VectorProbePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Glance"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="DarkSlateGray">
+
+    <StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="8" Margin="8">
+            <Button x:Name="OpenButton" Content="打开 PDF" Click="OpenButton_Click" />
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="White" Text="未打开文件" />
+            <TextBlock x:Name="FpsText" VerticalAlignment="Center" Foreground="Yellow" Text="" />
+        </StackPanel>
+        <canvas:CanvasControl
+            x:Name="ProbeCanvas"
+            Width="1024" Height="768"
+            CreateResources="ProbeCanvas_CreateResources"
+            Draw="ProbeCanvas_Draw" />
+        <TextBlock x:Name="HintText" Foreground="White" Margin="8" Text="滚轮=缩放 拖拽=平移 双击=复位" />
+    </StackPanel>
+</Page>
