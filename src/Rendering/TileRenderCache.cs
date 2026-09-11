@@ -30,9 +30,15 @@ namespace Glance.Rendering;
 //     Win2D 必须经 CanvasBitmap；CPU 位图仍是唯一缓存真身，与 Sumatra 一致）。
 //   * AbortCookie：MuPDF 局部渲染是同步 FFI，无法中途打断 → 保留 req.abort
 //     标志，渲染完成后丢弃结果（Sumatra 的 darkModeEpoch 过期丢弃同理）。
-//   * 坐标：外壳一律 DIP（Win2D 画布坐标），zoomReal = z×96/72（DIP 比例）；
-//     maxTileSize = 物理屏幕像素 ÷ DpiScale；出图密度 = DIP 比例 × DpiScale
-//     （物理 px），与 Sumatra 的 zoomReal×dpi 单位语义一致。
+//   * 坐标：与 Sumatra 【完全同单位】——整个引擎（tile 矩形 / pageOnScreen /
+//     viewPort / maxTileSize / source 索引）一律物理像素，zoomReal = 每 PDF 点
+//     物理像素数。不得在本文件内出现 DIP。DIP 只存在于外壳的两个边界：
+//     ITileRenderHost 的实现（取出时 ×DpiScale）与 DrawTileBitmap（target 传
+//     画布前 ÷DpiScale；source 保持位图像素）。
+//     ⚠ 历史坑（本文件曾因此出现"右侧缺失 + 发糊 + 瓦片错位"三个症状）：
+//       把 tileOnScreen 做成 DIP、却把 DIP 偏移直接当位图源索引，且缺整数对齐
+//       → factor 恒为 0.9998 之类，走 Linear 重采样；源索引又少了 DpiScale 倍。
+//       修复方式 = 回到 Sumatra 的单位体系，不做任何"就地换算"。
 // ============================================================================
 
 /// <summary>kRenderDelayUndefined / kRenderDelayFailed（RenderCache.h）。</summary>
@@ -97,17 +103,21 @@ internal sealed class PageRenderRequest
     public Action<PageRenderRequest>? FinishedCb;
 }
 
-/// <summary>DisplayModel 的渲染侧对应物（GpuPageView 实现）。</summary>
+/// <summary>DisplayModel 的渲染侧对应物（GpuPageView 实现）。
+/// ⚠ 单位铁律：本接口的矩形/尺寸一律【物理像素】，与 Sumatra 的 RenderCache 完全同单位
+/// （Sumatra 的 pageOnScreen / viewPort / tile 矩形全是物理像素，没有 DIP 层）。
+/// DIP↔像素 的换算只允许发生在外壳的两个边界上：本接口的实现里（取出时 ×DpiScale），
+/// 以及 DrawTileBitmap 里（画布 target 传入前 ÷DpiScale）。缓存内部【不得】再做任何换算。</summary>
 internal interface ITileRenderHost
 {
     int PageCount { get; }
     float PageWidthPt(int pageNo);
     float PageHeightPt(int pageNo);
-    /// <summary>page->zoomReal 对应物：DIP 渲染比例（z×96/72）。</summary>
+    /// <summary>dm->GetZoomReal()：每 PDF 点的物理像素数（= z×96/72×DpiScale）。</summary>
     float ZoomReal(int pageNo);
-    double DpiScale { get; }
-    Size ViewPortSizeDip { get; }
-    /// <summary>pageInfo->pageOnScreen 对应物：视口坐标 DIP。</summary>
+    /// <summary>dm->GetViewPort().Size()：物理像素。</summary>
+    Size ViewPortSize { get; }
+    /// <summary>pageInfo->pageOnScreen：视口坐标，物理像素。</summary>
     Rect PageOnScreen(int pageNo);
     bool PageVisible(int pageNo);
     bool PageVisibleNearby(int pageNo);
@@ -118,10 +128,13 @@ internal interface ITileRenderHost
     void Repaint();
     void PostToUi(Action action);
     /// <summary>engine->RenderPage(RenderPageArgs{pageRect}) 对应物：局部渲染。
+    /// 入参 devW/devH/x0..y1 均为物理像素（与 mu_render_page_region_bgra 一致）。
     /// 返回 (BGRA pixels, w, h)；失败抛异常（→ errorCode=1 路径）。</summary>
     Task<(byte[] Pixels, int W, int H)> RenderTileAsync(
         int pageNo, int devW, int devH, int x0, int y0, int x1, int y1);
-    /// <summary>BlitPixmapRegion 对应物（仅 UI 线程 Draw 帧内调用）。</summary>
+    /// <summary>BlitPixmapRegion 对应物（仅 UI 线程 Draw 帧内调用）。
+    /// target = 视口物理像素矩形；source = 位图内像素矩形（源索引必须用位图像素，
+    /// 不能是 DIP —— 这是 Win2D DrawImage 的源/目标异单位陷阱）。</summary>
     void DrawTileBitmap(BitmapCacheEntry entry, Rect target, Rect source);
 }
 
@@ -168,11 +181,8 @@ internal sealed class TileRenderCache : IDisposable
     {
         _host = host;
         _dispatcher = dispatcher;
-        double dpi = host.DpiScale;
-        // GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)：主屏物理像素（→ DIP）。
-        MaxTileSize = new Size(
-            Win32Metrics.ScreenWidth / dpi,
-            Win32Metrics.ScreenHeight / dpi);
+        // RenderCache 构造：maxTileSize = {SM_CXSCREEN, SM_CYSCREEN}（物理像素，原样）。
+        MaxTileSize = new Size(Win32Metrics.ScreenWidth, Win32Metrics.ScreenHeight);
 
         int numCores = Environment.ProcessorCount;
         _maxRenderThreads = Math.Max(GMaxRenderThreads, numCores);
@@ -335,12 +345,15 @@ internal sealed class TileRenderCache : IDisposable
         y = mbY + ((div - tile.Row - 1) * h);
     }
 
-    /// <summary>GetTileRectDevice 对应物：瓦片设备像素矩形（密度 = zoom×DpiScale，物理 px）。</summary>
+    /// <summary>GetTileRectDevice 对应物（RenderCache.cpp:314）：瓦片设备像素矩形。
+    /// zoom 已是「每 PDF 点物理像素数」，故这里就是 Sumatra 的
+    /// `engine->Transform(mediabox, pageNo, zoom, rotation=0)`（Glance 出图恒未旋转，
+    /// 与 mu_render_page_region_bgra 的 unrotated device space 对齐）。</summary>
     private void GetTileRectDevice(int pageNo, float zoom, TilePosition tile,
         out int devW, out int devH, out int x0, out int y0, out int x1, out int y1)
     {
         double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
-        double dens = zoom * _host.DpiScale;
+        double dens = zoom;   // px/point
         devW = Math.Max(1, (int)Math.Round(ptW * dens));
         devH = Math.Max(1, (int)Math.Round(ptH * dens));
         if (tile.Res == 0 || tile.Res == TilePosition.InvalidRes)
@@ -359,18 +372,28 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>GetTileOnScreen 对应物：瓦片在视口坐标系的 DIP 矩形。瓦片几何按【未旋转】页算
-    /// （与出图设备空间一致），再按外壳旋转角映射到屏幕（与 Glance 标注 ApplyPageTransform 的
-    /// GPU 旋转约定同式：CreateRotation(rot·π/180, 页中心)，y-down 屏幕上为顺时针）。</summary>
+    /// <summary>GetTileOnScreen（RenderCache.cpp:328）1:1：瓦片设备矩形 + 页在屏矩形。
+    /// Sumatra 两端都是【整数】Rect（GetTileRectDevice 里有 .Round()，pageOnScreen 是 int Rect），
+    /// 于是目标层瓦片的 factor 恰好 == 1.0 → BlitPixmapRegion 走 1:1 直拷。
+    /// ⚠ 这条整数对齐必须保住：一旦 tileOnScreen 带小数，factor 就变成 0.9998 之类，
+    /// 每次上屏都会被 Linear 重采样一次 → 目标分辨率明明够了画面仍然发糊（实测症状）。
+    ///
+    /// 旋转：Glance 出图恒为【未旋转】设备空间（mu_render_page_region_bgra），而
+    /// pageOnScreen 是旋转后的页矩形 → rot!=0 时在未旋转页矩形内做映射（位置等价于 Sumatra
+    /// 的 GetTileOnScreen(rotation)，只是位图内容不随旋转，由外壳呈现层负责）。</summary>
     private Rect GetTileOnScreen(int pageNo, float zoom, TilePosition tile, Rect pageOnScreen)
     {
         int rot = _host.Rotation % 360;
+
+        GetTileRectDevice(pageNo, zoom, tile, out _, out _, out int dx0, out int dy0, out int dx1, out int dy1);
+        double dw = Math.Max(0, dx1 - dx0), dh = Math.Max(0, dy1 - dy0);
+
+        if (rot == 0)
+            return new Rect(dx0 + pageOnScreen.X, dy0 + pageOnScreen.Y, dw, dh);
+
         double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
         GetTileRectPt(0, 0, ptW, ptH, tile, out double tx, out double ty, out double tw, out double th);
         double lx = tx * zoom, ly = ty * zoom, lw = tw * zoom, lh = th * zoom;
-
-        if (rot == 0)
-            return new Rect(pageOnScreen.X + lx, pageOnScreen.Y + ly, lw, lh);
 
         // 未旋转页矩形（PageUnrotatedRect 对应物）：90/270 交换 dest 宽高、绕中心放置。
         bool swap = rot == 90 || rot == 270;
@@ -385,7 +408,7 @@ internal sealed class TileRenderCache : IDisposable
             90 => new Rect(cx + cy - uY - ly - lh, cy - w / 2.0 + lx, lh, lw),
             180 => new Rect(cx + w / 2.0 - lx - lw, cy + h / 2.0 - ly - lh, lw, lh),
             270 => new Rect(cx - cy + uY + ly, cy + w / 2.0 - lx - lw, lh, lw),
-            _ => new Rect(pageOnScreen.X + lx, pageOnScreen.Y + ly, lw, lh),
+            _ => new Rect(cx - w / 2.0 + lx, cy - h / 2.0 + ly, lw, lh),
         };
     }
 
@@ -400,7 +423,7 @@ internal sealed class TileRenderCache : IDisposable
         double dy = tileOnScreen.Height * fuzz * 0.5;
         tileOnScreen = new Rect(tileOnScreen.X - dx, tileOnScreen.Y - dy,
             tileOnScreen.Width * (fuzz + 1), tileOnScreen.Height * (fuzz + 1));
-        var screen = new Rect(0, 0, _host.ViewPortSizeDip.Width, _host.ViewPortSizeDip.Height);
+        var screen = new Rect(0, 0, _host.ViewPortSize.Width, _host.ViewPortSize.Height);
         tileOnScreen.Intersect(screen);
         return !tileOnScreen.IsEmpty;
     }
@@ -439,6 +462,27 @@ internal sealed class TileRenderCache : IDisposable
         lock (_cacheAccess) FreeForDisplayModelLocked(dm);
     }
 
+    /// <summary>
+    /// RenderCache::KeepForDisplayModel（RenderCache.cpp:415）1:1：重载文档时保留可见页的
+    /// 缓存位图以免闪烁，同时把 zoom 置 kInvalidZoom、outOfDate 置 true，保证这些页最终会
+    /// 重新渲染。⚠ Glance 目前是「换文档即 ShutdownRenderCache + CreateRenderCache」，
+    /// 本方法暂无调用点（保留 = 1:1 完整性 + 是 OutOfDate 在 Sumatra 里的唯一写入口）。
+    /// </summary>
+    public void KeepForDisplayModel(object oldDm, object newDm)
+    {
+        lock (_cacheAccess)
+        {
+            for (int i = 0; i < _cacheCount; i++)
+            {
+                var entry = _cache[i]!;
+                if (entry.Dm != oldDm) continue;
+                if (_host.PageVisible(entry.PageNo)) entry.Dm = newDm;
+                entry.Zoom = KInvalidZoom;
+                entry.OutOfDate = true;
+            }
+        }
+    }
+
     /// <summary>RenderCache::FreeNotVisible：不可见页 + res&gt;1 且不可见（fuzz 2.0）的瓦片。</summary>
     public void FreeNotVisible()
     {
@@ -466,9 +510,9 @@ internal sealed class TileRenderCache : IDisposable
     {
         double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
         float zv = zoom ?? _host.ZoomReal(pageNo);
-        var viewPort = _host.ViewPortSizeDip;
+        var viewPort = _host.ViewPortSize;
 
-        double pixelW = ptW * zv, pixelH = ptH * zv;
+        double pixelW = ptW * zv, pixelH = ptH * zv;   // 物理像素（与 maxTileSize 同单位）
 
         double factorW = pixelW / (MaxTileSize.Width + 1);
         double factorH = pixelH / (MaxTileSize.Height + 1);
@@ -972,33 +1016,38 @@ internal sealed class TileRenderCache : IDisposable
             return renderDelay;
         }
 
-        // BlitPixmapRegion 对应物：target=isect（视口 DIP），source=位图内对应区域。
-        double dens = _host.DpiScale;
+        // ---- BlitPixmapRegion（RenderCache.cpp:1220-1234）1:1 ----
+        // target = isect（视口物理像素）；source = 位图内像素矩形。
+        // ⚠ source 的坐标单位是【位图像素】，绝不能拿 DIP 偏移直接当源索引 ——
+        // 那是 Win2D DrawImage 的源/目标异单位陷阱（DIP 与 px 混用会让每个瓦片只显示
+        // 左侧 1/DpiScale 的内容并把其余拉伸，表现为页面右侧缺一块 + 发糊）。
         double bmpW = entry.BitmapW, bmpH = entry.BitmapH;
-        int xSrc = (int)-Math.Min(tileOnScreenFull.X, 0);
-        int ySrc = (int)-Math.Min(tileOnScreenFull.Y, 0);
-        double factor = Math.Min(
-            bmpW / (tileOnScreenFull.Width * dens),
-            bmpH / (tileOnScreenFull.Height * dens));
+        double factor = Math.Min(bmpW / tileOnScreenFull.Width, bmpH / tileOnScreenFull.Height);
 
+        // 源起点 = 目标起点相对瓦片原点的偏移 × factor。
+        // Sumatra 写作 xSrc = -min(tileOnScreen.x, 0)；因 isect = bounds∩tileOnScreen 且 bounds
+        // 原点在 (0,0)，恒有 xSrc == isect.x - tileOnScreen.x，故两式完全等价（这里用通式，
+        // 对 bounds 原点不为 0 也成立）。
+        double sx = (isect.X - tileOnScreenFull.X) * factor;
+        double sy = (isect.Y - tileOnScreenFull.Y) * factor;
+        double sw = isect.Width * factor;
+        double sh = isect.Height * factor;
+
+        // 取整（Sumatra 用 int 截断）+ 夹到原位图内：夹掉多少就在 target 同侧裁掉多少
+        // （保持像素对齐，绝不用拉伸去凑满 target）。
+        double x0 = Math.Floor(sx), y0 = Math.Floor(sy);
+        double x1 = Math.Round(sx + sw), y1 = Math.Round(sy + sh);
         Rect target = isect;
-        Rect source;
-        if (factor != 1.0)
+        if (x0 < 0) { if (factor > 0) { target.X += -x0 / factor; target.Width -= -x0 / factor; } x0 = 0; }
+        if (y0 < 0) { if (factor > 0) { target.Y += -y0 / factor; target.Height -= -y0 / factor; } y0 = 0; }
+        if (x1 > bmpW) { if (factor > 0) target.Width -= (x1 - bmpW) / factor; x1 = bmpW; }
+        if (y1 > bmpH) { if (factor > 0) target.Height -= (y1 - bmpH) / factor; y1 = bmpH; }
+
+        Rect source = new Rect(x0, y0, Math.Max(0, x1 - x0), Math.Max(0, y1 - y0));
+        if (source.Width < 0.5 || source.Height < 0.5 || target.Width < 0.5 || target.Height < 0.5)
         {
-            double sx = (isect.X - tileOnScreenFull.X) * factor;
-            double sy = (isect.Y - tileOnScreenFull.Y) * factor;
-            source = new Rect(
-                Math.Max(0, Math.Min(sx, bmpW - 1)),
-                Math.Max(0, Math.Min(sy, bmpH - 1)),
-                Math.Max(1, Math.Min(isect.Width * factor, bmpW)),
-                Math.Max(1, Math.Min(isect.Height * factor, bmpH)));
-        }
-        else
-        {
-            source = new Rect(
-                xSrc + (isect.X - tileOnScreenFull.X),
-                ySrc + (isect.Y - tileOnScreenFull.Y),
-                isect.Width, isect.Height);
+            lock (_cacheAccess) DropCacheEntryLocked(entry);
+            return 0;
         }
 
         _host.DrawTileBitmap(entry, target, source);
@@ -1016,6 +1065,16 @@ internal sealed class TileRenderCache : IDisposable
         ushort targetRes = GetTileRes(pageNo, zoom);
         ushort maxRes = GetMaxTileRes(pageNo, 0);
         maxRes = Math.Max(maxRes, targetRes);
+
+        // Sumatra 的 pi->pageOnScreen 与 bounds 都是整数 Rect（layout / 更新区产出）。
+        // 这里同样取整，好让 target/source 全部落在整物理像素上 → factor 精确 == 1.0，
+        // 且 Win2D 设备像素 == DIP×RasterizationScale == 这里的像素 → 真正 1:1 直拷（不重采样）。
+        pageOnScreen = new Rect(
+            Math.Round(pageOnScreen.X), Math.Round(pageOnScreen.Y),
+            Math.Round(pageOnScreen.Width), Math.Round(pageOnScreen.Height));
+        bounds = new Rect(
+            Math.Round(bounds.X), Math.Round(bounds.Y),
+            Math.Round(bounds.Width), Math.Round(bounds.Height));
 
         var queue = new System.Collections.Generic.List<TilePosition> { new TilePosition(0, 0, 0) };
         int renderDelayMin = TileRenderDelay.Undefined;

@@ -2854,12 +2854,17 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         var cache = _renderCache;
         if (cache != null)
         {
-            var bounds = new Rect(0, 0, _vpW, _vpH);
+            // 瓦片引擎内部全是物理像素（与 Sumatra 同单位）：zoom = 每点物理像素数，
+            // bounds/pageOnScreen 也必须是物理像素。换算只在这里发生一次。
+            double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
+            var bounds = new Rect(0, 0, _vpW * dpi, _vpH * dpi);
+            float zoomPx = (float)(z * 96.0 / 72.0 * dpi);
             bool renderMissing = !_isSmoothZooming && !_isRightZooming;
             foreach (var (p, dest) in visible)
             {
                 ds.FillRectangle(dest, _placeholderColor);
-                try { cache.Paint(p.Index, dest, bounds, renderMissing, (float)(z * 96.0 / 72.0)); }
+                var destPx = new Rect(dest.X * dpi, dest.Y * dpi, dest.Width * dpi, dest.Height * dpi);
+                try { cache.Paint(p.Index, destPx, bounds, renderMissing, zoomPx); }
                 catch { }
             }
         }
@@ -3049,18 +3054,19 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         return pageNo >= 0 && pageNo < pages.Count ? (float)pages[pageNo].HeightPoints : 0f;
     }
 
-    /// <summary>page->zoomReal 对应物：DIP 渲染比例（z×96/72；dpi 只进出图密度，见 RenderTileAsync）。</summary>
-    float ITileRenderHost.ZoomReal(int pageNo) => (float)(CurrentZoomForKernel * 96.0 / 72.0);
+    /// <summary>dm->GetZoomReal()：每 PDF 点的【物理像素】数（z×96/72×DpiScale）。
+    /// 与 Sumatra 同单位——瓦片引擎内部不再出现 DIP。</summary>
+    float ITileRenderHost.ZoomReal(int pageNo) => (float)(CurrentZoomForKernel * 96.0 / 72.0 * _dpiScale);
 
-    double ITileRenderHost.DpiScale => _dpiScale;
-
-    Windows.Foundation.Size ITileRenderHost.ViewPortSizeDip
+    /// <summary>dm->GetViewPort().Size()：物理像素。</summary>
+    Windows.Foundation.Size ITileRenderHost.ViewPortSize
     {
-        get { lock (_lock) return new Windows.Foundation.Size(_vpW, _vpH); }
+        get { lock (_lock) return new Windows.Foundation.Size(_vpW * _dpiScale, _vpH * _dpiScale); }
     }
 
     /// <summary>pageInfo->pageOnScreen 对应物：LayoutRect×z 平移到视口坐标（含 ScrollViewer 居中补偿，
-    /// 与 ComputeVisiblePages 同式）。仅 UI 线程调用（读 Spacer 尺寸做居中补偿）。</summary>
+    /// 与 ComputeVisiblePages 同式），最后 ×DpiScale 换成物理像素（引擎内部单位）。
+    /// 仅 UI 线程调用（读 Spacer 尺寸做居中补偿）。</summary>
     Rect ITileRenderHost.PageOnScreen(int pageNo)
     {
         lock (_lock)
@@ -3069,6 +3075,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
             if (pageNo < 0 || pageNo >= pages.Count) return default;
         }
         double z = CurrentZoomForKernel;
+        double dpi = _dpiScale;
         double extentW, extentH;
         double vpW, vpH;
         double hOff, vOff;
@@ -3082,9 +3089,9 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
         var lr = _pages[pageNo].LayoutRect;
         return new Rect(
-            lr.X * z - hOff + centerX,
-            lr.Y * z - vOff + centerY,
-            lr.Width * z, lr.Height * z);
+            (lr.X * z - hOff + centerX) * dpi,
+            (lr.Y * z - vOff + centerY) * dpi,
+            lr.Width * z * dpi, lr.Height * z * dpi);
     }
 
     private bool PageVisibleLocked(int pageNo)
@@ -3138,7 +3145,9 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     }
 
     /// <summary>BlitPixmapRegion 对应物：GPU 位图惰性创建（CPU 位图仍是缓存真身，与 Sumatra 一致），
-    /// 上采样 NN / 缩小 Linear（硬性规则）。仅 UI 线程 Draw 帧内被 Paint 调用。</summary>
+    /// 上采样 NN / 缩小 Linear（硬性规则）。仅 UI 线程 Draw 帧内被 Paint 调用。
+    /// target 入参是【物理像素】（引擎单位）→ 画布是 DIP，故 ÷DpiScale；
+    /// source 是【位图像素】索引，必须原样传（一旦也除 DpiScale，源区域就错位取到 1/S 的内容）。</summary>
     void ITileRenderHost.DrawTileBitmap(BitmapCacheEntry entry, Rect target, Rect source)
     {
         var ds = _drawDs;
@@ -3154,10 +3163,12 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
             }
             catch { return; }
         }
-        // 上采样：目标(DIP) 大于源区域(px) → NN；否则 Linear。
+        // 上采样判定：目标与源同为像素单位才可比（target 传画布前才换算）。
         bool upsample = target.Width > source.Width || target.Height > source.Height;
         var interp = upsample ? CanvasImageInterpolation.NearestNeighbor : CanvasImageInterpolation.Linear;
-        try { ds.DrawImage(entry.Gpu, target, source, 1f, interp); }
+        double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
+        var targetDip = new Rect(target.X / dpi, target.Y / dpi, target.Width / dpi, target.Height / dpi);
+        try { ds.DrawImage(entry.Gpu, targetDip, source, 1f, interp); }
         catch { }
     }
 
