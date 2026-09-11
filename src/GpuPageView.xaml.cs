@@ -92,33 +92,19 @@ public sealed partial class GpuPageView : UserControl
     /// <summary>只读快照：加载时整体替换，后台线程遍历安全。</summary>
     private IReadOnlyList<GpuPageInfo> _pages = Array.Empty<GpuPageInfo>();
 
-    /// <summary>GPU 上传阶段并发上限：矢量场景内嵌位图（CanvasBitmap.CreateFromBytes）上传并发过高会
+    /// <summary>GPU 上传阶段并发上限：内核底图（CanvasBitmap.CreateFromBytes）上传并发过高会
     /// 锤击共享 D2D 设备，在 Intel 核显上触发设备级故障(0x8000FFFF/StackHash)。本信号量把 GPU 上传
-    /// 压到 GpuUploadConcurrency 路，构建并行不受影响。</summary>
+    /// 压到 GpuUploadConcurrency 路。</summary>
     private const int GpuUploadConcurrency = 10;
-    /// <summary>矢量场景并发构建上限：多页同时构建（export FFI + CanvasCommandList 录制）会吃多核 + GPU。
-    /// 大文件窗口内多页并行显著提速（打开/滚动出图快）；每页构建受引擎 slot（物理核-1）与
-    /// GpuUploadConcurrency 双重约束，不会失控。</summary>
-    private const int VectorBuildConcurrency = 4;
     /// <summary>
-    /// 单页矢量渲染状态：display list → CanvasCommandList（页面 pt 空间，GPU 命令列表，只构建一次）。
-    /// VectorSceneReady=true 时 Draw 用矩阵重放替代旧的位图合成层（平移/缩放/滚动/旋转零重建）；
-    /// 构建失败页会自然重试（下次 QueueVisiblePages 重新尝试）。dispose 必须走 UI 线程。
+    /// 单页渲染状态（纯 Sumatra 形态）：内核位图是唯一图像源。
+    /// PageRenderService（1:1 sumatrapdf-master/src/PageRenderService）负责出图、字节预算 LRU
+    /// 缓存与代际过期；PageComposite 只持有"已上传 GPU 的底图"这一份显示状态。dispose 必须走 UI 线程。
     /// </summary>
     private sealed class PageComposite
     {
-        public CanvasCommandList? VectorScene;      // 页面 pt 空间的一次性 GPU 命令列表
-        public bool VectorSceneReady;              // 已构建成功、可上屏
-        public bool VectorSceneFailed;             // 构建失败（含超限/异常），下次窗口重扫时重试
-        public bool VectorBuilding;                // 构建在途（去重，防并发重入）
-        public float VectorScenePageW, VectorScenePageH; // 命令流头部的页面 pt 尺寸
-        public long VectorBuildMs;                 // 最近一次构建耗时（OSD 诊断）
-        public long VectorSceneBytes;              // 命令流字节数（OSD/内存诊断）
-
-        // Sumatra 内核底图（PageRenderService 出图）：矢量场景构建完成前，先显示内核
-        // 渲染的全分辨率整页位图（按当前显示密度，无长边 cap），打开/快速滚动即时清晰。
-        // 内核自带字节预算 LRU 缓存与代际过期（1:1 Sumatra PageRenderService 语义）；
-        // VectorSceneReady 后底图即弃（一次性堆叠，非并行层）。
+        // Sumatra 内核底图（PageRenderService 出图）：当前显示密度全分辨率整页位图。
+        // 缩放落定（FinishZoom→NewGeneration）后旧比例底图过期 → 内核以精确新比例重渲替换。
         public CanvasBitmap? Preview;              // 内核底图（当前显示密度全分辨率）
         public bool PreviewReady;
         public bool PreviewBuilding;               // 上传在途（去重）
@@ -126,25 +112,13 @@ public sealed partial class GpuPageView : UserControl
         public double PreviewScale;                // 底图对应的 pt→px 渲染比例（判过期：≠当前比例即追新）
         public long PreviewMs;                     // 渲染+上传耗时（OSD）
     }
-    private readonly Dictionary<int, PageComposite> _pageComp = new();   // 页 → 矢量场景状态
-    // 每页矢量场景首显时刻：整页统一淡入（构建完成后一次性淡入），避免冷页从占位色闪成内容。
-    private readonly Dictionary<int, long> _pageShownAt = new();              // 页 → Stopwatch ticks
+    private readonly Dictionary<int, PageComposite> _pageComp = new();   // 页 → 内核底图状态
 
-    /// <summary>并发派发上限的下限：worker 数未知时（未初始化）仍至少并发 4，避免退回单工人。</summary>
-
-    // 缩放进行中(含收尾提交窗口)入窗的页不淡入：它们随缩放运动自然出现，
-    // 从占位色淡入会闪成"错误图像"（双击 fit↔100% 的起止瞬间尤其明显）。
-    // 以单一运动态 _isSmoothZooming 判定（弹簧运行=运动、落定=静止），不再用 320ms 尾随窗口。
     private readonly object _lock = new();
-    /// <summary>GPU 上传门（并发数见 <see cref="GpuUploadConcurrency"/>）：矢量场景内嵌位图在
-    /// CreateFromBytes 前获取、完成后释放。与 _vectorBuildGate（导出/构建限流）解耦。</summary>
+    /// <summary>GPU 上传门（并发数见 <see cref="GpuUploadConcurrency"/>）：内核底图在
+    /// CreateFromBytes 前获取、完成后释放。</summary>
     private readonly System.Threading.SemaphoreSlim _gpuUploadGate =
         new(GpuUploadConcurrency, GpuUploadConcurrency);
-
-    // 矢量场景构建队列：页号在途去重 + 构建并发上限（构建含 export FFI 与 GPU 命令列表录制，
-    // 独立限流防多页同时构建的 CPU/GPU 尖峰）。
-    private readonly HashSet<int> _vectorBuildInflight = new();
-    private readonly System.Threading.SemaphoreSlim _vectorBuildGate = new(VectorBuildConcurrency, VectorBuildConcurrency);
 
     // Sumatra 内核（PageRenderService）：单 worker 线程 + 字节预算 LRU 缓存 + 代际过期。
     // 1:1 移植 sumatrapdf-master/src/PageRenderService.{h,cpp}；外壳只发 Request / 消费缓存。
@@ -1626,7 +1600,6 @@ public sealed partial class GpuPageView : UserControl
         {
             _docGeneration++;
             DisposeAllCompositesLocked();
-            _pageShownAt.Clear();
             _window.Clear();
             _windowSet.Clear();
             _lastDirLead = double.NaN;
@@ -1927,7 +1900,7 @@ public sealed partial class GpuPageView : UserControl
 
         var old = ds.Transform;
         // System.Numerics 是行向量约定（v·M，左矩阵先作用）：页点先 ×s 缩放，再平移到
-        // dest 原点，最后绕 dest 中心补旋转 —— 与 DrawVectorScene 的放置规则完全一致。
+        // dest 原点，最后绕 dest 中心补旋转 —— 与内核底图绘制 DrawPreviewScene 的放置规则完全一致。
         // 注意勿写成 Translation*Scale：那会把 unrotOrigin 也乘 s，标注随缩放漂移。
         var m = Matrix3x2.CreateScale(s) * Matrix3x2.CreateTranslation(unrotOrigin);
         if (rot != 0)
@@ -2305,7 +2278,6 @@ public sealed partial class GpuPageView : UserControl
         {
             _docGeneration++;
             DisposeAllCompositesLocked();
-            _pageShownAt.Clear();
             _window.Clear();
             _windowSet.Clear();
             _lastDirLead = double.NaN;
@@ -2874,18 +2846,20 @@ public sealed partial class GpuPageView : UserControl
         return budget;
     }
 
-    /// <summary>释放并清空所有矢量场景（换文档/设备重建时）。须持 _lock。</summary>
+    /// <summary>清空所有页状态（换文档/设备重建时）。底图 GPU 资源走 UI 线程释放；
+    /// 此处只清引用与状态。须持 _lock。</summary>
     private void DisposeAllCompositesLocked()
     {
+        List<CanvasBitmap>? dead = null;
         foreach (var pc in _pageComp.Values)
         {
-            if (pc.VectorScene != null) { try { pc.VectorScene.Dispose(); } catch { } pc.VectorScene = null; }
-            pc.VectorSceneReady = false;
-            pc.VectorSceneFailed = false;
-            pc.VectorBuilding = false;
+            if (pc.Preview != null) { (dead ??= new()).Add(pc.Preview); pc.Preview = null; }
+            pc.PreviewReady = false;
+            pc.PreviewBuilding = false;
         }
         _pageComp.Clear();
-        _vectorBuildInflight.Clear();
+        if (dead != null)
+            ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { foreach (var b in dead) { try { b.Dispose(); } catch { } } });
     }
 
     /// <summary>
@@ -2917,30 +2891,26 @@ public sealed partial class GpuPageView : UserControl
             if (_pageComp.Count <= budget) break;
             if (_pageComp.Remove(idx, out var pc))
             {
-                // 场景含 GPU 命令列表：释放须走 UI 线程（上一帧可能仍在命令队列中引用），
-                // 故只收集、交调用方在【UI 线程】释放。
-                if (pc.VectorScene != null) { (evicted ??= new()).Add(pc.VectorScene); pc.VectorScene = null; }
+                // 底图是 GPU 资源：释放须走 UI 线程（上一帧可能仍在命令队列中引用），
+                // 故只收集、交调用方在【UI 线程】释放。内核 CPU 缓存不动（LRU 自管）。
                 if (pc.Preview != null) { (evicted ??= new()).Add(pc.Preview); pc.Preview = null; }
-                pc.VectorSceneReady = false;
-                pc.VectorBuilding = false;
                 pc.PreviewReady = false;
                 pc.PreviewBuilding = false;
-                _vectorBuildInflight.Remove(idx);
             }
         }
         return evicted;
     }
 
     /// <summary>
-    /// 按【滑动窗口】构建矢量场景：窗口内未构建（含失败待重试）且非在途的页 → 排队构建
-    /// （可见页在前），并回收滑出视口的场景缓存。UI 线程调用。
+    /// 维护【滑动窗口】并回收滑出视口的页状态。UI 线程调用。
+    /// 底图出图完全由 Sumatra 内核负责（Draw 未命中即 Request(Visible) + current±1/±2 预取），
+    /// 本函数只做窗口构建/推进与 GPU 侧回收（1:1 DocumentView 无此函数——窗口回收是外壳职责）。
     /// </summary>
     private void QueueVisiblePages()
     {
         var pages = _pages;
         if (pages.Count == 0 || RenderService == null) return;
 
-        List<int> buildQueue = new();
         lock (_lock)
         {
             double zoom = _zoom;
@@ -2948,37 +2918,22 @@ public sealed partial class GpuPageView : UserControl
             _lastQueueLead = IsHorizontalLayout ? _visLeft : _visTop;
             _lastQueueZoom = zoom;
 
-            // 出图分工（Sumatra 内核版）：
-            //   * 底图（全分辨率位图）由 PageRenderService 负责——Draw 帧未命中即 Request(Visible)、
-            //     尾部 current±1/±2 预取，全部在 Draw/DocumentView 路径内，本函数不再管；
-            //   * 矢量构建（高清升级）仍由外壳滑动窗口驱动，窗口预算由 BuildWindowLocked 约束。
+            // 窗口内页惰性建立状态条目（底图未到前 Draw 显示占位色）。
             foreach (var idx in _window)
             {
-                if (!_pageComp.TryGetValue(idx, out var bpc))
+                if (!_pageComp.ContainsKey(idx))
                 {
-                    bpc = new PageComposite();   // 页首入窗：惰性创建状态条目不构建不占位
-                    _pageComp[idx] = bpc;
-                }
-                if (bpc.VectorSceneReady) continue;
-
-                // 高清构建：未在途即排队（可见页/深页都建，窗口预算已由 BuildWindowLocked 约束）。
-                if (!bpc.VectorBuilding && !_vectorBuildInflight.Contains(idx))
-                {
-                    bpc.VectorBuilding = true;
-                    _vectorBuildInflight.Add(idx);
-                    buildQueue.Add(idx);
+                    _pageComp[idx] = new PageComposite();
                 }
             }
 
-            // 窗口前移：滑出窗口的页当帧回收场景（TrimTilesLocked 内部按内存预算执行）。
-            // 场景含 GPU 命令列表，释放须走 UI 线程（上一帧命令可能仍在 GPU 队列中）。
+            // 窗口前移：滑出窗口的页当帧回收底图（TrimTilesLocked 内部按内存预算执行）。
+            // 底图是 GPU 资源，释放须走 UI 线程（上一帧可能仍在命令队列中引用）。
             var evictedPages = TrimTilesLocked();
             if (evictedPages != null)
                 ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { foreach (var d in evictedPages) { try { d.Dispose(); } catch { } } });
         }
-        // 锁外派发：矢量构建（高清升级）。底图请求由 Draw 帧与内核预取负责（1:1 Sumatra 语义）。
         _lastRenderActivityTicks = Stopwatch.GetTimestamp();
-        foreach (var idx in buildQueue) _ = BuildVectorSceneAsync(idx);
         EnsureWorkerCacheFlush();
     }
 
@@ -3013,14 +2968,8 @@ public sealed partial class GpuPageView : UserControl
                 await Task.Delay(WorkerCacheFlushIntervalMs).ConfigureAwait(false);
                 try
                 {
-                    // 锁定读在途构建；未滚动/缩放 + 无在途 + 停足够久才触发；另用冷却限制重放频率
+                    // 未滚动/缩放 + 内核无在途渲染 + 停足够久才触发；另用冷却限制重放频率
                     bool busyZoom = _isSmoothZooming || _isWheelScrolling;
-                    lock (_lock)
-                    {
-                        // 矢量构建与内核渲染都在用引擎：任一在途都不能 reload，否则正在出图的
-                        // 页面被重开文档打断/作废（大文件首开尤其明显）→ 出图更慢。
-                        if (_vectorBuildInflight.Count > 0) { continue; }
-                    }
                     if (_renderKernel?.HasInflight ?? false) { continue; }
                     if (busyZoom) { continue; }
                     long idleMs = (long)((Stopwatch.GetTimestamp() - _lastRenderActivityTicks) * 1000.0 / Stopwatch.Frequency);
@@ -3057,7 +3006,6 @@ public sealed partial class GpuPageView : UserControl
         lock (_lock)
         {
             DisposeAllCompositesLocked();
-            _pageShownAt.Clear();
             _window.Clear();
             _windowSet.Clear();
             _lastDirLead = double.NaN;
@@ -3186,37 +3134,26 @@ public sealed partial class GpuPageView : UserControl
 
         if (!ComputeVisiblePages(out double z, out var visible)) return;
 
-        // 画所有可见页（矢量场景：每页一次 GPU 命令列表按视图矩阵重放 → 无瓦片/无密度阶梯）。
-        bool fading = false;
-        long nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        // 画所有可见页（纯 Sumatra 形态：内核位图是唯一图像源——1:1 DocumentView.OnPaint）。
         foreach (var (p, dest) in visible)
         {
             var unrot = PageUnrotatedRect(p, dest);
             ds.FillRectangle(dest, _placeholderColor);
 
-            // 场景读写与 dispose 在锁内互斥；绘制本页时构建不会插入 → 无并发写。
+            // 底图读写与 dispose 在锁内互斥；绘制本页时上传不会插入 → 无并发写。
             lock (_lock)
             {
                 _pageComp.TryGetValue(p.Index, out var pc);
-                if (pc == null) continue;
-
-                // 矢量直绘：场景已就绪 → 一次性 GPU 命令列表按当前视图矩阵重放，
-                // 平移/缩放/滚动/旋转只改变换，零重建（无密度阶梯、无瓦片、无底座）。
-                if (pc.VectorSceneReady && pc.VectorScene != null)
+                if (pc == null)
                 {
-                    float pageAlpha = 1f;
-                    if (_pageShownAt.TryGetValue(p.Index, out long shownAt) && shownAt != 0 && !_isSmoothZooming)
-                    {
-                        double mel = (nowTicks - shownAt) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-                        if (mel < FadeInMs) { pageAlpha = Math.Clamp((float)(mel / FadeInMs), 0f, 1f); fading = true; }
-                    }
-                    DrawVectorScene(ds, pc, unrot, pageAlpha, z);
+                    // 窗口状态尚未建立（罕见，如窗口扫描晚于首帧）：仍向内核请求，避免可见页空白。
+                    RequestKernelRender(p.Index, z, PageRenderPriority.Visible);
                     continue;
                 }
 
-                // 场景尚未就绪：有内核底图 → 画底图（Sumatra OnPaint 的 DrawPage 命中分支）。
                 if (pc.Preview != null)
                 {
+                    // DrawPage 命中：画底图。
                     DrawPreviewScene(ds, pc, unrot, z);
                     // 底图比例 ≠ 当前显示比例 → 已过期：照旧画旧图防闪，同时请求精确新比例重渲
                     // （内核 Request 幂等去重；新图就绪由 OnKernelPageReady 换上）。
@@ -3226,8 +3163,8 @@ public sealed partial class GpuPageView : UserControl
                     continue;
                 }
 
-                // 没有任何可显示的：保持占位色 + 请求内核出图
-                //（1:1 DocumentView：DrawPage 未命中 → Request(key, Visible)，构建成功帧会 Invalidate 重绘）。
+                // DrawPage 未命中 → Request(key, Visible)（1:1 DocumentView.OnPaint；
+                // 缓存命中由 RequestKernelRender 内直接补上传，构建成功帧会 Invalidate 重绘）。
                 RequestKernelRender(p.Index, z, PageRenderPriority.Visible);
             }
         }
@@ -3265,37 +3202,31 @@ public sealed partial class GpuPageView : UserControl
             }
         }
 
-        // 矢量直绘 OSD 调试层（Tuning.VectorDebugOverlay=1）：逐页显示状态与构建耗时/场景字节。
+        // 内核底图 OSD 调试层（Tuning.VectorDebugOverlay=1）：逐页显示底图尺寸/比例/耗时与内核缓存水位。
         if (Tuning.VectorDebugOverlay != 0)
         {
             try
             {
                 float y0 = 4f;
-                long totalSceneBytes = 0;
-                int readyCount = 0, buildingCount = 0, failCount = 0;
+                int readyCount = 0, staleCount = 0;
+                double ks0 = KernelScale(z);
                 lock (_lock)
                 {
                     foreach (var (p, _) in visible)
                     {
                         if (!_pageComp.TryGetValue(p.Index, out var opc)) continue;
-                        string st = opc.VectorSceneReady ? "V-Rdy" : opc.VectorBuilding ? "V-Bld" : opc.VectorSceneFailed ? "V-Fail" : "V-?";
-                        ds.DrawText($"p{p.Index + 1} {st} b={opc.VectorBuildMs}ms s={opc.VectorSceneBytes / 1024}KB",
+                        bool stale = opc.Preview == null || Math.Abs(opc.PreviewScale - ks0) > ks0 * 1e-4;
+                        string st = opc.Preview == null ? "K-None" : stale ? "K-Stale" : "K-Rdy";
+                        ds.DrawText($"p{p.Index + 1} {st} {opc.PreviewW}x{opc.PreviewH} s={opc.PreviewScale:0.###} t={opc.PreviewMs}ms",
                             new System.Numerics.Vector2(4, y0), Microsoft.UI.Colors.Yellow);
                         y0 += 14f;
-                        totalSceneBytes += opc.VectorSceneBytes;
-                        if (opc.VectorSceneReady) readyCount++; else if (opc.VectorBuilding) buildingCount++; else if (opc.VectorSceneFailed) failCount++;
+                        if (opc.Preview != null) { if (stale) staleCount++; else readyCount++; }
                     }
                 }
-                ds.DrawText($"z={z * 100:0.#}% ready={readyCount} bld={buildingCount} fail={failCount} vec={totalSceneBytes / (1024 * 1024)}MB",
+                ds.DrawText($"z={z * 100:0.#}% rdy={readyCount} stale={staleCount} cache={_renderKernel?.CacheBytes / (1024 * 1024) ?? 0}MB",
                     new System.Numerics.Vector2(4, y0), Microsoft.UI.Colors.Orange);
             }
             catch { }
-        }
-
-        // 有页在淡入 → 下一帧继续重画(仅淡入期间，结束自动停)。
-        if (fading)
-        {
-            sender.Invalidate();
         }
     }
 
@@ -3390,50 +3321,8 @@ public sealed partial class GpuPageView : UserControl
         return new Rect(cx - w / 2.0, cy - h / 2.0, w, h);
     }
 
-
-    /// <summary>
-    /// 按当前视图矩阵重放页的矢量场景（CanvasCommandList，页面 pt 空间）。与标注
-    /// ApplyPageTransform 同刻度：s = zoom×96/72（pt→DIP），先缩放、平移到未旋转矩形
-    /// 原点，绕 unrot 中心补旋转。任意缩放倍率都是按该矩阵现算的矢量 —— 无密度阶梯、无重建。
-    /// </summary>
-    private void DrawVectorScene(CanvasDrawingSession ds, PageComposite pc, Rect unrot, float alpha, double z)
-    {
-        int rot = _rotation;
-        // z 来自 ComputeVisiblePages（当前视图缩放，GetViewState 镜像）；s = pt→DIP。
-        double s = z * 96.0 / 72.0;
-        double cx = unrot.X + unrot.Width / 2.0;
-        double cy = unrot.Y + unrot.Height / 2.0;
-        // 先铺纸：矢量场景只含内容路径、背景透明，不铺纸会让页面露出画布/占位底色（深色主题下变"反色文档"）。
-        // 语义等价于 PDF 白纸不随主题变。
-        ds.FillRectangle(unrot, Microsoft.UI.Colors.White);
-        var m = System.Numerics.Matrix3x2.CreateScale((float)s)
-              * System.Numerics.Matrix3x2.CreateTranslation((float)unrot.X, (float)unrot.Y);
-        if (rot != 0)
-            m *= System.Numerics.Matrix3x2.CreateRotation(
-                (float)(rot * Math.PI / 180.0), new System.Numerics.Vector2((float)cx, (float)cy));
-
-        var old = ds.Transform;
-        ds.Transform = m * old;
-        var full = new Rect(0, 0, pc.VectorScenePageW, pc.VectorScenePageH);
-        // HighQualityCubic：命令列表整体上屏缩放时保留位图像素细节（Linear 双线性
-        // 在超比例缩放下欠采样 → 图例/Logo 文字发细发糊）。
-        ds.DrawImage(pc.VectorScene, full, full, opacity: 1f, Microsoft.Graphics.Canvas.CanvasImageInterpolation.HighQualityCubic);
-        ds.Transform = old;
-
-        // 淡入 = 【整页统一交叉淡化】：白纸 + 内容已按全不透明度画好，再按 (1-alpha)
-        // 罩一层占位色 → 全页每像素 = 占位色×(1-alpha) + 页面×alpha，各元素同步变亮。
-        // 不可用"纸色渐变 + 内容按 alpha 叠加"——那不透明的白底图块（如页眉 logo/
-        // 公司名白底位图）会按自身不透明度提前浮出暗纸，形成"白底长方形凸出"的观感。
-        if (alpha < 1f)
-        {
-            float a = Math.Clamp(1f - alpha, 0f, 1f);
-            ds.FillRectangle(unrot, Windows.UI.Color.FromArgb(
-                (byte)(a * 255f), _placeholderColor.R, _placeholderColor.G, _placeholderColor.B));
-        }
-    }
-
-    /// <summary>低清预览绘制：与 DrawVectorScene 相同的 y 翻转放置矩阵，位图按预览像素平铺到页面区域。
-    /// 预览是瓦片期「底座」的回归 —— 矢量构建完成前先出图，观感接近旧版「先低清后高清」的即时性。</summary>
+    /// <summary>内核底图绘制：s = zoom×96/72（pt→DIP），先缩放、平移到未旋转矩形原点，
+    /// 绕 unrot 中心补旋转——与标注 ApplyPageTransform 同刻度。位图按渲染像素铺满页面 pt 区域。</summary>
     private void DrawPreviewScene(CanvasDrawingSession ds, PageComposite pc, Rect unrot, double z)
     {
         int rot = _rotation;
@@ -3455,119 +3344,6 @@ public sealed partial class GpuPageView : UserControl
         try { ds.DrawImage(pc.Preview, dstRect, srcRect, 1f, CanvasImageInterpolation.Linear); }
         catch { }
         ds.Transform = old;
-    }
-
-
-
-    /// <summary>
-    /// 后台构建某页的矢量场景（display list → 命令流 → CanvasCommandList），成功后锁内提交。
-    /// 提交失败/超限 → VectorSceneFailed，由 QueueVisiblePages 下次重扫自然重试。
-    /// GPU 资源（场景）走 DispatcherQueue 在 UI 线程释放。
-    /// </summary>
-    private async Task BuildVectorSceneAsync(int pageIndex)
-    {
-        int gen;
-        lock (_lock) { gen = _docGeneration; }
-        var svc = RenderService;
-        if (svc == null) return;
-        var device = ScreenCanvas?.Device; // 设备快照，避免渲染期间设备重建
-        if (device == null) return;
-
-        try { await _vectorBuildGate.WaitAsync().ConfigureAwait(false); }
-        catch { return; }
-        var buildSw = System.Diagnostics.Stopwatch.StartNew();
-        try
-        {
-            byte[]? stream = await svc.ExportPageCommandsAsync((uint)pageIndex).ConfigureAwait(false);
-
-            CanvasCommandList? scene = null;
-            float pw = 0f, ph = 0f;
-            int imgCnt = 0, pathCnt = 0;
-            string skipSum = "";
-            if (stream != null && stream.Length > 0)
-            {
-                try
-                {
-                    lock (_lock) { if (gen != _docGeneration) { stream = null; } }
-                }
-                catch { stream = null; }
-
-                if (stream != null)
-                {
-                    scene = await Task.Run(() =>
-                        VectorSceneBuilder.Build(device, stream,
-                            len => _gpuUploadGate.WaitAsync().ContinueWith(_ => _gpuUploadGate.Release()),
-                            out pw, out ph, out imgCnt, out pathCnt, out skipSum)
-                    ).ConfigureAwait(false);
-                }
-            }
-            buildSw.Stop();
-
-            // 锁内提交 / 失败置位（dispose 走 UI 线程）。
-            bool invalidate = false;
-            bool needDispose = false;
-            lock (_lock)
-            {
-                if (gen != _docGeneration) needDispose = true;                  // 换文档/设备重建：结果作废
-                else if (!_pageComp.TryGetValue(pageIndex, out var pc)) needDispose = true; // 页已淘汰
-                else if (scene == null)
-                {
-                    pc.VectorBuilding = false;
-                    pc.VectorSceneFailed = true;
-                    invalidate = true;   // 失败 → 触发重扫，下次窗口重扫自然重试
-                }
-                else
-                {
-                    pc.VectorScene?.Dispose();  // 理论为空，防御
-                    pc.VectorScene = scene;
-                    pc.VectorSceneReady = true;
-                    pc.VectorSceneFailed = false;
-                    pc.VectorBuilding = false;
-                    pc.VectorScenePageW = pw;
-                    pc.VectorScenePageH = ph;
-                    pc.VectorBuildMs = buildSw.ElapsedMilliseconds;
-                    pc.VectorSceneBytes = stream?.Length ?? 0;
-                    // 矢量就绪：低清预览完成使命，弃用释放（同一页再滚回时重建场景即可，无需预览残留）。
-                    var deadPreview = pc.Preview;
-                    pc.Preview = null;
-                    pc.PreviewReady = false;
-                    pc.PreviewBuilding = false;
-                    if (deadPreview != null)
-                        ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { deadPreview.Dispose(); } catch { } });
-                    // 冷页首次出图：补淡入时间戳（已有条目不重复淡入）
-                    if (!_pageShownAt.ContainsKey(pageIndex))
-                        _pageShownAt[pageIndex] = System.Diagnostics.Stopwatch.GetTimestamp();
-                    invalidate = true;
-                }
-            }
-            if (needDispose)
-            {
-                scene?.Dispose();
-            }
-            else if (invalidate)
-            {
-                // 置位/失效在后台即可：重扫渲染该页（下次 QueueVisiblePages 已就绪页直接上屏）。
-                InvalidateBoth();
-            }
-        }
-        catch
-        {
-            // 构建异常：置失败标记，下次 QueueVisiblePages 自然重试。
-            lock (_lock)
-            {
-                if (_pageComp.TryGetValue(pageIndex, out var pc))
-                {
-                    pc.VectorBuilding = false;
-                    pc.VectorSceneFailed = true;
-                }
-            }
-            InvalidateBoth();
-        }
-        finally
-        {
-            _vectorBuildGate.Release();
-            lock (_lock) { _vectorBuildInflight.Remove(pageIndex); }
-        }
     }
 
     // ---------------- Sumatra 内核（PageRenderService）外壳接线 ----------------
@@ -3614,7 +3390,7 @@ public sealed partial class GpuPageView : UserControl
             bool schedule = false;
             lock (_lock)
             {
-                if (_pageComp.TryGetValue(pageNo, out var pc) && !pc.VectorSceneReady &&
+                if (_pageComp.TryGetValue(pageNo, out var pc) &&
                     !pc.PreviewBuilding && !(pc.Preview != null && pc.PreviewScale == key.Zoom))
                 {
                     pc.PreviewBuilding = true;
@@ -3640,7 +3416,7 @@ public sealed partial class GpuPageView : UserControl
         lock (_lock)
         {
             if (_windowSet.Contains(key.PageNo) &&
-                _pageComp.TryGetValue(key.PageNo, out var pc) && !pc.VectorSceneReady &&
+                _pageComp.TryGetValue(key.PageNo, out var pc) &&
                 !pc.PreviewBuilding && !(pc.Preview != null && pc.PreviewScale == key.Zoom))
             {
                 pc.PreviewBuilding = true;   // 与 Draw 帧的缓存命中上传共用同一在途去重标记
@@ -3692,12 +3468,7 @@ public sealed partial class GpuPageView : UserControl
             else
             {
                 pc.PreviewBuilding = false; // 条目存活：无论下面走哪个分支都要放行后续上传
-                if (pc.VectorSceneReady)
-                {
-                    // 矢量已就绪：底图已完成使命，弃（免得被已就绪页白占显存）。
-                    ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { bmp!.Dispose(); } catch { } });
-                }
-                else if (pc.Preview != null && pc.PreviewScale == key.Zoom)
+                if (pc.Preview != null && pc.PreviewScale == key.Zoom)
                 {
                     // 迟到的重复通知（同键已上屏）：弃新保旧。
                     ScreenCanvas?.DispatcherQueue?.TryEnqueue(() => { try { bmp!.Dispose(); } catch { } });
