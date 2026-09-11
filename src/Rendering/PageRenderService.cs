@@ -111,6 +111,7 @@ internal sealed class PageRenderService : IDisposable
         };
         worker.Start();
         service._worker = worker;
+        KernelDebugLog.Log($"create ok pages={pageDimsPt.Length / 2} maxBytes={maxBytes}");
         return service;
     }
 
@@ -164,6 +165,9 @@ internal sealed class PageRenderService : IDisposable
             if (_stopping || FindCachedLocked(key) >= 0 ||
                 (_hasActive && _activeKey.Equals(key)))
             {
+#if DEBUG
+                KernelDebugLog.Log($"request-skip p={key.PageNo} z={key.Zoom} stopping={_stopping} cached={FindCachedLocked(key) >= 0} active={_hasActive && _activeKey.Equals(key)}");
+#endif
                 return;
             }
             PageRenderPolicyRequest request;
@@ -172,6 +176,7 @@ internal sealed class PageRenderService : IDisposable
             request.Generation = _generation;
             request.Serial = ++_serial;
             PageRenderPolicy.Upsert(_requests, request);
+            KernelDebugLog.Log($"request p={key.PageNo} z={key.Zoom} prio={priority} queued={_requests.Count}");
             Monitor.Pulse(_mutex);
         }
     }
@@ -242,10 +247,12 @@ internal sealed class PageRenderService : IDisposable
                     w = bw;
                     h = bh;
                 }
+                KernelDebugLog.Log($"render p={request.Key.PageNo} {rw}x{rh} ok={(pixels != null)}");
             }
-            catch
+            catch (Exception ex)
             {
                 pixels = null;
+                KernelDebugLog.Log($"render-EX p={request.Key.PageNo} {ex.GetType().Name}: {ex.Message}");
             }
 
             bool accepted = false;
@@ -256,6 +263,7 @@ internal sealed class PageRenderService : IDisposable
                 {
                     accepted = AddToCacheLocked(request.Key, pixels, w, h);
                 }
+                KernelDebugLog.Log($"accept p={request.Key.PageNo} ok={accepted} gen={request.Generation}/{_generation} cacheBytes={_cacheBytes}");
             }
             if (accepted)
             {
@@ -269,10 +277,16 @@ internal sealed class PageRenderService : IDisposable
     private bool AddToCacheLocked(PageRenderKey key, byte[] pixels, int width, int height)
     {
         long bytes = (long)width * height * 4;
-        if (bytes <= 0 || bytes > _maxBytes)
+        if (bytes <= 0)
         {
             return false; // Sumatra frees the pixmap here; GC frees ours
         }
+        // Sumatra 原版：bytes > maxBytes → 拒绝入缓存（结果作废，DrawPage 恒未命中）。
+        // Glance 面向大型杂志 + 4K/高 DPI：fit-width 单页位图即可超过 96MB 预算，按原样拒绝
+        // 会让该页陷入"未命中→Request→渲染→拒绝→无通知"的死循环 → 永久空白占位。
+        // 画质不容妥协 → 超预算单页照常入缓存：下面的驱逐循环清旧条目但【绝不驱逐受保护的
+        // 新条目】（腾不出空间即 break），故内存上界 = maxBytes + 最大单页，语义差异仅此一处。
+        // （另：rw/rh 已在渲染侧 clamp 到 16384，单页最坏 1GB 仅存在于病态高倍率。）
         int old = FindCachedLocked(key);
         if (old >= 0)
         {
@@ -350,6 +364,7 @@ internal sealed class PageRenderService : IDisposable
     // fire-and-forget (one callback per accepted render); the shell re-checks the cache.
     private void PostNotify(PageRenderKey key)
     {
+        KernelDebugLog.Log($"notify p={key.PageNo}");
         _dispatcher.TryEnqueue(() => _onPageReady(key));
     }
 
