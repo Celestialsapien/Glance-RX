@@ -1571,19 +1571,109 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// <summary>当前旋转角（度）。</summary>
     public int RotationDegrees => _rotation;
 
-    /// <summary>顺时针旋转 90°。矢量场景只记录未旋转坐标、绘制时 GPU 变换 → 旋转无需重建场景。</summary>
+    /// <summary>顺时针旋转 90°。位图与缓存都按【未旋转页帧】分键（rotation 恒 0）→ 旋转只需
+    /// 在 DrawingSession 上补一次 CreateRotation，不重建任何瓦片。
+    ///
+    /// 锚点（与 Sumatra 的有意分歧，已文档化）：Sumatra 的 DisplayModel::RotateBy 收尾是
+    /// `GoToPage(currPageNo, 0)`（锚到页首）——因为它的位图把 rotation 烘进出图，转到任何角度
+    /// 都得整页重出，锚在哪都无所谓。Glance 的位图与 rotation 无关，锚到页首会把整屏可见区换掉：
+    /// 放大态下几乎每一颗可见瓦片都变成"没渲染过的新瓦片"→ 全屏先发糊再变清晰（实测症状）。
+    /// 这里改成【让视口中心那个页点在旋转后原地不动】：新可见区与旧可见区重心重合，
+    /// 180° 完全复用已缓存瓦片（零请求），90/270° 只剩旋转外扩的两条带需要出图。</summary>
     public void RotateClockwise()
     {
         var pages = _pages;
         if (pages.Count == 0) return;
+        if (_isSmoothZooming) StopSmoothZoom();   // 与 GoToPage 同：先落定插值态，避免与缩放引擎抢视图
+
         int anchor = CurrentPageIndex;
+        double z = _liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor;
+        if (z <= 0) z = 1.0;
+
+        // 旋转前：记录【视口中心】在锚定页内的相对位置（0..1，未旋转页帧）。
+        bool haveAnchor = ComputeViewAnchor(anchor, z, out double fx, out double fy);
+
         _rotation = (_rotation + 90) % 360;
-        // 场景按未旋转页记录、绘制时套旋转 → 旋转无需清空任何缓存，直接复用。
         RecomputeLayout(pages);
-        GoToPage(anchor);            // 锚定旋转前的当前页，避免视口飘走
-        UpdateVisibleRange();
+
+        if (haveAnchor && RestoreViewAnchor(anchor, z, fx, fy, out double hOff, out double vOff))
+        {
+            _scrollH.Reset(hOff);
+            _scrollV.Reset(vOff);
+            SyncLiveView(hOff, vOff, z);
+            AbandonZoomCommitWindow();
+            // 缩放+偏移原子落地（z 非 null）；随后立即按目标播种 _vis*，不等 ChangeView 异步回吐
+            // （否则 QueueVisiblePages 会按旧视口算可见页 → 排了非可见页、漏了可见页 = 白重出）。
+            Viewer.ChangeView(hOff, vOff, (float)z, disableAnimation: true);
+            SetVisibleRangeFor(hOff, vOff, z);
+        }
+        else
+        {
+            // 视口中心不在锚定页内（跨页缝/页外）→ 退回 Sumatra 的页首对齐；其内部已播种可见范围。
+            GoToPage(anchor);
+            return;
+        }
         QueueVisiblePages();
         InvalidateBoth();
+    }
+
+    /// <summary>记录【视口中心】对应的页内相对位置 (0..1，未旋转页帧)。几何与 ComputeVisiblePages /
+    /// ITileRenderHost.PageOnScreen 同式 —— 三者必须同源，否则锚点与绘制/请求的页帧对不上。
+    /// 返回 false = 视口中心不在该页内（跨页缝/页比视口小且偏心），调用方走页首对齐。</summary>
+    private bool ComputeViewAnchor(int pageNo, double z, out double fx, out double fy)
+    {
+        fx = fy = 0.5;
+        var pages = _pages;
+        if (pageNo < 0 || pageNo >= pages.Count) return false;
+
+        double vpW, vpH, hOff, vOff;
+        lock (_lock) { vpW = _vpW; vpH = _vpH; hOff = _liveH; vOff = _liveV; }
+        if (vpW <= 0 || vpH <= 0) return false;
+
+        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
+        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
+        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        var lr = pages[pageNo].LayoutRect;
+        var dest = new Rect(centerX + lr.X * z - hOff, centerY + lr.Y * z - vOff,
+            lr.Width * z, lr.Height * z);
+        var un = PageUnrotatedRect(dest);
+        if (un.Width <= 0 || un.Height <= 0) return false;
+
+        fx = (vpW / 2.0 - un.X) / un.Width;
+        fy = (vpH / 2.0 - un.Y) / un.Height;
+        return fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1;
+    }
+
+    /// <summary>反解偏移：让未旋转页矩形里相对位置 (fx, fy) 的点落在视口中心（= 旋转前后同一页点
+    /// 原地不动）。坐标全部用【未旋转页帧】的页尺寸（旋转只交换呈现宽高，页内容尺寸不变）。</summary>
+    private bool RestoreViewAnchor(int pageNo, double z, double fx, double fy,
+        out double hOff, out double vOff)
+    {
+        hOff = vOff = 0;
+        var pages = _pages;
+        if (pageNo < 0 || pageNo >= pages.Count) return false;
+
+        double vpW, vpH;
+        lock (_lock) { vpW = _vpW; vpH = _vpH; }
+        if (vpW <= 0 || vpH <= 0) return false;
+
+        var p = pages[pageNo];
+        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
+        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
+        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+
+        // 未旋转页帧的页尺寸（DIP）：旋转不改变页内容尺寸，只是呈现时被交换。
+        double uw = p.WidthPoints * 96.0 / 72.0 * z;
+        double uh = p.HeightPoints * 96.0 / 72.0 * z;
+        if (uw <= 0 || uh <= 0) return false;
+
+        // 目标：未旋转页矩形的中心 → 由 (fx, fy) 反推（中心 == 旋转后 dest 中心，同 PageUnrotatedRect）。
+        double needCenterX = vpW / 2.0 - (fx - 0.5) * uw;
+        double needCenterY = vpH / 2.0 - (fy - 0.5) * uh;
+        var lr = p.LayoutRect;
+        hOff = Math.Max(0, centerX + lr.X * z + lr.Width * z / 2.0 - needCenterX);
+        vOff = Math.Max(0, centerY + lr.Y * z + lr.Height * z / 2.0 - needCenterY);
+        return true;
     }
 
     // ---------------- 标注叠加层（GPU Phase 5：五模式移植） ----------------
@@ -3042,12 +3132,6 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
 
     /// <summary>当前绘制帧的 DrawingSession（DrawTileBitmap 在 Paint 期间使用；仅 UI 线程 Draw 帧内非空）。</summary>
     private CanvasDrawingSession? _drawDs;
-
-    private void CreateRenderCache()
-    {
-        ShutdownRenderCache();
-        _renderCache = new TileRenderCache(this, DispatcherQueue);
-    }
 
     /// <summary>DisplayModel 析构对应物：CancelRenderingBlocking + FreeForDisplayModel + Dispose。</summary>
     private void ShutdownRenderCache()

@@ -533,19 +533,19 @@ internal sealed class TileRenderCache : IDisposable
     /// RenderCache::GetTileRes 1:1：factorAvg = sqrt(fw×fh)（pixelbox/maxTileSize 几何均值），
     /// fit-width/fit-page 或整页小于视口时减半（Glance 无 zoomVirtual 概念，fit 态被几何条件
     /// 覆盖：fit-width 时 pixelbox.dx == viewPort.dx）；res = ceil(log2(factorAvg))，上限 30。
+    ///
+    /// ⚠ 本函数【不得】依赖旋转角。Sumatra 比的是旋转后的 pixelbox 与 viewport，那是因为它的
+    /// 位图把 rotation 烘进出图（pixelbox 与 pageOnScreen 本就同帧）；Glance 的位图/瓦片恒在
+    /// 未旋转页帧，必须用未旋转 pixelbox 比未旋转 viewport。一旦让 res 随角度变化，转到一个
+    /// 角度就会把整个【目标层】判废（targetRes 变 → 该角度全部瓦片 miss → 替身发糊 → 重出），
+    /// 表现为"每个角度首次进入都要重渲染一遍、且与 0° 各自独立"。
+    /// （几何均值 sqrt(fw×fh) 对 W/H 交换本来就不变，唯一在意朝向的是下面那条 fit 条件。）
     /// </summary>
     public ushort GetTileRes(int pageNo, float? zoom = null)
     {
         double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
         float zv = zoom ?? _host.ZoomReal(pageNo);
         var viewPort = _host.ViewPortSize;
-
-        // Sumatra 比的是【旋转后】的 pixelbox 与 viewport。Glance 的 pixelbox 是未旋转的，
-        // 90/270 时把 viewport 一并交换，比较结果与 Sumatra 逐位等价（几何均值对 W/H 交换不变，
-        // 只有下面那条 fit 条件在意朝向）。180 朝向不变，无需处理。
-        int rot = _host.Rotation % 360;
-        if (rot == 90 || rot == 270)
-            viewPort = new Size(viewPort.Height, viewPort.Width);
 
         double pixelW = ptW * zv, pixelH = ptH * zv;   // 物理像素（与 maxTileSize 同单位）
 
