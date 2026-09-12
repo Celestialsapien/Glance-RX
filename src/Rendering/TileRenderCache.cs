@@ -35,6 +35,12 @@ namespace Glance.Rendering;
 //     物理像素数。不得在本文件内出现 DIP。DIP 只存在于外壳的两个边界：
 //     ITileRenderHost 的实现（取出时 ×DpiScale）与 DrawTileBitmap（target 传
 //     画布前 ÷DpiScale；source 保持位图像素）。
+//   * 旋转：Sumatra 把 rotation 烘进出图（RenderPage 用 viewctm(pageNo,zoom,rotation)），
+//     故其 tile 矩形/pageOnScreen/pageRect 全在旋转后帧，且缓存按 rotation 分键。
+//     Glance 的原生出图接口只接受【未旋转】device 空间 → 引擎内部统一用未旋转页帧，
+//     旋转由外壳在 DrawingSession 上补一次（与标注层 ApplyPageTransform 同约定），
+//     缓存恒按 rotation=0 分键。代价 = 所有 tile 几何都要把视口换算回页帧
+//     （PageFrameViewPort）；收益 = 转屏不需要重渲染。
 //     ⚠ 历史坑（本文件曾因此出现"右侧缺失 + 发糊 + 瓦片错位"三个症状）：
 //       把 tileOnScreen 做成 DIP、却把 DIP 偏移直接当位图源索引，且缺整数对齐
 //       → factor 恒为 0.9998 之类，走 Linear 重采样；源索引又少了 DpiScale 倍。
@@ -121,7 +127,10 @@ internal interface ITileRenderHost
     Rect PageOnScreen(int pageNo);
     bool PageVisible(int pageNo);
     bool PageVisibleNearby(int pageNo);
-    /// <summary>外壳呈现层旋转角（0/90/180/270；出图恒按未旋转，显示端映射）。</summary>
+    /// <summary>外壳呈现层旋转角（0/90/180/270）。出图与全部 tile 几何恒在【未旋转页帧】，
+    /// 外壳负责把这份几何绕页中心转 rot 度画到屏幕上；本引擎只用它换算视口外接矩形
+    /// （PageFrameViewPort）与 GetTileRes 的 fit 朝向。因为位图与旋转无关，
+    /// 转屏【不作废缓存】（Sumatra 的位图已烘入 rotation，必须按 rotation 分键）。</summary>
     int Rotation { get; }
     bool PauseRendering { get; }
     /// <summary>DisplayModel::RenderFinished → Repaint（已在 UI 线程）。</summary>
@@ -372,44 +381,62 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>GetTileOnScreen（RenderCache.cpp:328）1:1：瓦片设备矩形 + 页在屏矩形。
+    /// <summary>GetTileOnScreen（RenderCache.cpp:328）1:1：tileOnScreen = 瓦片设备矩形 + pageOnScreen。
     /// Sumatra 两端都是【整数】Rect（GetTileRectDevice 里有 .Round()，pageOnScreen 是 int Rect），
     /// 于是目标层瓦片的 factor 恰好 == 1.0 → BlitPixmapRegion 走 1:1 直拷。
     /// ⚠ 这条整数对齐必须保住：一旦 tileOnScreen 带小数，factor 就变成 0.9998 之类，
     /// 每次上屏都会被 Linear 重采样一次 → 目标分辨率明明够了画面仍然发糊（实测症状）。
     ///
-    /// 旋转：Glance 出图恒为【未旋转】设备空间（mu_render_page_region_bgra），而
-    /// pageOnScreen 是旋转后的页矩形 → rot!=0 时在未旋转页矩形内做映射（位置等价于 Sumatra
-    /// 的 GetTileOnScreen(rotation)，只是位图内容不随旋转，由外壳呈现层负责）。</summary>
+    /// 旋转（Sumatra 不需要这一步的原因）：Sumatra 把 rotation 烘进出图 ——
+    /// `EngineMupdf::RenderPage` 用 `viewctm(pageNo, zoom, rotation)` 光栅化，产出的位图
+    /// 【本身已旋转】，所以它的 tile 矩形 / pageOnScreen / pageRect 全在旋转后的帧里，
+    /// 本函数只需相加。Glance 出图恒未旋转（`mu_render_page_region_bgra` 只接受未旋转
+    /// device 空间），若照抄就会出现「位图内容不随旋转 + 缩放时瓦片错乱」。
+    /// → 解决办法：引擎内部统一改用【未旋转页帧】，pageOnScreen 传未旋转页矩形，
+    ///   旋转由外壳在 DrawingSession 上补一次（与标注层 ApplyPageTransform 同一约定）。
+    ///   于是本函数与 Sumatra 逐字等价（rotation 恒为 0），且旋转页【无需重渲染】。</summary>
     private Rect GetTileOnScreen(int pageNo, float zoom, TilePosition tile, Rect pageOnScreen)
     {
-        int rot = _host.Rotation % 360;
-
         GetTileRectDevice(pageNo, zoom, tile, out _, out _, out int dx0, out int dy0, out int dx1, out int dy1);
-        double dw = Math.Max(0, dx1 - dx0), dh = Math.Max(0, dy1 - dy0);
+        return new Rect(dx0 + pageOnScreen.X, dy0 + pageOnScreen.Y,
+            Math.Max(0, dx1 - dx0), Math.Max(0, dy1 - dy0));
+    }
 
-        if (rot == 0)
-            return new Rect(dx0 + pageOnScreen.X, dy0 + pageOnScreen.Y, dw, dh);
+    /// <summary>
+    /// 视口在【未旋转页帧】里的最小外接矩形（物理像素）。
+    /// Sumatra 没有对应物：它的 tile / pageOnScreen 本来就在旋转后帧，直接与
+    /// `dm->GetViewPort()` 相交即可（IsTileVisible / Paint 的 bounds 都是那么写的）。
+    /// Glance 的 tile 在未旋转页帧、视口在屏幕帧，两者差一个「绕页中心转 +rot」
+    /// → 这里把视口按 -rot 转回页帧取 AABB。
+    /// AABB ⊇ 旋转后的视口，故用它做可见性判定 / 绘制裁剪【只会多画、绝不漏画】；
+    /// rot==0 时即视口本身（与 Sumatra 完全一致，零行为变化）。
+    /// </summary>
+    private Rect PageFrameViewPort(Rect pageOnScreen)
+    {
+        int rot = _host.Rotation % 360;
+        var vp = _host.ViewPortSize;
+        double vw = vp.Width, vh = vp.Height;
+        if (rot == 0 || vw <= 0 || vh <= 0) return new Rect(0, 0, vw, vh);
 
-        double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
-        GetTileRectPt(0, 0, ptW, ptH, tile, out double tx, out double ty, out double tw, out double th);
-        double lx = tx * zoom, ly = ty * zoom, lw = tw * zoom, lh = th * zoom;
-
-        // 未旋转页矩形（PageUnrotatedRect 对应物）：90/270 交换 dest 宽高、绕中心放置。
-        bool swap = rot == 90 || rot == 270;
-        double w = swap ? pageOnScreen.Height : pageOnScreen.Width;
-        double h = swap ? pageOnScreen.Width : pageOnScreen.Height;
+        // 旋转枢轴 = 页中心（与外壳 Draw 里压在 DrawingSession 上的那个枢轴同一个点）。
         double cx = pageOnScreen.X + pageOnScreen.Width / 2.0;
         double cy = pageOnScreen.Y + pageOnScreen.Height / 2.0;
-        double uX = cx - w / 2.0, uY = cy - h / 2.0;
-
-        return rot switch
+        double rad = -rot * Math.PI / 180.0;
+        double cs = Math.Cos(rad), sn = Math.Sin(rad);
+        double minX = double.MaxValue, minY = double.MaxValue;
+        double maxX = double.MinValue, maxY = double.MinValue;
+        void Accum(double x, double y)
         {
-            90 => new Rect(cx + cy - uY - ly - lh, cy - w / 2.0 + lx, lh, lw),
-            180 => new Rect(cx + w / 2.0 - lx - lw, cy + h / 2.0 - ly - lh, lw, lh),
-            270 => new Rect(cx - cy + uY + ly, cy + w / 2.0 - lx - lw, lh, lw),
-            _ => new Rect(cx - w / 2.0 + lx, cy - h / 2.0 + ly, lw, lh),
-        };
+            double ox = x - cx, oy = y - cy;
+            double rx = cx + ox * cs - oy * sn;
+            double ry = cy + ox * sn + oy * cs;
+            if (rx < minX) minX = rx;
+            if (rx > maxX) maxX = rx;
+            if (ry < minY) minY = ry;
+            if (ry > maxY) maxY = ry;
+        }
+        Accum(0, 0); Accum(vw, 0); Accum(vw, vh); Accum(0, vh);
+        return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
 
     /// <summary>IsTileVisible（fuzz 语义原样：0.5/2.0 扩边）。</summary>
@@ -418,13 +445,14 @@ internal sealed class TileRenderCache : IDisposable
         float zoom = _host.ZoomReal(pageNo);
         Rect r = _host.PageOnScreen(pageNo);
         if (r.IsEmpty) return false;
+        // Sumatra 的 pi->pageOnScreen 恒为整数 Rect；取整后与 Paint / 外壳旋转枢轴同帧同值。
+        r = new Rect(Math.Round(r.X), Math.Round(r.Y), Math.Round(r.Width), Math.Round(r.Height));
         Rect tileOnScreen = GetTileOnScreen(pageNo, zoom, tile, r);
         double dx = tileOnScreen.Width * fuzz * 0.5;
         double dy = tileOnScreen.Height * fuzz * 0.5;
         tileOnScreen = new Rect(tileOnScreen.X - dx, tileOnScreen.Y - dy,
             tileOnScreen.Width * (fuzz + 1), tileOnScreen.Height * (fuzz + 1));
-        var screen = new Rect(0, 0, _host.ViewPortSize.Width, _host.ViewPortSize.Height);
-        tileOnScreen.Intersect(screen);
+        tileOnScreen.Intersect(PageFrameViewPort(r));
         return !tileOnScreen.IsEmpty;
     }
 
@@ -511,6 +539,13 @@ internal sealed class TileRenderCache : IDisposable
         double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
         float zv = zoom ?? _host.ZoomReal(pageNo);
         var viewPort = _host.ViewPortSize;
+
+        // Sumatra 比的是【旋转后】的 pixelbox 与 viewport。Glance 的 pixelbox 是未旋转的，
+        // 90/270 时把 viewport 一并交换，比较结果与 Sumatra 逐位等价（几何均值对 W/H 交换不变，
+        // 只有下面那条 fit 条件在意朝向）。180 朝向不变，无需处理。
+        int rot = _host.Rotation % 360;
+        if (rot == 90 || rot == 270)
+            viewPort = new Size(viewPort.Height, viewPort.Width);
 
         double pixelW = ptW * zv, pixelH = ptH * zv;   // 物理像素（与 maxTileSize 同单位）
 
@@ -600,6 +635,9 @@ internal sealed class TileRenderCache : IDisposable
                     AbortCurrentRequestLocked(i);
             }
 
+            // Sumatra 在这里用 dm->GetRotation()（它的位图已烘入 rotation，必须分键）。
+            // Glance 的位图来自未旋转 device 空间、与 rotation 无关 → 恒用 0 作键：
+            // 转屏既不作废缓存，也不会出现"同一瓦片两组不同旋转的图"。
             int rotation = NormalizeRotation(0);
             float zoom = _host.ZoomReal(pageNo);
 
@@ -1057,8 +1095,11 @@ internal sealed class TileRenderCache : IDisposable
     }
 
     /// <summary>RenderCache::Paint 1:1：目标层瓦片 BFS，只画视口相交瓦片，未命中请求；
-    /// gConserveMemory 收尾（FreePage 其他分辨率 + FreeNotVisible）。</summary>
-    public int Paint(int pageNo, Rect pageOnScreen, Rect bounds, bool renderMissing, float zoom)
+    /// gConserveMemory 收尾（FreePage 其他分辨率 + FreeNotVisible）。
+    /// `pageOnScreen` 传【未旋转页帧】的页矩形（物理像素），旋转由外壳在 DrawingSession 上补；
+    /// Sumatra 的 `bounds`（更新区）在这里由 `PageFrameViewPort` 内部导出（= 视口在页帧的外接矩形），
+    /// 故不再作为参数传入 —— Glance 每帧画整个视口，没有「局部更新区」这个概念。</summary>
+    public int Paint(int pageNo, Rect pageOnScreen, bool renderMissing, float zoom)
     {
         // zoom 由外壳 Draw 显式传入（与 dest 矩形同一来源/同一时刻）——显示端几何与
         // 请求端（_liveZoom）在 ChangeView 异步落地窗口内可能短暂分叉，显示必须自洽。
@@ -1066,15 +1107,15 @@ internal sealed class TileRenderCache : IDisposable
         ushort maxRes = GetMaxTileRes(pageNo, 0);
         maxRes = Math.Max(maxRes, targetRes);
 
-        // Sumatra 的 pi->pageOnScreen 与 bounds 都是整数 Rect（layout / 更新区产出）。
+        // Sumatra 的 pi->pageOnScreen 是整数 Rect（layout 产出）。
         // 这里同样取整，好让 target/source 全部落在整物理像素上 → factor 精确 == 1.0，
         // 且 Win2D 设备像素 == DIP×RasterizationScale == 这里的像素 → 真正 1:1 直拷（不重采样）。
+        // ⚠ 外壳压在 DrawingSession 上的旋转枢轴必须取【这份取整后矩形】的中心，否则旋转页
+        //   会出现半像素偏移 → 又被重采样。
         pageOnScreen = new Rect(
             Math.Round(pageOnScreen.X), Math.Round(pageOnScreen.Y),
             Math.Round(pageOnScreen.Width), Math.Round(pageOnScreen.Height));
-        bounds = new Rect(
-            Math.Round(bounds.X), Math.Round(bounds.Y),
-            Math.Round(bounds.Width), Math.Round(bounds.Height));
+        Rect bounds = PageFrameViewPort(pageOnScreen);
 
         var queue = new System.Collections.Generic.List<TilePosition> { new TilePosition(0, 0, 0) };
         int renderDelayMin = TileRenderDelay.Undefined;

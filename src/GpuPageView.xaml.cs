@@ -2854,18 +2854,24 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         var cache = _renderCache;
         if (cache != null)
         {
-            // 瓦片引擎内部全是物理像素（与 Sumatra 同单位）：zoom = 每点物理像素数，
-            // bounds/pageOnScreen 也必须是物理像素。换算只在这里发生一次。
+            // 瓦片引擎内部全是物理像素、且几何在【未旋转页帧】（与 Sumatra 同单位同帧）：
+            // zoom = 每点物理像素数，pageOnScreen = 未旋转页矩形。换算只在这里发生一次。
+            // 旋转：把 DrawingSession 绕页中心转 rot 度，引擎给的未旋转几何就精确落到旋转后的
+            // dest 上 —— 位图不需要重渲染，也不需要去映射每颗瓦片的位置（上一版就是那么错的）。
             double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
-            var bounds = new Rect(0, 0, _vpW * dpi, _vpH * dpi);
             float zoomPx = (float)(z * 96.0 / 72.0 * dpi);
             bool renderMissing = !_isSmoothZooming && !_isRightZooming;
+            int rot = _rotation;
+            var savedTransform = ds.Transform;
             foreach (var (p, dest) in visible)
             {
-                ds.FillRectangle(dest, _placeholderColor);
-                var destPx = new Rect(dest.X * dpi, dest.Y * dpi, dest.Width * dpi, dest.Height * dpi);
-                try { cache.Paint(p.Index, destPx, bounds, renderMissing, zoomPx); }
+                ds.FillRectangle(dest, _placeholderColor);   // 占位色铺在旋转后的矩形上
+                PageFrameForTiles(dest, out var pageOnScreenPx, out var pivot);
+                if (rot != 0)
+                    ds.Transform = savedTransform * Matrix3x2.CreateRotation((float)(rot * Math.PI / 180.0), pivot);
+                try { cache.Paint(p.Index, pageOnScreenPx, renderMissing, zoomPx); }
                 catch { }
+                if (rot != 0) ds.Transform = savedTransform;
             }
         }
         else
@@ -2995,8 +3001,11 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         return true;
     }
 
-    /// <summary>页 dest（旋转后屏幕矩形）对应的【未旋转】绘制矩形。rot==0 时即 dest 本身。</summary>
-    private Rect PageUnrotatedRect(GpuPageInfo p, Rect dest)
+    /// <summary>页 dest（旋转后屏幕矩形）对应的【未旋转】绘制矩形：交换宽高、同中心。
+    /// rot==0 时即 dest 本身。瓦片引擎（TileRenderCache）的一切几何都在这个帧里 ——
+    /// 出图恒未旋转，旋转由 DrawingSession 上的一次 CreateRotation 补足
+    /// （与标注层 ApplyPageTransform 同一约定）。</summary>
+    private Rect PageUnrotatedRect(Rect dest)
     {
         int rot = _rotation;
         if (rot == 0) return dest;
@@ -3006,6 +3015,22 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         double cx = dest.X + dest.Width / 2.0;
         double cy = dest.Y + dest.Height / 2.0;
         return new Rect(cx - w / 2.0, cy - h / 2.0, w, h);
+    }
+
+    /// <summary>交给瓦片引擎的页几何：未旋转页帧的物理像素矩形 + 该帧对应的旋转枢轴（DIP）。
+    /// 枢轴取【取整后】矩形的中心，必须与 TileRenderCache.Paint 内部对 pageOnScreen 的取整
+    /// 严格一致 —— 否则旋转页会有半像素偏移，位图又被重采样（回到"发糊"）。取整后 90/180/270
+    /// 绕整像素中心旋转，几何仍落在整像素上，故旋转页同样保持 1:1 直拷。</summary>
+    private void PageFrameForTiles(Rect destDip, out Rect pageOnScreenPx, out Vector2 pivotDip)
+    {
+        double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
+        var un = PageUnrotatedRect(destDip);
+        pageOnScreenPx = new Rect(
+            Math.Round(un.X * dpi), Math.Round(un.Y * dpi),
+            Math.Round(un.Width * dpi), Math.Round(un.Height * dpi));
+        pivotDip = new Vector2(
+            (float)((pageOnScreenPx.X + pageOnScreenPx.Width / 2.0) / dpi),
+            (float)((pageOnScreenPx.Y + pageOnScreenPx.Height / 2.0) / dpi));
     }
 
     // ---------------- Sumatra RenderCache（瓦片渲染/内存管理）外壳接线 ----------------
@@ -3065,7 +3090,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     }
 
     /// <summary>pageInfo->pageOnScreen 对应物：LayoutRect×z 平移到视口坐标（含 ScrollViewer 居中补偿，
-    /// 与 ComputeVisiblePages 同式），最后 ×DpiScale 换成物理像素（引擎内部单位）。
+    /// 与 ComputeVisiblePages 同式），取【未旋转】页矩形（引擎内部帧），最后 ×DpiScale 换成物理像素。
     /// 仅 UI 线程调用（读 Spacer 尺寸做居中补偿）。</summary>
     Rect ITileRenderHost.PageOnScreen(int pageNo)
     {
@@ -3088,10 +3113,12 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
         double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
         var lr = _pages[pageNo].LayoutRect;
-        return new Rect(
-            (lr.X * z - hOff + centerX) * dpi,
-            (lr.Y * z - vOff + centerY) * dpi,
-            lr.Width * z * dpi, lr.Height * z * dpi);
+        var dest = new Rect(
+            lr.X * z - hOff + centerX,
+            lr.Y * z - vOff + centerY,
+            lr.Width * z, lr.Height * z);
+        var un = PageUnrotatedRect(dest);
+        return new Rect(un.X * dpi, un.Y * dpi, un.Width * dpi, un.Height * dpi);
     }
 
     private bool PageVisibleLocked(int pageNo)
