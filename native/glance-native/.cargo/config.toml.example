@@ -1,0 +1,19 @@
+# Template for the local cargo build-environment override.
+#
+# Copy this file to `config.toml` (same directory) and adjust the values to YOUR
+# machine. The real `config.toml` is git-ignored on purpose — never commit a file
+# that contains absolute local paths.
+
+# The mupdf-sys build script recognizes MSVC platform toolsets only up to v143 and
+# otherwise falls back to v142, which fails with
+#   "MSB8020: The build tools for v142 (Platform Toolset = 'v142') cannot be found"
+# on newer Visual Studio installs. Set the toolset that matches YOUR installed VS:
+#   VS 2022            -> "v143"
+#   VS 17 / 18 preview -> "v145" (or whatever your install provides)
+[env]
+MUPDF_MSVC_PLATFORM_TOOLSET = "v143"
+
+# bindgen (used by mupdf-sys to generate Rust bindings) needs libclang. Point this
+# at the LLVM/clang that ships with your Visual Studio, or any LLVM install, e.g.:
+#   "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"
+LIBCLANG_PATH = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"

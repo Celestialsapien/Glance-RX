@@ -57,7 +57,7 @@ Glance is a fast, lightweight, and elegant PDF document viewer designed specific
 Glance uses a **hybrid C# + Rust architecture** for optimal performance:
 
 * **Frontend:** WinUI 3 (C#/.NET 10.0) - Native Windows 11 aesthetics with Mica backdrop
-* **Backend:** Rust - Native performance for PDF rendering and storage
+* **Backend:** Rust (MuPDF) — Native, multi-threaded PDF rendering engine
 * **Bridge:** P/Invoke FFI - Type-safe C# ↔ Rust interop
 
 ---
@@ -72,8 +72,8 @@ Glance relies on several open-source libraries and native projections to achieve
 
 ### Backend & FFI (Rust)
 * **[windows-rs](https://github.com/microsoft/windows-rs):** Microsoft's official Rust projection library, providing native access to Windows APIs directly from Rust.
-* **[pdfium-render](https://github.com/ajrcarey/pdfium-render):** A safe Rust binding layer around Google's PDFium.
-* **[pdfium-binaries](https://github.com/bblanchon/pdfium-binaries):** The pre-compiled binary distributions of Google's PDFium library (compiled by Benoît Blanchon) used to build the unmanaged rendering backend.
+* **[mupdf](https://crates.io/crates/mupdf):** Safe Rust bindings around [MuPDF](https://mupdf.com/), the multi-threaded PDF rendering engine that powers Glance's native backend.
+* **[serde](https://github.com/serde-rs/serde):** Serialization framework used for the local JSON annotation/drawing database.
 
 ---
 
@@ -109,6 +109,8 @@ Glance relies on several open-source libraries and native projections to achieve
    ```
    *(Note: Building in release mode is required as the C# project is configured to automatically look for the Rust DLL in `target/release/`).*
 
+   > **Windows / Visual Studio note:** On some Visual Studio installations the `mupdf-sys` build script fails to detect the MSVC platform toolset or `libclang` (required by `bindgen`). If `cargo build` fails with an `MSB8020` ("cannot find Visual Studio build tools") or a `libclang` error, copy `native/glance-native/.cargo/config.toml.example` to `native/glance-native/.cargo/config.toml` and set `MUPDF_MSVC_PLATFORM_TOOLSET` and `LIBCLANG_PATH` to match your machine. The real `config.toml` is git-ignored and must never be committed.
+
 3. Build and Run C# frontend:
    ```bash
    cd ../../src
@@ -128,7 +130,7 @@ Glance relies on several open-source libraries and native projections to achieve
   * Formulated validation rules for comments, highlights, and colors.
   * Created safety checks for drawing coordinates.
 - **Phase 4: PDF Rendering (lazy loading, async)** ✅
-  * Integrated Google PDFium via dynamic library binding.
+  * Integrated the MuPDF rendering engine via safe Rust bindings and a P/Invoke FFI bridge.
   * Designed async rendering buffers on C# thread pools using `CancellationToken` loops to prevent thread collisions.
 - **Phase 5: Localization & UX Polish** ✅
   * Integrated operating system locale detector.

@@ -63,6 +63,10 @@ CHECK_DLL_DEPENDENCIES.ps1
 
 # Rust native build
 native/glance-native/target/
+# Machine-specific cargo build-env override. The real config.toml holds hardcoded
+# local VS/LLVM paths and must NOT be committed. Contributors copy
+# .cargo/config.toml.example -> .cargo/config.toml and fill in their own paths.
+native/glance-native/.cargo/config.toml
 
 # Vendored SumatraPDF source (kernel reference, not part of Glance build)
 sumatrapdf-master/
