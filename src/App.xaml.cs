@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Microsoft.UI.Xaml.Shapes;
+using System.Threading.Tasks;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -37,8 +38,33 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+        InstallCrashLogger();
 #if DEBUG
 #endif
+    }
+
+    /// <summary>
+    /// 全局未处理异常兜底：把任何会杀掉进程的异常原样写进 <BaseDirectory>/crash_*.log，
+    /// 便于复现后定位（WER 的 appcrash 归档在托管异常 fail-fast 下常缺失）。
+    /// 写完后【不】吞异常——保留默认终止，确保崩溃可复现且日志已落盘。
+    /// </summary>
+    private void InstallCrashLogger()
+    {
+        try
+        {
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                Diagnostics.CrashLog.Capture("AppDomain.UnhandledException", e.ExceptionObject as Exception);
+            TaskScheduler.UnobservedTaskException += (s, e) =>
+            {
+                Diagnostics.CrashLog.Capture("TaskScheduler.UnobservedTaskException", e.Exception);
+                e.SetObserved();
+            };
+            // Microsoft.UI.Xaml.Application 级（UI 线程 XAML 回调等）。不设置 e.Handled，
+            // 保留默认终止行为，保证崩溃可复现、日志已落盘。
+            UnhandledException += (s, e) =>
+                Diagnostics.CrashLog.Capture("Application.UnhandledException", e.Exception);
+        }
+        catch { }
     }
 
     /// <summary>

@@ -267,6 +267,9 @@ public sealed partial class MainPage : Page
         // GPU 视图滚动/缩放 → 更新中间同步滚动条，并剥夺页码框焦点（见 DefocusPageNumberInput 注释）。
         GpuViewer.ViewportChanged += (s, e) => { DefocusPageNumberInput(); UpdateSyncScrollBar(); };
         GpuViewerRight.ViewportChanged += (s, e) => { DefocusPageNumberInput(); UpdateSyncScrollBar(); };
+        // 分屏同步滚动条 SyncScrollBar 的滑块拖拽 → 两侧视图进入"拖拽期抑制渲染请求"，
+        // 在 SyncScrollBar_Scroll 内按 ScrollEventType(ThumbTrack/EndScroll) 判定转发
+        // （GpuPageView 内置滚动条由其自身在模板树中订阅 Thumb 事件捕获，见 HookScrollBarThumbs）。
         // 布局方向变化 → 同步更新工具栏按钮图标/提示（也覆盖通过 API 而非按钮切换的情况）。
         GpuViewer.LayoutModeChanged += (s, mode) => UpdateLayoutToggleVisual();
         GpuViewerRight.LayoutModeChanged += (s, mode) => UpdateLayoutToggleVisual();
@@ -2321,6 +2324,20 @@ public sealed partial class MainPage : Page
 
     private void SyncScrollBar_Scroll(object sender, ScrollEventArgs e)
     {
+        // 滑块拖拽期抑制渲染（对齐 Sumatra 快拖静止行为，机制见 GpuPageView.BeginScrollBarDrag）：
+        // ThumbTrack=拖拽中 → 两侧视图同步抑制；EndScroll=松手 → 立即按最终视口补渲染。
+        // 注意：程序化赋值（UpdateSyncScrollBar 设 Value）不触发 Scroll 事件，不会误入抑制态。
+        if (e.ScrollEventType == Microsoft.UI.Xaml.Controls.Primitives.ScrollEventType.ThumbTrack)
+        {
+            GpuViewer.BeginScrollBarDrag();
+            GpuViewerRight.BeginScrollBarDrag();
+        }
+        else if (e.ScrollEventType == Microsoft.UI.Xaml.Controls.Primitives.ScrollEventType.EndScroll)
+        {
+            GpuViewer.EndScrollBarDrag();
+            GpuViewerRight.EndScrollBarDrag();
+        }
+
         if (_isSyncScrolling) return;
         double delta = e.NewValue - _lastSyncValue;
         _lastSyncValue = e.NewValue;

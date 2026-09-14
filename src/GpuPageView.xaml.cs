@@ -21,6 +21,7 @@ using Windows.Foundation;
 using Windows.Graphics.DirectX;
 using Windows.System;
 using Glance.Services;
+using Glance.Diagnostics;
 using Windows.UI.Core;
 using Glance.Interop;
 using static Glance.Tuning;
@@ -794,8 +795,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
                 InvalidateBoth();
                 return false;
             }
-            // 【无级收尾·停止在哪就是哪】矢量场景按当前矩阵重放，层早已是落点密度；
-            // 画面永不二次变化。动画收敛即收尾。
+            // 收敛即收尾：FinishZoom 精确提交目标视图，并补一次可见页瓦片队列。
             FinishZoom();
             return false; // FinishZoom 内部已重画
         }
@@ -947,8 +947,8 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         });
     }
 
-    /// <summary>缩放收尾：精确落到目标视图，一次性对齐 ScrollViewer。
-    /// 矢量场景按当前视图矩阵重放，任意落点皆清晰 → 只做视图提交，画面永不二次变化。</summary>
+    /// <summary>缩放收尾：精确落到目标视图，一次性对齐 ScrollViewer，再补一次可见页
+    /// 瓦片队列 —— 动画期只做 1/3 倍频程量化的近似键，落定后按精确倍率补齐。</summary>
     private void FinishZoom()
     {
         _isSmoothZooming = false;
@@ -976,8 +976,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         SetVisRect(_zoomAnimTargetH, _zoomAnimTargetV, zt);
         CommitViewWithGuard(_zoomAnimTargetH, _zoomAnimTargetV, zt);
         SyncLiveView(_zoomAnimTargetH, _zoomAnimTargetV, zt);
-        // 【无级缩放】收尾：矢量场景按当前视图矩阵重放，任意落点皆清晰——只需补一次可见页
-        // 队列，把最终视口进入的页构建进来（已构建页幂等跳过），无密度重铺语义。
+        // 收尾：补一次可见页队列，把最终视口进入的页的瓦片补齐（已有瓦片幂等跳过）。
         QueueVisiblePages();
         InvalidateBoth();
         NotifyViewState();
@@ -1120,7 +1119,8 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         // 原子化一起落地，彻底消除这条竞态（正常滚动时 z==当前倍率，与传 null 等价，无副作用）。
         Viewer.ChangeView(h, v, (float)z, disableAnimation: true);   // 驱动原生滚动条
         SetVisRect(h, v, z);
-        // 滚动不改变缩放 → 矢量矩阵重放无需重铺，只补齐新进入视口的未构建页（已构建页幂等跳过）。
+        // 滚动不改变缩放 → 缓存键（页 + res + 瓦片坐标）不变，已有瓦片仍精确，
+        // 只补齐新进入视口页的瓦片。
         QueueVisiblePages();
         NotifyViewState();
         ViewportChanged?.Invoke(this, EventArgs.Empty);
@@ -2228,13 +2228,21 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         // 订阅 PointerExited 主动收尾：一旦指针离开本视图立即终止右键缩放，避免回来后
         // 右键仍按住、以陈旧起点继续缩放造成视点跳变（用户报告的拖出区域不停止 bug）。
         this.PointerExited += Viewer_PointerExited;
+        // ── 滚动条滑块拖拽抑制（对齐 Sumatra 快拖静止行为；2026-09-13 CPU 风暴根因修复）──
+        // ScrollViewer 内置 ScrollBar 的 Thumb 拖拽期间抑制渲染请求（缓存瓦片照画、视口照常移动），
+        // 静止 ≥ScrollDragSettleDelayMs 或松手时才对当前视口补发 —— 消灭"每个中间位置都全速解码
+        // 白跑"的 CPU 风暴。分屏 SyncScrollBar 由 MainPage 在其 Scroll 事件里转发（ThumbTrack/
+        // EndScroll），见 SyncScrollBar_Scroll。
+        // 注意：WinUI3 的 Thumb 事件是普通 CLR 事件（无 WPF 式可 AddHandler 的路由 RoutedEvent），
+        // 只能在模板树中找到 Thumb 实例后订阅；模板在 Loaded 时才就绪，故挂 Viewer.Loaded。
+        Viewer.Loaded += (s, e) => HookScrollBarThumbs(Viewer);
+        this.Unloaded += (s, e) => _hookedThumbs.Clear(); // 视图重挂载后模板 Thumb 是新实例，清旧引用
         UpdateThemeColors();
         ActualThemeChanged += (s, e) => { UpdateThemeColors(); InvalidateBoth(); };
         // 冷启动(文件关联)加载 PDF 时 GpuViewer 由 Collapsed → Visible：此刻窗口已按保存主题激活，
         // 但 ActualTheme 可能尚未经布局通道传播到本控件。Visible 时强制用确定性主题源刷新一次
         // RootGrid/画布底色，杜绝首帧以浅色(系统主题)首现的闪白光。
         RegisterPropertyChangedCallback(VisibilityProperty, OnVisibilityChanged);
-
     }
 
     /// <summary>Visibility 变化（Collapsed → Visible）时用确定性主题源刷新底色，防冷启动首帧闪白。</summary>
@@ -2342,7 +2350,6 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         RecomputeLayout(pages);
 
         // RenderCache：新文档 = 新缓存（Sumatra 打开新文档 = 新 DisplayModel + FreeForDisplayModel 旧缓存）。
-        // 必须先于引擎 Dispose 建好？（旧内核被 Shutdown 清理后，新缓存绑当前 svc。）
         ShutdownRenderCache();
         _renderCache = new TileRenderCache(this, DispatcherQueue);
 
@@ -2426,17 +2433,17 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     }
 
     /// <summary>
-    /// 保存/另存为成功后重新挂接底层渲染引擎：仅替换引擎句柄，【刻意保留】旧矢量场景缓存，
+    /// 保存/另存为成功后重新挂接底层渲染引擎：仅替换引擎句柄，【刻意保留】旧瓦片缓存，
     /// 【刻意不】重建布局、不触碰视口、不重构建可见页。保存对画面完全无感——
     /// 不触发淡入、不出现"笔迹浮在淡入位图之上"的闪烁。
     ///
-    /// 为什么旧场景可保留（核心依据）：
-    ///   1. 矢量场景（CanvasCommandList）由 ScreenCanvas.Device 创建，是 ScreenCanvas 设备拥有的
-    ///      GPU 资源，与已 Dispose 的 PdfRenderService(引擎) 无关——引擎只提供命令流字节。
+    /// 为什么旧瓦片可保留（核心依据）：
+    ///   1. 瓦片像素是内核按【未旋转页帧】渲染出的 native BGRA 缓冲 + Win2D CanvasBitmap，
+    ///      与已 Dispose 的 PdfRenderService(引擎) 无关——换引擎只影响后续瓦片的来源。
     ///   2. 批注是真实 PDF 注解对象（非内容流像素），渲染引擎不渲染批注（render_annotations=off）——
-    ///      保存只增删注解对象、不改页面内容流 → 新旧引擎导出的命令流完全一致 → 旧场景仍有效。
-    ///   3. 场景始终按"未旋转"页记录（旋转靠 GPU 变换），故旋转归零后场景依然匹配新布局
-    ///      （RecomputeLayout 只交换 LayoutRect 维度、不改场景几何）。
+    ///      保存只增删注解对象、不改页面内容流 → 新旧引擎渲染出的瓦片完全一致 → 旧瓦片仍有效。
+    ///   3. 瓦片始终按"未旋转"页渲染（旋转靠 GPU 变换），故旋转归零后瓦片依然匹配新布局
+    ///      （RecomputeLayout 只交换 LayoutRect 维度、不改瓦片几何）。
     /// </summary>
     public void ReattachRenderService(PdfRenderService svc)
     {
@@ -2676,7 +2683,6 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
 
         // 缩放/滚动进行中只排"缺图"的页；停稳后才排"分辨率升级"的重光栅（旧图 GPU 缩放顶着）。
         // 右键拖拽缩放期间同样视为"进行中"，松手时统一升级。（左键拖拽已在上方早退，不会走到这里）
-        // 矢量矩阵重放：任何视口/缩放落点均清晰，只需排队构建进入视口的未构建页。
         QueueVisiblePages();
         // 视口画布轻量重画：只画 2-3 张已缓存位图，惯性滚动逐帧调用无压力。
         InvalidateBoth();
@@ -2759,8 +2765,8 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     private static int _cacheFlushArmed = 1;
 
     /// <summary>
-    /// 空闲巡检：静态且无在途矢量构建时，①GC 整理主进程 ②重载文档释放 MuPDF 页数据累积缓存。
-    /// 只影响后台回收，不触碰已上屏的场景。首刷提前到载入落定后；再用 20s 冷却避免每次停顿重放。
+    /// 空闲巡检：静态且无在途瓦片渲染时，①GC 整理主进程 ②重载文档释放 MuPDF 页数据累积缓存。
+    /// 只影响后台回收，不触碰已上屏的瓦片。首刷提前到载入落定后；再用 20s 冷却避免每次停顿重放。
     /// </summary>
     private void EnsureWorkerCacheFlush()
     {
@@ -2822,13 +2828,13 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         _annoLayer?.Dispose();
         _annoLayer = null;
         _annoLayerNeedsFullRebuild = true;
-        // 设备就绪：重新排队可见页构建矢量场景。
+        // 设备就绪：重新排队可见页瓦片。
         // 修复首开概率性白屏：LoadAsync 排队时若设备未就绪，构建会因设备快照为 null 而退出；
         // 此前 CreateResources 只清不排 → 画面一直空白，直到用户点击触发 ViewChanged。
         //
         // 先从 ScrollViewer 读取真实缩放/DPI 再排队渲染（避免首屏用默认 _zoom=1.0 排队）。
-        // 矢量直绘：任意倍率按当前视图矩阵重放（屏幕像素精确 1:1），上屏 NearestNeighbor 恒等
-        // 直映（零信息丢失、无 Linear 抹圆/发虚）；无需密度阶梯/重光栅。
+        // 上屏恒 NearestNeighbor 直映（零信息丢失、无 Linear 抹圆/发虚）；内核按目标
+        // 分辨率出图，故无密度阶梯。
         UpdateVisibleRange();
         QueueVisiblePages();
         InvalidateBoth();
@@ -2993,24 +2999,6 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
             }
         }
 
-        // RenderCache OSD 调试层（Tuning.VectorDebugOverlay=1）：瓦片布局/缓存/队列水位。
-        if (Tuning.VectorDebugOverlay != 0)
-        {
-            try
-            {
-                float y0 = 4f;
-                foreach (var (p, dest) in visible)
-                {
-                    ushort res = cache?.GetTileRes(p.Index) ?? 0;
-                    ds.DrawText($"p{p.Index + 1} res={res} tiles=2^{res} onScreen={dest.Width:F0}x{dest.Height:F0}",
-                        new System.Numerics.Vector2(4, y0), Microsoft.UI.Colors.Yellow);
-                    y0 += 14f;
-                }
-                ds.DrawText($"z={z * 100:0.#}% {cache?.BusyInfo() ?? "no-cache"}",
-                    new System.Numerics.Vector2(4, y0), Microsoft.UI.Colors.Orange);
-            }
-            catch { }
-        }
     }
 
     /// <summary>缩放/滚动动画是否进行中。此时标注【逐帧随变换改变】，累积层无收益；
@@ -3133,6 +3121,18 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// <summary>当前绘制帧的 DrawingSession（DrawTileBitmap 在 Paint 期间使用；仅 UI 线程 Draw 帧内非空）。</summary>
     private CanvasDrawingSession? _drawDs;
 
+    /// <summary>native→CanvasBitmap 上传用的【唯一】托管暂存缓冲（UI 线程专用，只增不减）。
+    /// 存在的理由：Win2D 只有 CreateFromBytes(byte[]) 这条入口，必须先落到托管内存上。
+    /// 全程复用 → 每块瓦片不再 new byte[]（那正是 GC 提交段从 13MB 棘轮到 676MB 的来源）。</summary>
+    private byte[] _uploadScratch = Array.Empty<byte>();
+
+    private byte[] EnsureUploadScratch(int length)
+    {
+        if (_uploadScratch.Length < length)
+            _uploadScratch = new byte[length];
+        return _uploadScratch;
+    }
+
     /// <summary>DisplayModel 析构对应物：CancelRenderingBlocking + FreeForDisplayModel + Dispose。</summary>
     private void ShutdownRenderCache()
     {
@@ -3245,14 +3245,35 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
 
     /// <summary>engine->RenderPage(RenderPageArgs{pageRect}) 对应物：只光栅化瓦片矩形
     /// （密度 = DIP 比例 × DpiScale = 物理 px，HiDPI 不糊）。走 PdfRenderService 并发槽。</summary>
-    async Task<(byte[] Pixels, int W, int H)> ITileRenderHost.RenderTileAsync(
-        int pageNo, int devW, int devH, int x0, int y0, int x1, int y1)
+    (IntPtr Data, int Length, int W, int H) ITileRenderHost.RenderTile(
+        IntPtr cookie, int pageNo, int devW, int devH, int x0, int y0, int x1, int y1)
     {
+        // 同步、零拷贝：native 缓冲的所有权直接交给缓存（= Sumatra 的 Pixmap*）。
+        // cookie = FitzAbortCookie 对应物，MuPDF 中途自查中止。
         var svc = RenderService!;
-        return await svc.RenderPageRegionBgraAsync(
-            (uint)pageNo, (uint)devW, (uint)devH,
-            (uint)Math.Clamp(x0, 0, devW), (uint)Math.Clamp(y0, 0, devH),
-            (uint)Math.Clamp(x1, 0, devW), (uint)Math.Clamp(y1, 0, devH)).ConfigureAwait(false);
+        try
+        {
+            return svc.RenderPageRegionOwningNative(
+                (uint)pageNo, (uint)devW, (uint)devH,
+                (uint)Math.Clamp(x0, 0, devW), (uint)Math.Clamp(y0, 0, devH),
+                (uint)Math.Clamp(x1, 0, devW), (uint)Math.Clamp(y1, 0, devH), cookie);
+        }
+        catch (Exception ex)
+        {
+            // 单块瓦片渲染失败（native 返回 Err：本页内容 MuPDF 回放失败 / 瓦片矩形退化导致
+            // pixmap 分配失败等）→ 绝不能冒泡成未处理异常杀进程。返回空缓冲让缓存跳过该瓦片
+            // （= Sumatra 该块不画），其余瓦片照常。详情已记入 crash 日志，便于定位是哪块/哪页。
+            Diagnostics.CrashLog.CaptureHandled(
+                $"RenderTile page={pageNo} dev={devW}x{devH} rect=({x0},{y0})-({x1},{y1})", ex);
+            return (IntPtr.Zero, 0, 0, 0);
+        }
+    }
+
+    /// <summary>FreePixmap 对应物。</summary>
+    void ITileRenderHost.FreeTilePixels(IntPtr data, int length)
+    {
+        if (data == IntPtr.Zero) return;
+        try { GlanceNative.memory_free(data, (ulong)length); } catch { }
     }
 
     /// <summary>BlitPixmapRegion 对应物：GPU 位图惰性创建（CPU 位图仍是缓存真身，与 Sumatra 一致），
@@ -3265,14 +3286,27 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         if (ds == null) return;
         if (entry.Gpu == null)
         {
+            // native 缓冲可能已被释放而 GPU 副本又不在（设备重建作废）→ 本条目已无像素可画。
+            if (entry.Pixels == IntPtr.Zero) return;
             var device = ScreenCanvas?.Device;
             if (device == null) return;
+            int len = entry.BitmapW * entry.BitmapH * 4;
+            if (len <= 0 || len > entry.PixelsLen) return;
             try
             {
-                entry.Gpu = CanvasBitmap.CreateFromBytes(device, entry.Bitmap, entry.BitmapW, entry.BitmapH,
+                // Win2D 必须先有一块托管内存才能建 CanvasBitmap（CreateFromBytes），
+                // 所以这里做【一次】native→复用的 UI 线程 scratch 的拷贝，且 scratch 全程复用、
+                // 不随瓦片数增长 —— 与之前「每块瓦片 new byte[]」相比不再有任何 MB 级分配。
+                var scratch = EnsureUploadScratch(len);
+                System.Runtime.InteropServices.Marshal.Copy(entry.Pixels, scratch, 0, len);
+                entry.Gpu = CanvasBitmap.CreateFromBytes(device, scratch, entry.BitmapW, entry.BitmapH,
                     DirectXPixelFormat.B8G8R8A8UIntNormalized);
+                entry.GpuBytes = len;
             }
             catch { return; }
+            // GPU 副本已就位 → native 那份再无任何读取点（Sumatra 必须留是因为它 GDI 直 blit
+            // CPU pixmap；Win2D 画的是 CanvasBitmap）。此处释放 = 去掉整整一倍冗余。
+            entry.ReleaseCpuBitmap(this);
         }
         // 上采样判定：目标与源同为像素单位才可比（target 传画布前才换算）。
         bool upsample = target.Width > source.Width || target.Height > source.Height;
@@ -3287,8 +3321,109 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// 可见页正向请求 → 预测链（next/prev 各一页，一次一页 chained）→ 可见页反向重发
     /// （LIFO 保证可见页先于预测页渲染）。【禁止在持有 _lock 时调用 cache.*】（锁序：_lock
     /// 与 cache 内部锁分离，worker 线程会持 cache 锁反向等 _lock）。UI 线程调用。</summary>
+    // ---------------- 滚动条滑块拖拽期：抑制渲染请求（对齐 Sumatra 快拖静止行为） ----------------
+    // 根因（2026-09-13 定案）：400% 快拖 115 页时每个中间视口都全速发请求，而 MuPDF JPEG
+    // 逐行顺序解码使瓦片成本 ∝ 瓦片 Y 偏移（page 114 实测页顶 36ms → 页底 352~454ms），
+    // 飞行期间 1290 次回放仅 296 入库 —— 白跑放大成 CPU 风暴。Sumatra 快拖时静止旧画面、
+    // 落定才出图，中间位置几乎不发请求。对齐：拖拽中不发请求（缓存瓦片照画、视口照常移动），
+    // 静止 ≥ScrollDragSettleDelayMs 或松手时才补当前视口（后者覆盖"按住滑块不松手"场景）。
+
+    private const int ScrollDragSettleDelayMs = 180;
+    private bool _isScrollBarDragging;
+    private bool _scrollDragSettleQueued;
+    private long _scrollDragLastMoveTicks;
+    private double _scrollDragLastH = double.NaN;
+    private double _scrollDragLastV = double.NaN;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _scrollDragSettleTimer;
+    private readonly HashSet<Microsoft.UI.Xaml.Controls.Primitives.Thumb> _hookedThumbs = new();
+
+    // 递归查找 root 模板树内的全部 Thumb（ScrollViewer 内置纵/横 ScrollBar 的滑块）并订阅拖拽事件。
+    // 幂等：同一 Thumb 实例只订阅一次（Loaded 可能多次触发）。
+    private void HookScrollBarThumbs(DependencyObject root)
+    {
+        int n = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is Microsoft.UI.Xaml.Controls.Primitives.Thumb th && _hookedThumbs.Add(th))
+            {
+                th.DragStarted += ScrollBarThumb_DragStarted;
+                th.DragCompleted += ScrollBarThumb_DragCompleted;
+            }
+            HookScrollBarThumbs(child);
+        }
+    }
+
+    /// <summary>滚动条滑块拖拽开始。两路入口：内置 ScrollBar Thumb 冒泡（本类自捕）+ 分屏 SyncScrollBar（MainPage 转发）。</summary>
+    public void BeginScrollBarDrag()
+    {
+        // 幂等重置（不做 _isScrollBarDragging 早退）：万一上一次 DragCompleted 因指针捕获丢失
+        // 未送达而卡在 true，下一次拖拽仍能重新播种移动时钟，抑制机制不会永久失效。
+        _scrollDragLastH = _liveH;
+        _scrollDragLastV = _liveV;
+        _scrollDragLastMoveTicks = Stopwatch.GetTimestamp();
+        _scrollDragSettleQueued = false;
+        _isScrollBarDragging = true;
+        if (_scrollDragSettleTimer == null)
+        {
+            _scrollDragSettleTimer = DispatcherQueue.CreateTimer();
+            _scrollDragSettleTimer.Interval = TimeSpan.FromMilliseconds(64);
+            _scrollDragSettleTimer.Tick += ScrollDragSettleTick;
+        }
+        _scrollDragSettleTimer.Start();
+    }
+
+    /// <summary>滚动条滑块松手：立即按最终视口补渲染请求（Sumatra"落定到终点"行为）。</summary>
+    public void EndScrollBarDrag()
+    {
+        if (!_isScrollBarDragging) return;
+        _isScrollBarDragging = false;
+        _scrollDragSettleTimer?.Stop();
+        _scrollDragSettleQueued = false;
+        QueueVisiblePages();
+        InvalidateBoth();
+    }
+
+    // 拖拽中静止检测：位移停 ≥ScrollDragSettleDelayMs → 视为慢速/暂停，对当前视口补一次请求；
+    // 再移动则重新抑制（重置移动时钟）。与 QueueVisiblePages 顶部的抑制门共用同一时钟判定，
+    // 保证"静止放行 / 移动抑制"两处判定严格同源。
+    private void ScrollDragSettleTick(object? sender, object? e)
+    {
+        if (!_isScrollBarDragging) { _scrollDragSettleTimer?.Stop(); return; }
+        if (_scrollDragLastH != _liveH || _scrollDragLastV != _liveV)
+        {
+            _scrollDragLastH = _liveH;
+            _scrollDragLastV = _liveV;
+            _scrollDragLastMoveTicks = Stopwatch.GetTimestamp();
+            _scrollDragSettleQueued = false;
+            return;
+        }
+        if (_scrollDragSettleQueued) return;
+        double idleMs = (Stopwatch.GetTimestamp() - _scrollDragLastMoveTicks) * 1000.0 / Stopwatch.Frequency;
+        if (idleMs >= ScrollDragSettleDelayMs)
+        {
+            _scrollDragSettleQueued = true;
+            QueueVisiblePages();
+            InvalidateBoth();
+        }
+    }
+
+    private void ScrollBarThumb_DragStarted(object? sender, Microsoft.UI.Xaml.Controls.Primitives.DragStartedEventArgs e)
+        => BeginScrollBarDrag();
+
+    private void ScrollBarThumb_DragCompleted(object? sender, Microsoft.UI.Xaml.Controls.Primitives.DragCompletedEventArgs e)
+        => EndScrollBarDrag();
+
     private void QueueVisiblePages()
     {
+        // 滚动条滑块拖拽飞行期：抑制渲染请求（缓存瓦片照画、视口照常移动，画布由 ViewChanged→
+        // InvalidateBoth 照常重画）。静止 ≥ScrollDragSettleDelayMs（settle 定时器已补发）或松手
+        // （EndScrollBarDrag 已补发）后放行。移动时钟由 ScrollDragSettleTick 检测位移复位。
+        if (_isScrollBarDragging &&
+            (Stopwatch.GetTimestamp() - _scrollDragLastMoveTicks) * 1000.0 / Stopwatch.Frequency < ScrollDragSettleDelayMs)
+        {
+            return;
+        }
         var cache = _renderCache;
         int first, last;
         lock (_lock)

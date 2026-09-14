@@ -141,11 +141,7 @@ public sealed partial class MainWindow : Window
         }
 
         // Navigate the root frame to the main page on startup.
-        // --probe 参数：进入"矢量直绘"原型页（MuPDF display list → SVG → 每帧按矩阵
-        // 矢量重绘），用于验证"任意倍率全矢量清晰 + 矢量重绘帧率"两个命题。
-        var cmdLine = Environment.GetCommandLineArgs();
-        bool probeMode = Array.IndexOf(cmdLine, "--probe") >= 0;
-        RootFrame.Navigate(probeMode ? typeof(VectorProbePage) : typeof(MainPage), fileToOpen);
+        RootFrame.Navigate(typeof(MainPage), fileToOpen);
 
         // Subscribe to closing event to check for unsaved changes
         this.AppWindow.Closing += AppWindow_Closing;

@@ -43,10 +43,6 @@
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Remove="Tests\**" />
-    <None Include="Tests\**" />
-  </ItemGroup>
 
   <!--
     Defining the "Msix" ProjectCapability here allows the Single-project MSIX Packaging

@@ -187,46 +187,29 @@ public static class GlanceNative
     /// into tightly-packed BGRA8 (stride = width*4). THREAD-SAFE. On success
     /// <paramref name="outData"/> is a Rust-allocated buffer (free with
     /// memory_free(ptr, len)), outLen/outWidth/outHeight describe it.
+    /// <paramref name="cookie"/> may be <see cref="IntPtr.Zero"/>; otherwise it
+    /// must point to a 24-byte fz_cookie-compatible abort block created by
+    /// <see cref="GlanceCookie.New"/> — MuPDF checks it between display-list ops
+    /// and cancels this render mid-flight when the aborter writes 1.
     /// </summary>
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern Response mu_render_page_region_bgra(
         IntPtr engine, uint page, uint devW, uint devH,
         uint x0, uint y0, uint x1, uint y1,
+        IntPtr cookie,
         out IntPtr outData, out ulong outLen, out uint outWidth, out uint outHeight);
 
     /// <summary>
     /// Render a whole page into tightly-packed BGRA8. THREAD-SAFE. On success
     /// <paramref name="outData"/> is a Rust-allocated buffer (free with
-    /// memory_free(ptr, len)).
+    /// memory_free(ptr, len)). <paramref name="cookie"/> semantics as in
+    /// <see cref="mu_render_page_region_bgra"/>.
     /// </summary>
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern Response mu_render_page_bgra(
         IntPtr engine, uint page, uint width, uint height,
+        IntPtr cookie,
         out IntPtr outData, out ulong outLen, out uint outWidth, out uint outHeight);
-
-    /// <summary>
-    /// Export a page's display list as a resolution-independent SVG document
-    /// (vector command stream in page user space — no raster density baked in).
-    /// THREAD-SAFE. On success <paramref name="outData"/> holds the UTF-8 SVG
-    /// string (free with memory_free(ptr, len)). This is the "vector direct
-    /// render" prototype path.
-    /// </summary>
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern Response mu_export_page_svg(
-        IntPtr engine, uint page, out IntPtr outData, out ulong outLen);
-
-    /// <summary>
-    /// Export a page's display list as a resolution-independent binary command
-    /// stream (paths in page user space + referenced image bitmaps). THREAD-SAFE.
-    /// On success <paramref name="outData"/> holds the stream (free with
-    /// memory_free(ptr, len)). Layout: u32 magic "GVDC", u32 version,
-    /// f32 page_w, f32 page_h, u32 n_cmds, u32 n_images, u32 n_skipped,
-    /// then skipped table (n_skipped × [u8 tag, u32 count]), then commands,
-    /// then images (each: u32 id, u32 w, u32 h, u32 data_len, BGRA bytes).
-    /// </summary>
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern Response mu_export_page_commands(
-        IntPtr engine, uint page, out IntPtr outData, out ulong outLen);
 
     // ========================================================================
     // Memory Management
@@ -269,15 +252,58 @@ public static class GlanceNative
         }
     }
 
-    // ========================================================================
-    // Test Functions (Phase 1 only)
-    // ========================================================================
+}
 
-    /// <summary>
-    /// Test function to verify DLL loads and basic FFI works.
-    /// Returns true if FFI is functional.
-    /// </summary>
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool test_ffi_works();
+/// <summary>
+/// fz_cookie-compatible abort block（= Sumatra <c>FitzAbortCookie</c> 的对应物）。
+/// 24 字节 C# 侧分配的共享内存，布局与 MuPDF <c>fz_cookie</c>（fitz/device.h）逐字段一致：
+/// <code>
+/// struct fz_cookie {
+///     int abort;            // offset 0  —— aborter 跨线程写 1
+///     int progress;         // offset 4
+///     size_t progress_max;  // offset 8  —— 置 (size_t)-1 防 MuPDF 预计数（同 Sumatra）
+///     int errors;           // offset 16
+///     int incomplete;       // offset 20
+/// };
+/// </code>
+/// 生命周期（1:1 RenderCache.cpp:1107/820）：渲染 worker 出请求前 New → 存入
+/// _curReqs[threadIdx]（aborter 经同一对象可见）→ 传 FFI → 渲染返回且
+/// _curReqs 置空后（持 _requestAccess）Free。aborter 写 abort 与 worker Free
+/// 都在 _requestAccess 临界区内 → 无 use-after-free。
+/// </summary>
+public static class GlanceCookie
+{
+    private const int Size = 24; // sizeof(fz_cookie) on x64
+
+    /// <summary>[渲染 worker] 分配零初始化的 abort block，progress_max=(size_t)-1（同 Sumatra 构造）。</summary>
+    public static IntPtr New()
+    {
+        IntPtr p = System.Runtime.InteropServices.Marshal.AllocHGlobal(Size);
+        try
+        {
+            // 零初始化（abort=0, progress=0, errors=0, incomplete=0）
+            for (int off = 0; off < Size; off += 8) System.Runtime.InteropServices.Marshal.WriteInt64(p, off, 0);
+            System.Runtime.InteropServices.Marshal.WriteInt64(p, 8, -1); // progress_max = (size_t)-1
+        }
+        catch
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(p);
+            throw;
+        }
+        return p;
+    }
+
+    /// <summary>[aborter, 须持 TileRenderCache._requestAccess] AbortCookie::Abort() 对应物。</summary>
+    public static void Abort(IntPtr cookie)
+    {
+        if (cookie == IntPtr.Zero) return;
+        System.Runtime.InteropServices.Marshal.WriteInt32(cookie, 0, 1);
+    }
+
+    /// <summary>[渲染 worker, 须持 _requestAccess] 释放（保证 aborter 已离开临界区）。</summary>
+    public static void Free(IntPtr cookie)
+    {
+        if (cookie == IntPtr.Zero) return;
+        System.Runtime.InteropServices.Marshal.FreeHGlobal(cookie);
+    }
 }

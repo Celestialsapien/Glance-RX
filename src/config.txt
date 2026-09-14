@@ -16,10 +16,6 @@
 #   （或默认位置）自动重新生成一份【全默认值】的 config.txt —— 等价于"恢复出厂设置"。
 #   Simply delete this file. Next launch runs with ALL defaults and auto-regenerates a
 #   full-default config.txt in this (or the default) location — i.e. a factory reset.
-#   注：重新生成的文件本身就是所有默认值，可随便改、搞乱了再删一次即可。
-#   Note: the regenerated file IS all-defaults; edit freely, and delete again to reset.
-#
-# 默认值对照 / Defaults (identical to the shipped build):
 # ============================================================================
 
 
@@ -45,28 +41,20 @@ PageGap = 16.0                    # 默认 16.0 | default
 PageGapHorizontal = 6.0           # 默认 6.0 | default
 
 
-# ---------------- 缓存与场景窗口 / Cache & scene window ----------------
-# 矢量场景缓存页数（每页命令列表几十 KB ~ 数 MB）。调大 → 滚动方向前方更多页提前构建好
-# 场景、进视口即清晰；代价是缓存内存随页数增长。
-# Vector scene cache capacity (pages). Larger = more ahead pages built before they enter the
-# viewport; cost is scene memory growing with the page count.
-MaxCachedPages = 10                # 默认 10 | default
+# ---------------- 光栅并发 / Raster concurrency ----------------
+# 光栅线程自动模式上限：auto = min(逻辑核数, 本值)。
+# Auto-mode ceiling: auto = min(logical cores, this).
+RenderWorkerCap = 16              # 默认 16 | default
 
-# ---------------- 矢量直绘 / Vector direct render ----------------
-VectorMaxCommandBytes = 536870912 # 默认 536870912 (512MB) | default
+# 绝对硬上限（防止极端配置让线程抢占 CPU/内存带宽）。
+# Absolute hard ceiling (prevents thread over-subscription on extreme configs).
+RenderWorkerHardCap = 24          # 默认 24 | default
 
-# 矢量直绘 OSD 调试层：0=关 1=开（逐页显示 V-Rdy/V-Bld/V-Fail/构建ms/场景KB）。
-VectorDebugOverlay = 0             # 默认 0 | default
 
 # ---------------- 滚动 / Scrolling ----------------
 # 判定滚动方向的死区(DIP)。远小于一次滚轮位移(~100)，但吃掉触控板抖动。
 # Deadzone for scroll direction (DIP). Smaller than a wheel notch (~100) but kills jitter.
 ScrollDirDeadzone = 8.0           # 默认 8.0 | default
-
-# ---------------- 淡入 / Fade-in ----------------
-# 页面从无到有时的淡入时长(ms)。分辨率升级直接替换、不闪。
-# Fade-in duration for a page appearing from nothing (ms).
-FadeInMs = 180                    # 默认 180 | default
 
 
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
@@ -146,18 +134,9 @@ ZoomReuseAnchorGraceMs = 200.0    # 默认 200.0 | default
 DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default
 
 
-# 这是"双击缩放看起来只有十几帧"的真因：每帧 UI 线程建整页位图太重。
-# This is the real cause of "double-click zoom looks like only ~10 frames": per-frame bitmap build is too heavy.
-
-
-#     (见 GpuPageView AnimateRaster* 常量)，不开放 config.txt。
-# Note: re-raster step/threshold & speed-adaptive lead are core-feel constants (AnimateRaster* in
-#     GpuPageView), NOT configurable by design.
-
-
 # ---------------- UI / 工具栏 / UI & toolbar ----------------
 # 工具栏滑入滑出时长(ms)。/ Toolbar slide-in/out duration (ms).
 UiTransitionMs = 150              # 默认 150 | default
 
 # 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。/ Auto-hide delay after pointer leaves (ms).
-ToolbarHideDelayMs = 180         # 默认 180 | default
+ToolbarHideDelayMs = 180          # 默认 180 | default

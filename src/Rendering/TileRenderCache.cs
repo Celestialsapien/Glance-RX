@@ -77,12 +77,45 @@ internal sealed class BitmapCacheEntry
     public float Zoom;
     public TilePosition Tile;
 
-    public byte[] Bitmap = Array.Empty<byte>();   // Pixmap* 对应物（BGRA8，stride=W*4）
+    // ---- Pixmap* 对应物：native BGRA 缓冲（stride=W*4）----
+    // ⚠ 与 Sumatra 1:1 的关键：Sumatra 的瓦片像素是 MuPDF 分配的 native Pixmap，
+    //   由 FreePixmap() 确定性释放，GC 完全不参与。Glance 原先用托管 byte[]（MB 级 LOH）：
+    //   每块瓦片一次 LOH 分配 → LOH 不可压缩 → GC 提交段只涨不落（实测 13MB 棘轮到 676MB）。
+    //   现在同样持有 native 缓冲：分配在 native 堆（游离即被 malloc 复用），释放走 memory_free。
+    public IntPtr Pixels;
+    public int PixelsLen;                          // memory_free 所需长度（= BitmapW*BitmapH*4）
     public int BitmapW, BitmapH;
-    public Microsoft.Graphics.Canvas.CanvasBitmap? Gpu;   // 外壳扩展：惰性 GPU 副本
+    public Microsoft.Graphics.Canvas.CanvasBitmap? Gpu;   // 外壳扩展：惰性 GPU 副本（Win2D 必需）
+    public int GpuBytes;                                  // 该 GPU 副本的字节数（诊断记账用；UMA 上即系统内存占用）
     public bool OutOfDate;
     public int Refs = 1;
     public int CacheIdx = -1;
+
+    /// <summary>条目是否还有可画的像素（native 缓冲 或 GPU 副本）。
+    /// GPU 副本建好后会释放 native 侧（见 ReleaseCpuBitmap），故不能只看 Pixels。</summary>
+    public bool HasBitmap => Pixels != IntPtr.Zero || Gpu != null;
+
+    /// <summary>FreePixmap 对应物：释放 native 瓦片缓冲。幂等（置零后重复调用无害）。
+    /// ⚠ 必须把 PixelsLen 一并置零 —— 否则「已释放」的瓦片会被误判为仍持有 native 缓冲。</summary>
+    public void FreeCpuPixels(ITileRenderHost host)
+    {
+        var p = Pixels;
+        if (p == IntPtr.Zero) return;
+        int len = PixelsLen;
+        Pixels = IntPtr.Zero;
+        PixelsLen = 0;
+        host.FreeTilePixels(p, len);
+    }
+
+    /// <summary>【外壳扩展】GPU 副本就位后丢弃 native 瓦片缓冲。
+    /// Sumatra 是 GDI 直 blit CPU pixmap，所以它必须留着 Pixmap；Glance 走 Win2D，
+    /// 画到屏上的是 CanvasBitmap，native 那份从此没有任何读取点 —— 留着就是整整一倍冗余。
+    /// 释放后条目有效性以 Gpu 为准（HasBitmap）；若 Gpu 之后被设备重建作废（DropGpuResources），
+    /// 该条目已无像素可画 → 由 DropGpuResources 直接淘汰，绝不留下"空条目卡住瓦片"。</summary>
+    public void ReleaseCpuBitmap(ITileRenderHost host)
+    {
+        if (Gpu != null) FreeCpuPixels(host);
+    }
 }
 
 /// <summary>RenderCache.h PageRenderRequest：渲染队列条目（复用结构）。</summary>
@@ -100,6 +133,12 @@ internal sealed class PageRenderRequest
     public bool Abort;
     public ulong Timestamp;
     public int ErrorCode;   // 0 = success
+
+    /// <summary>FitzAbortCookie 对应物（GlanceCookie 24B 共享块）。入队时 Zero（= Sumatra
+    /// newRequest-&gt;abortCookie = nullptr）；worker 开渲前分配并存入 _curReqs[threadIdx]
+    /// 同一对象 → AbortCurrentRequestLocked 可见并跨线程写 abort=1；渲染返回且
+    /// _curReqs 置空后由 worker 持 _requestAccess 释放（与 aborter 互斥，无 UAF）。</summary>
+    public IntPtr Cookie;
 
     // 预测链（kMaxPredictiveRequests）
     public int PredictiveOriginPageNo;
@@ -136,11 +175,20 @@ internal interface ITileRenderHost
     /// <summary>DisplayModel::RenderFinished → Repaint（已在 UI 线程）。</summary>
     void Repaint();
     void PostToUi(Action action);
-    /// <summary>engine->RenderPage(RenderPageArgs{pageRect}) 对应物：局部渲染。
+    /// <summary>render thread 的渲染入口（= Sumatra `engine->RenderPage(RenderPageArgs)`）。
     /// 入参 devW/devH/x0..y1 均为物理像素（与 mu_render_page_region_bgra 一致）。
-    /// 返回 (BGRA pixels, w, h)；失败抛异常（→ errorCode=1 路径）。</summary>
-    Task<(byte[] Pixels, int W, int H)> RenderTileAsync(
-        int pageNo, int devW, int devH, int x0, int y0, int x1, int y1);
+    /// cookie = FitzAbortCookie 对应物（GlanceCookie 分配的 24B fz_cookie 兼容块），
+    /// MuPDF 在 display-list 操作间隙自查中止（EngineMupdf.cpp:6542）。
+    /// 【同步】渲染一块瓦片，返回【拥有所有权的 native BGRA 缓冲】——不拷贝、也不释放；
+    /// 调用方负责把所有权交给缓存，或在丢弃时用 <see cref="FreeTilePixels"/> 释放。
+    /// Sumatra 的 render thread 就是同步调用引擎的，这里刻意不做任何 Task/线程池包装
+    /// （包一层 Task.Run + 信号量 = 每块瓦片多一个 Task、多一次线程池跳转、多一组阻塞等待）。</summary>
+    (IntPtr Data, int Length, int W, int H) RenderTile(
+        IntPtr cookie, int pageNo, int devW, int devH, int x0, int y0, int x1, int y1);
+
+    /// <summary>FreePixmap 对应物：释放 RenderTile 返回的 native 缓冲。</summary>
+    void FreeTilePixels(IntPtr data, int length);
+
     /// <summary>BlitPixmapRegion 对应物（仅 UI 线程 Draw 帧内调用）。
     /// target = 视口物理像素矩形；source = 位图内像素矩形（源索引必须用位图像素，
     /// 不能是 DIP —— 这是 Win2D DrawImage 的源/目标异单位陷阱）。</summary>
@@ -246,7 +294,7 @@ internal sealed class TileRenderCache : IDisposable
         entry.Refs--;
         if (entry.Refs > 0) return false;
 
-        DisposeGpuLocked(entry);
+        ReleaseEntryPayload(entry);
 
         _cache[idx] = null;
         int lastIdx = _cacheCount - 1;
@@ -267,21 +315,42 @@ internal sealed class TileRenderCache : IDisposable
         return DropCacheEntryLocked(entry);
     }
 
-    /// <summary>GPU 位图释放必须回 UI 线程（Draw 帧可能仍引用）。</summary>
+    /// <summary>GPU 位图释放必须回 UI 线程（Draw 帧可能仍引用）。
+    /// 诊断记账放在真正 Dispose() 之后 —— 这一列的意义就是量"已 Drop、还在等 Dispose"的纹理。</summary>
     private void DisposeGpuLocked(BitmapCacheEntry entry)
     {
         var gpu = entry.Gpu;
+        int bytes = entry.GpuBytes;
         entry.Gpu = null;
+        entry.GpuBytes = 0;
         if (gpu != null)
-            _host.PostToUi(() => { try { gpu.Dispose(); } catch { } });
+            _host.PostToUi(() =>
+            {
+                try { gpu.Dispose(); } catch { }
+            });
     }
 
-    /// <summary>外壳扩展：设备重建时作废全部 GPU 位图（CPU 缓存与 Sumatra 一致地保留）。</summary>
+    /// <summary>条目彻底作废时释放两侧像素：GPU 副本 + native 瓦片缓冲（= FreePixmap）。
+    /// ⚠ 与 <see cref="DisposeGpuLocked"/> 的区别：它【只】释放 GPU 侧，用于设备重建
+    /// （那时 native 侧要留下当回退，不能一起丢）。</summary>
+    private void ReleaseEntryPayload(BitmapCacheEntry entry)
+    {
+        DisposeGpuLocked(entry);
+        entry.FreeCpuPixels(_host);
+    }
+
+    /// <summary>外壳扩展：设备重建时作废全部 GPU 位图。仍持 CPU 真身的条目与 Sumatra 一致地保留；
+    /// 已被 ReleaseCpuBitmap 掏空的条目此时已无像素可画 → 淘汰（否则会留下"有键无图"的空条目）。</summary>
     public void DropGpuResources()
     {
         lock (_cacheAccess)
         {
-            for (int i = 0; i < _cacheCount; i++) DisposeGpuLocked(_cache[i]!);
+            for (int i = _cacheCount - 1; i >= 0; i--)
+            {
+                var e = _cache[i]!;
+                DisposeGpuLocked(e);
+                if (e.Pixels == IntPtr.Zero) DropCacheEntryLocked(e);
+            }
         }
     }
 
@@ -311,8 +380,9 @@ internal sealed class TileRenderCache : IDisposable
         return false;
     }
 
-    /// <summary>RenderCache::Add：先 FreePage 同瓦片（不同 zoom/rotation），再腾坑，再入缓存。</summary>
-    private void AddLocked(PageRenderRequest req, byte[] bmp, int w, int h)
+    /// <summary>RenderCache::Add：先 FreePage 同瓦片（不同 zoom/rotation），再腾坑，再入缓存。
+    /// 返回 true = 缓存已接管 native 缓冲所有权；false = 腾不出坑，调用方须自行 FreeTilePixels。</summary>
+    private bool AddLocked(PageRenderRequest req, IntPtr pixels, int len, int w, int h)
     {
         req.Rotation = NormalizeRotation(req.Rotation);
 
@@ -322,7 +392,7 @@ internal sealed class TileRenderCache : IDisposable
         bool hasSpace = FreeIfFullLocked(req);
         if (!hasSpace || _cacheCount >= KMaxBitmapsCached)
         {
-            return;   // 腾不出坑：丢弃本图（Sumatra 同路径）。
+            return false;   // 腾不出坑：丢弃本图（Sumatra 同路径 → 调用方 FreePixmap）。
         }
 
         var entry = new BitmapCacheEntry
@@ -332,13 +402,15 @@ internal sealed class TileRenderCache : IDisposable
             Rotation = req.Rotation,
             Zoom = req.Zoom,
             Tile = req.Tile,
-            Bitmap = bmp,
+            Pixels = pixels,
+            PixelsLen = len,
             BitmapW = w,
             BitmapH = h,
             CacheIdx = _cacheCount
         };
         _cache[_cacheCount] = entry;
         _cacheCount++;
+        return true;
     }
 
     // ---------------- 瓦片几何（RenderCache.cpp 303-355） ----------------
@@ -592,7 +664,7 @@ internal sealed class TileRenderCache : IDisposable
                     MaxTileSize = new Size(MaxTileSize.Width, MaxTileSize.Height / 2);
                 NTileSizeReductions++;
 
-                for (int i = _cacheCount - 1; i >= 0; i--) DisposeGpuLocked(_cache[i]!);
+                for (int i = _cacheCount - 1; i >= 0; i--) ReleaseEntryPayload(_cache[i]!);
                 Array.Clear(_cache);
                 _cacheCount = 0;
                 _requestCount = 0;
@@ -850,6 +922,7 @@ internal sealed class TileRenderCache : IDisposable
         req.Abort = src.Abort;
         req.Timestamp = src.Timestamp;
         req.ErrorCode = 0;
+        req.Cookie = IntPtr.Zero;   // 队列条目尚未开渲（= Sumatra newRequest->abortCookie = nullptr）
         req.PredictiveOriginPageNo = src.PredictiveOriginPageNo;
         req.NPredictiveRequests = src.NPredictiveRequests;
         Array.Copy(src.PredictiveRequests, req.PredictiveRequests, KMaxPredictiveRequests);
@@ -950,8 +1023,14 @@ internal sealed class TileRenderCache : IDisposable
     {
         var cr = _curReqs[threadIdx];
         if (cr == null) return;
-        // AbortCookie 无对应物（同步 FFI）——置 abort 标志，渲染完成后丢弃结果。
+        // AbortCookie 对应物（Sumatra RenderCache.cpp:1043-1052）：置标志 +
+        // 跨线程写 cookie.abort=1 —— MuPDF 在 display-list 操作间隙自查，
+        // 在途渲染毫秒级终止，而不是跑完全程再丢弃（400% 快滚 CPU 风暴根因）。
         cr.Abort = true;
+        if (cr.Cookie != IntPtr.Zero)
+        {
+            try { Glance.Interop.GlanceCookie.Abort(cr.Cookie); } catch { }
+        }
     }
 
     // ---------------- RenderCacheThread（1056-1180） ----------------
@@ -960,12 +1039,23 @@ internal sealed class TileRenderCache : IDisposable
     {
         int threadIdx = (int)data!;
         var req = new PageRenderRequest();
+        IntPtr pendingCookie = IntPtr.Zero;   // 本线程当前在渲请求的 abort block（C# 所有）
 
         for (;;)
         {
             if (_shouldExit) break;
             bool queueEmpty;
-            lock (_requestAccess) queueEmpty = ClearCurrentRequestLocked(threadIdx);
+            lock (_requestAccess)
+            {
+                // 清 _curReqs[threadIdx]（= Sumatra ClearCurrentRequest）。
+                // 此刻起 aborter 再也拿不到上一请求的 cookie → 同锁内释放，无 UAF。
+                queueEmpty = ClearCurrentRequestLocked(threadIdx);
+                if (pendingCookie != IntPtr.Zero)
+                {
+                    try { Glance.Interop.GlanceCookie.Free(pendingCookie); } catch { }
+                    pendingCookie = IntPtr.Zero;
+                }
+            }
             if (queueEmpty)
             {
                 lock (_requestAccess) _idleThreads++;
@@ -974,9 +1064,19 @@ internal sealed class TileRenderCache : IDisposable
                 if (_shouldExit) break;
             }
 
+            IntPtr cookie = IntPtr.Zero;
             lock (_requestAccess)
             {
                 if (!GetNextRequestLocked(req, threadIdx)) { continue; }
+                // FitzAbortCookie 分配（Sumatra: RenderPageArgs{&req.abortCookie} 由引擎
+                // 出口分配；我们同样在开渲前创建）→ 存入 _curReqs 同一对象，aborter 可见。
+                try
+                {
+                    cookie = Glance.Interop.GlanceCookie.New();
+                    req.Cookie = cookie;
+                    pendingCookie = cookie;
+                }
+                catch { cookie = IntPtr.Zero; req.Cookie = IntPtr.Zero; }
             }
 
             if (!_host.PageVisibleNearby(req.PageNo))
@@ -987,31 +1087,46 @@ internal sealed class TileRenderCache : IDisposable
 
             if (_host.PauseRendering) continue;
 
+            // Sumatra render thread：同步调引擎拿 Pixmap*，没有 Task / 信号量 / 线程池跳转。
+            IntPtr tilePtr = IntPtr.Zero;
+            int len = 0, w = 0, h = 0;
             try
             {
-                var (pixels, w, h) = _host.RenderTileAsync(
-                    req.PageNo, req.DevW, req.DevH, req.X0, req.Y0, req.X1, req.Y1)
-                    .ConfigureAwait(false).GetAwaiter().GetResult();
+                (tilePtr, len, w, h) = _host.RenderTile(
+                    cookie, req.PageNo, req.DevW, req.DevH, req.X0, req.Y0, req.X1, req.Y1);
+            }
+            catch
+            {
+                tilePtr = IntPtr.Zero;
+                req.ErrorCode = 1;
+            }
 
-                if (req.Abort)
-                {
-                    continue;   // 已打断 → 丢弃结果（AbortCookie 语义）
-                }
+            if (tilePtr == IntPtr.Zero || len <= 0)
+            {
+                req.ErrorCode = 1;
+                req.FinishedCb?.Invoke(req);
+                continue;
+            }
 
-                if (pixels != null && pixels.Length > 0)
-                {
-                    lock (_cacheAccess) AddLocked(req, pixels, w, h);
-                    req.ErrorCode = 0;
-                }
-                else
-                {
-                    req.ErrorCode = 1;
-                }
+            if (req.Abort)
+            {
+                _host.FreeTilePixels(tilePtr, len);   // 已打断 → 丢弃结果（AbortCookie 语义）
+                req.FinishedCb?.Invoke(req);
+                continue;
+            }
+
+            bool owned = false;
+            try
+            {
+                // AddLocked 腾不出坑时返回 false（Sumatra 同路径），由下面 FreePixmap 兜底。
+                lock (_cacheAccess) owned = AddLocked(req, tilePtr, len, w, h);
+                req.ErrorCode = owned ? 0 : 1;
             }
             catch
             {
                 req.ErrorCode = 1;
             }
+            if (!owned) _host.FreeTilePixels(tilePtr, len);
 
             req.FinishedCb?.Invoke(req);
         }
@@ -1042,7 +1157,8 @@ internal sealed class TileRenderCache : IDisposable
             }
         }
 
-        if (entry == null || entry.Bitmap.Length == 0)
+        // HasBitmap = CPU 真身或 GPU 副本有一个可画（GPU 就位后 CPU 份会被释放，见 ReleaseCpuBitmap）。
+        if (entry == null || !entry.HasBitmap)
         {
             bool didReduce = entry != null && ReduceTileSize();
             if (entry != null && !didReduce) renderDelay = TileRenderDelay.Failed;
@@ -1182,21 +1298,6 @@ internal sealed class TileRenderCache : IDisposable
 
     public bool IsRenderQueueFull => _requestCount == KMaxPageRequests;
 
-    public string BusyInfo()
-    {
-        lock (_requestAccess)
-        {
-            string s = $"tile={MaxTileSize.Width:F0}x{MaxTileSize.Height:F0} cache={_cacheCount} queued={_requestCount} threads={_nRenderThreads} reduced={NTileSizeReductions}";
-            for (int i = 0; i < _nRenderThreads; i++)
-            {
-                var r = _curReqs[i];
-                if (r != null)
-                    s += $" t{i}=p{r.PageNo},res{r.Tile.Res},r{r.Tile.Row}c{r.Tile.Col}{(r.Abort ? ",abort" : "")}";
-            }
-            return s;
-        }
-    }
-
     private static int NormalizeRotation(int rotation)
     {
         rotation %= 360;
@@ -1227,7 +1328,7 @@ internal sealed class TileRenderCache : IDisposable
         _startRendering.Dispose();
         lock (_cacheAccess)
         {
-            for (int i = _cacheCount - 1; i >= 0; i--) DisposeGpuLocked(_cache[i]!);
+            for (int i = _cacheCount - 1; i >= 0; i--) ReleaseEntryPayload(_cache[i]!);
             Array.Clear(_cache);
             _cacheCount = 0;
         }

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,9 +24,10 @@ namespace Glance.Services;
 /// </summary>
 public class PdfRenderService : IDisposable
 {
-    /// <summary>Max in-flight byte[] pool, mirrors the old worker pool's budget.</summary>
-    private static readonly ArrayPool<byte> PixelPool =
-        ArrayPool<byte>.Create(64 * 1024 * 1024, 4);
+    // 【已删除】PixelPool = ArrayPool<byte>.Create(64MB, 4)：
+    //   每个桶最多常驻 4 个强引用数组（活对象 → 计入 GC 提交段且永不还 OS），而瓦片缓冲
+    //   的所有权本来就要交给缓存长期持有、根本无法归还池 —— 池只带来了「多一次全量拷贝 +
+    //   一段永不释放的驻留」。Sumatra 侧没有这一层（fz_new_pixmap → fz_drop_pixmap）。
 
     private readonly int _renderCap;
     private IntPtr _engine;
@@ -77,8 +77,10 @@ public class PdfRenderService : IDisposable
             IntPtr pwPtr = password == null ? IntPtr.Zero : GlanceNative.MarshalUtf8(password);
             try
             {
-                // hot capacity = 滑动窗口页数，与 C# 端缓存窗口对齐 → 窗口内翻页/回看零 reload。
-                return GlanceNative.mu_engine_open(pathPtr, pwPtr, (uint)Tuning.MaxCachedPages);
+                // hot capacity = 0 → 原生侧不逐出解析页缓存（1:1 Sumatra pageInfos：
+                // 每页 display list 永久持有）。⚠ LRU 逐出会导致 DL 重建 → 全新 fz_image
+                // → store 已解码图变孤儿 → 每块瓦片重新解码整页扫描图（CPU 风暴根因）。
+                return GlanceNative.mu_engine_open(pathPtr, pwPtr, 0);
             }
             finally
             {
@@ -101,26 +103,9 @@ public class PdfRenderService : IDisposable
         _initialized = true;
     }
 
-    /// <summary>Render a page directly to raw BGRA pixels (tightly packed BGRA8).</summary>
+    /// <summary>Render a page directly to raw BGRA pixels (tightly packed BGRA8).
+    /// 返回值是【自有】缓冲（一次分配、一次拷贝），调用方可长期持有，无需归还。</summary>
     public async Task<(byte[] Pixels, int Width, int Height)> RenderPageBgraAsync(
-        uint pageIndex,
-        uint width,
-        uint height,
-        CancellationToken cancellationToken = default)
-    {
-        var (buf, len, w, h) = await RenderPageBgraPooledAsync(pageIndex, width, height, cancellationToken).ConfigureAwait(false);
-        byte[] owned = new byte[len];
-        Buffer.BlockCopy(buf, 0, owned, 0, len);
-        ReturnPixelBuffer(buf);
-        return (owned, w, h);
-    }
-
-    /// <summary>
-    /// Render a page to raw BGRA pixels using a POOLED buffer (zero LOH churn).
-    /// The returned array may be LARGER than Length — only the first Length bytes
-    /// are valid. Caller MUST return it via <see cref="ReturnPixelBuffer"/>.
-    /// </summary>
-    public async Task<(byte[] Buffer, int Length, int Width, int Height)> RenderPageBgraPooledAsync(
         uint pageIndex,
         uint width,
         uint height,
@@ -134,55 +119,51 @@ public class PdfRenderService : IDisposable
         await AcquireSlotAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await Task.Run(
-                () => RenderPageCore(pageIndex, width, height),
-                cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            _slot!.Release();
-        }
-    }
-
-    /// <summary>Return a buffer obtained from <see cref="RenderPageBgraPooledAsync"/> back to the pool.</summary>
-    public static void ReturnPixelBuffer(byte[] buffer)
-    {
-        PixelPool.Return(buffer);
-    }
-
-    /// <summary>
-    /// Render a sub-rectangle of a page's device space (tile) to raw BGRA pixels —
-    /// the <c>RenderCache::Render</c> → <c>engine->RenderPage(RenderPageArgs{pageRect})</c>
-    /// counterpart: only the tile rect is rasterized, so zoom-in never re-renders the
-    /// whole page. (devW/devH) is the full-page pixel size at the render density;
-    /// (x0,y0)-(x1,y1) the tile rect within it.
-    /// </summary>
-    public async Task<(byte[] Pixels, int Width, int Height)> RenderPageRegionBgraAsync(
-        uint pageIndex, uint devW, uint devH,
-        uint x0, uint y0, uint x1, uint y1,
-        CancellationToken cancellationToken = default)
-    {
-        EnsureReady();
-        await AcquireSlotAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
             return await Task.Run(() =>
             {
-                var resp = GlanceNative.mu_render_page_region_bgra(
-                    _engine, pageIndex, devW, devH, x0, y0, x1, y1,
-                    out IntPtr data, out ulong len, out uint w, out uint h);
-                GlanceNative.ThrowIfFailed(resp, "Render page region");
-                var (buf, length, width, height) = CopyOut(data, len, w, h);
-                byte[] owned = new byte[length];
-                Buffer.BlockCopy(buf, 0, owned, 0, length);
-                ReturnPixelBuffer(buf);
-                return (owned, width, height);
+                var (pixels, _, w, h) = RenderPageCore(pageIndex, width, height);
+                return (pixels, w, h);
             }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             _slot!.Release();
         }
+    }
+
+    /// <summary>
+    /// Render a tile (sub-rectangle of a page's device space) and hand back the OWNING
+    /// native BGRA buffer — the <c>RenderCache</c> render-thread →
+    /// <c>engine->RenderPage(RenderPageArgs{pageRect})</c> counterpart.
+    ///
+    /// 【同步 + 零拷贝】：不做 Task.Run、不抢并发槽、不 Marshal.Copy、不 new byte[]。
+    /// Sumatra 的 render thread 就是直接同步调引擎拿一个 <c>Pixmap*</c>，然后
+    /// <c>cache->Add()</c> 接管所有权、<c>FreePixmap()</c> 释放；这里完全同构：
+    /// 返回的指针直接就是缓存条目的像素本体，条目作废时由 <c>memory_free</c> 释放。
+    ///
+    /// ⚠ 调用方【必须】接管所有权：交给缓存，或自行调用 <c>GlanceNative.memory_free(data, len)</c>。
+    /// THREAD-SAFE：与 <c>mu_render_page_region_bgra</c> 的约定一致（每线程独立 fz_context）。
+    /// <paramref name="cookie"/>：fz_cookie 兼容 abort block（GlanceCookie.New()，可为 Zero）——
+    /// = Sumatra RenderPageArgs{abortCookie}，MuPDF 在 display-list 操作间隙自查中止。
+    /// </summary>
+    public (IntPtr Data, int Length, int W, int H) RenderPageRegionOwningNative(
+        uint pageIndex, uint devW, uint devH,
+        uint x0, uint y0, uint x1, uint y1,
+        IntPtr cookie = default)
+    {
+        EnsureReady();
+        EnsureRenderPriority();
+        var resp = GlanceNative.mu_render_page_region_bgra(
+            _engine, pageIndex, devW, devH, x0, y0, x1, y1,
+            cookie,
+            out IntPtr data, out ulong len, out uint w, out uint h);
+        GlanceNative.ThrowIfFailed(resp, "Render page region");
+        if (data == IntPtr.Zero || len == 0)
+        {
+            if (data != IntPtr.Zero) GlanceNative.memory_free(data, len);
+            return (IntPtr.Zero, 0, (int)w, (int)h);
+        }
+        return (data, (int)len, (int)w, (int)h);
     }
 
     /// <summary>
@@ -294,46 +275,7 @@ public class PdfRenderService : IDisposable
         }
     }
 
-    /// <summary>
-    /// 导出某页的矢量命令流（display list → 与分辨率无关的二进制命令流，见
-    /// VectorSceneBuilder）。与渲染一样占用并发槽位（Dispose 排空槽位后才销毁
-    /// 引擎，避免导出与引擎销毁竞态——必须走槽，不能绕过）。返回 null = 失败
-    /// 或命令流超限（调用方应回退瓦片管线）。
-    /// </summary>
-    public async Task<byte[]?> ExportPageCommandsAsync(uint pageIndex, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            EnsureReady();
-            await AcquireSlotAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                return await Task.Run(() =>
-                {
-                    var resp = GlanceNative.mu_export_page_commands(_engine, pageIndex, out _, out _);
-                    if (!resp.Success) return null;
-                    try
-                    {
-                        if (resp.DataLen > (ulong)Tuning.VectorMaxCommandBytes) return null;
-                        byte[] bytes = new byte[resp.DataLen];
-                        Marshal.Copy(resp.DataPtr, bytes, 0, (int)resp.DataLen);
-                        return bytes;
-                    }
-                    finally { GlanceNative.memory_free(resp.DataPtr, resp.DataLen); }
-                }, cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                _slot!.Release();
-            }
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    // ---- private helpers --------------------------------------------------
+    // ---- private helpers ------
 
     private async Task AcquireSlotAsync(CancellationToken ct)
     {
@@ -364,18 +306,23 @@ public class PdfRenderService : IDisposable
         EnsureRenderPriority();
         var resp = GlanceNative.mu_render_page_bgra(
             _engine, pageIndex, width, height,
+            IntPtr.Zero,
             out IntPtr data, out ulong len, out uint w, out uint h);
         GlanceNative.ThrowIfFailed(resp, "Render page");
         return CopyOut(data, len, w, h);
     }
 
+    /// <summary>把 native BGRA 结果拷成一张【自有的、可被缓存长期持有的】托管缓冲，并释放 native 侧。
+    /// 用 <see cref="GC.AllocateUninitializedArray{T}(int)"/> 跳过零初始化：紧接着的 Marshal.Copy
+    /// 会写满整段，零初始化只是白白跑一遍多 MB 的 memset（每个瓦片都跑）。</summary>
     private static (byte[], int, int, int) CopyOut(IntPtr data, ulong len, uint w, uint h)
     {
         try
         {
-            byte[] buf = PixelPool.Rent((int)len);
-            Marshal.Copy(data, buf, 0, (int)len);
-            return (buf, (int)len, (int)w, (int)h);
+            int n = (int)len;
+            byte[] owned = GC.AllocateUninitializedArray<byte>(n);
+            Marshal.Copy(data, owned, 0, n);
+            return (owned, n, (int)w, (int)h);
         }
         finally
         {

@@ -44,10 +44,6 @@ namespace Glance
 #   （或默认位置）自动重新生成一份【全默认值】的 config.txt —— 等价于""恢复出厂设置""。
 #   Simply delete this file. Next launch runs with ALL defaults and auto-regenerates a
 #   full-default config.txt in this (or the default) location — i.e. a factory reset.
-#   注：重新生成的文件本身就是所有默认值，可随便改、搞乱了再删一次即可。
-#   Note: the regenerated file IS all-defaults; edit freely, and delete again to reset.
-#
-# 默认值对照 / Defaults (identical to the shipped build):
 # ============================================================================
 
 
@@ -73,49 +69,20 @@ PageGap = 16.0                    # 默认 16.0 | default
 PageGapHorizontal = 6.0           # 默认 6.0 | default
 
 
-# ---------------- 缓存与光栅 / Cache & raster ----------------
-# 位图 LRU 缓存页数（每页高清采样约 48MB）。10 页≈480MB：用更多内存换跳转/回看即时出图。
-# Bitmap LRU capacity (pages, ~48MB each). 10 ≈ 480MB: more memory for instant jump/back image.
-MaxCachedPages = 10               # 默认 10 | default
+# ---------------- 光栅并发 / Raster concurrency ----------------
+# 光栅线程自动模式上限：auto = min(逻辑核数, 本值)。
+# Auto-mode ceiling: auto = min(logical cores, this).
+RenderWorkerCap = 16              # 默认 16 | default
 
-# 单页光栅长边像素上限（防超大页面爆内存）。
-# ⚠ 这是【过采样红利】的封顶，不是清晰度封顶：实际上限 = max(本值, 屏幕 1:1 所需长边)，
-# 只有页面大到连 1:1 都超出字节预算时才真正被压。
-# Per-page raster long-edge cap (px). Floor only: effective cap = max(this, 1:1 long edge),
-
-# 单页整页合成层(RenderTarget)字节预算：devW×devH×4 不得超过本值，超出则按该预算反解长边上限。
-# 这是""高缩放不欠采样""与""超大页面不爆显存""之间的唯一硬边界。调大=超大页面在高缩放下也能到 1:1，
-# 代价是单页纹理更大（常驻页数由 MaxCachedPages 决定）。
-# 单页整页合成层字节预算：devW×devH×4 不得超过本值，超出则按该预算反解长边上限。
-# Per-page composite layer byte budget: devW×devH×4 must not exceed this.
-
-# 瓦片边长(设备像素)。调大：每页分割的瓦片更少、MuPDF 跨瓦片边界重复解码图片的次数更小
-# → 图片型/扫描 PDF 铺瓦更快（翻页/滚动铺瓦更跟手）；缺点：单瓦片位图/单次分配变大、调度粒度变粗。
-# Tile side length (device px). Larger = fewer tiles/page + less redundant MuPDF image decode across
-# tile seams → faster tiling for image-heavy/scanned PDFs; smaller tiles = finer scheduling granularity.
+# 绝对硬上限（防止极端配置让线程抢占 CPU/内存带宽）。
+# Absolute hard ceiling (prevents thread over-subscription on extreme configs).
+RenderWorkerHardCap = 24          # 默认 24 | default
 
 
-# ---------------- 预渲染滑动窗口 / Prefetch window ----------------
-# 瓦片预铺视口外扩倍数（视口）。0=只铺视口（翻页/滚动可见铺瓦过程）；
-# 10≈视口外 10 屏：配合 MaxCachedPages 窗口，滚动方向前方多页提前整页铺瓦，
-# 滚动中实时预取、远处瓦片由预算实时淘汰 → 内存有界、又不会一滚就撞到清晰边缘。
-# Tile prefetch viewport expansion (views). 0 = viewport only (tiling visible during
-# scroll/flip); 10 ≈ 10 viewport leads (ahead pages pre-tiled, bounded memory).
-
-# 滚动低清预载：滚动中视口外的前瞻页先用 1/2 分辨率渲染（位图 48→11MB/页，
-# 运动模糊掩盖低清），静止超过此窗口(ms)后自动升级全高清。0 = 关闭。
-# Low-res prefetch during scroll: ahead pages render at 1/2 res while moving
-# (motion blur hides it); upgrade to full HD after this quiet window (ms). 0 = off.
-
+# ---------------- 滚动 / Scrolling ----------------
 # 判定滚动方向的死区(DIP)。远小于一次滚轮位移(~100)，但吃掉触控板抖动。
 # Deadzone for scroll direction (DIP). Smaller than a wheel notch (~100) but kills jitter.
 ScrollDirDeadzone = 8.0           # 默认 8.0 | default
-
-
-# ---------------- 淡入 / Fade-in ----------------
-# 页面从无到有时的淡入时长(ms)。分辨率升级直接替换、不闪。
-# Fade-in duration for a page appearing from nothing (ms).
-FadeInMs = 180                    # 默认 180 | default
 
 
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
@@ -195,24 +162,12 @@ ZoomReuseAnchorGraceMs = 200.0    # 默认 200.0 | default
 DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default
 
 
-# ---------------- 动画期重光栅节流 / Raster throttle during animation ----------------
-# 这是""双击缩放看起来只有十几帧""的真因：每帧 UI 线程建整页位图太重。
-# This is the real cause of ""double-click zoom looks like only ~10 frames"": per-frame bitmap build is too heavy.
-
-# 两次重光栅的最小间隔(ms)。/ Min re-raster interval (ms).
-
-# 注：缩放动画期实时重光栅的阶梯档距/前瞻/速度响应均为核心手感件，已按项目约定硬编码
-#     (见 GpuPageView AnimateRaster* 常量)，不开放 config.txt。
-# Note: re-raster step/threshold & speed-adaptive lead are core-feel constants (AnimateRaster* in
-#     GpuPageView), NOT configurable by design.
-
-
 # ---------------- UI / 工具栏 / UI & toolbar ----------------
 # 工具栏滑入滑出时长(ms)。/ Toolbar slide-in/out duration (ms).
 UiTransitionMs = 150              # 默认 150 | default
 
 # 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。/ Auto-hide delay after pointer leaves (ms).
-ToolbarHideDelayMs = 180         # 默认 180 | default";
+ToolbarHideDelayMs = 180          # 默认 180 | default";
 
         // ---------------- 缩放范围 / Zoom range ----------------
         public static double MinZoom = 0.1;                 // 最小缩放比例 / min zoom ratio (10%)
@@ -226,20 +181,14 @@ ToolbarHideDelayMs = 180         # 默认 180 | default";
         public static double PageGapHorizontal = 6.0;       // 横向连续布局页间距 / horizontal page gap (cross-page feel)
 
         // ---------------- 缓存与光栅 / Cache & raster ----------------
-        public static int MaxCachedPages = 10;              // 位图 LRU 容量(页) / bitmap LRU capacity (pages) —— 调高：接受更多内存换跳转/回看即时出图
         // 并发光栅线程数【不再可配置】：始终由 PdfRenderService 按物理核自适应选择
         //（物理核 - 1 留档给 UI/Win2D，受 RenderWorkerCap 封顶）。——
         // RenderWorkerCount：见 PdfRenderService.CpuCoreInfo.PhysicalCoreCount()
         public static int RenderWorkerCap = 16;             // 自动模式上限：auto = min(逻辑核数, 本值)
         public static int RenderWorkerHardCap = 24;         // 绝对硬上限（防止极端配置让线程抢占 CPU/内存带宽）
-        public static long VectorMaxCommandBytes = 512L * 1024 * 1024; // 矢量命令流单页字节上限：超过即视为构建失败并重试（防巨型扫描页一次性构建撑爆内存）/ per-page vector command-stream byte cap
-        public static int VectorDebugOverlay = 0;         // 矢量直绘 OSD 调试层(0关/1开)：每页绘制状态(V/Ready/Fail/Building/构建ms/场景字节) / vector-render OSD debug overlay
 
         // ---------------- 预渲染滑动窗口 / Prefetch window ----------------
         public static double ScrollDirDeadzone = 8.0;       // 滚动方向死区(DIP) / scroll direction deadzone (DIP)
-
-        // ---------------- 淡入 / Fade-in ----------------
-        public static int FadeInMs = 180;                  // 首图从无到有淡入时长(ms) / first-image fade-in duration (ms)
 
         // ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
         // 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动收敛阈值。
@@ -386,13 +335,9 @@ ToolbarHideDelayMs = 180         # 默认 180 | default";
                 case "DocMargin": DocMargin = ParseDouble(raw, DocMargin); break;
                 case "PageGap": PageGap = ParseDouble(raw, PageGap); break;
                 case "PageGapHorizontal": PageGapHorizontal = ParseDouble(raw, PageGapHorizontal); break;
-                case "MaxCachedPages": MaxCachedPages = ParseInt(raw, MaxCachedPages); break;
                 case "RenderWorkerCap": RenderWorkerCap = ParseInt(raw, RenderWorkerCap); break;
                 case "RenderWorkerHardCap": RenderWorkerHardCap = ParseInt(raw, RenderWorkerHardCap); break;
-                case "VectorMaxCommandBytes": VectorMaxCommandBytes = ParseLong(raw, VectorMaxCommandBytes); break;
-                case "VectorDebugOverlay": VectorDebugOverlay = ParseInt(raw, VectorDebugOverlay); break;
                 case "ScrollDirDeadzone": ScrollDirDeadzone = ParseDouble(raw, ScrollDirDeadzone); break;
-                case "FadeInMs": FadeInMs = ParseInt(raw, FadeInMs); break;
                 case "ScrollSpringOmega": ScrollSpringOmega = ParseDouble(raw, ScrollSpringOmega); break;
                 case "ZoomSpringOmega": ZoomSpringOmega = ParseDouble(raw, ZoomSpringOmega); break;
                 case "RightZoomSpringOmega": RightZoomSpringOmega = ParseDouble(raw, RightZoomSpringOmega); break;
@@ -420,8 +365,5 @@ ToolbarHideDelayMs = 180         # 默认 180 | default";
 
         private static int ParseInt(string raw, int fallback)
             => int.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : fallback;
-
-        private static long ParseLong(string raw, long fallback)
-            => long.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : fallback;
     }
 }
