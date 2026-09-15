@@ -381,18 +381,24 @@ public sealed partial class MainWindow : Window
 
     // ═════════════════════════════════════════════════════════════════════
     // 窗口最大化/还原过渡遮罩：窗口子类拦 WM_SYSCOMMAND（SC_MAXIMIZE/SC_RESTORE），
-    // 同步把遮罩 Opacity 置 1，然后压住本帧、16ms 后把系统命令交回默认窗口过程 ——
-    // 遮罩先上屏，窗口才开始变形，同帧竞态从根上不存在。
+    // 本帧吞掉命令、同步硬切抬起遮罩（Opacity 直接置 1），等 MaskDeferMs 后才把命令交回默认窗口过程 ——
+    // 一律"先盖后动"：窗口变形时遮罩早已不透明，不存在"看到内容抖一下才盖上"。
     //
-    // 单纯"让遮罩来得更早"无解：遮罩与窗口变形始终在同一帧竞争，Win2D 画布走独立
-    // swap chain、有自己的 present 路径，抖动帧总能抢先一帧（2026-09-14/15 多轮实测）。
-    // 故方向反过来 —— 不抢遮罩，而是把窗口操作拖后一帧。
+    // 抬起用硬切而非淡入：用户 2026-09-16 明确表示能接受"啪"地盖上，不接受的是盖上【前】看到抖动；
+    // 淡入会让总动画变长，故只保留淡出 —— 硬切本身也是最快的遮盖方式。
+    //
+    // MaskDeferMs 为什么不能小：它要保证遮罩那一帧已经真正上屏。16ms（一帧）时偶有抢不赢的情况
+    // —— 遮罩与窗口变形同帧竞争，Win2D 画布走独立 swap chain、有自己的 present 路径，
+    // 抖动帧总能抢先一帧（2026-09-14/15 多轮实测）。取 50ms（约三帧）留出余量，
+    // 又远低于 100ms 的"即时"感知阈值，不会有迟滞感。
+    //
+    // 注：遮盖时长（最短遮盖 / 尺寸静默）以【命令重放、窗口开始变形】为起点，不是以抬起遮罩为起点。
     // ═════════════════════════════════════════════════════════════════════
 
-    private const double MaskDeferMs = 16.0;       // 盖遮罩后延迟一帧再执行系统命令
+    private const double MaskDeferMs = 50.0;       // 抬起遮罩后延迟放行系统命令（约三帧，给遮罩上屏留余量）
     private const double MaskMinShowMs = 260.0;    // 最短遮盖时长（须盖过 OS 窗口动画时长）
     private const double MaskSizeStableMs = 150.0; // 内容区尺寸静默多久算"过渡已完成"
-    private const double MaskFadeMs = 160.0;       // 淡出时长
+    private const double MaskFadeMs = 100.0;       // 淡出时长
     private const double MaskHardCapMs = 1200.0;   // 绝对上限（兜底，绝不永久遮住）
 
     private const uint WM_SYSCOMMAND = 0x0112;
@@ -429,7 +435,7 @@ public sealed partial class MainWindow : Window
     private IntPtr _maskHwnd = IntPtr.Zero;
     private bool _maskSubclassInstalled;
 
-    private DispatcherTimer? _maskDeferTimer;   // 延迟一帧执行系统命令
+    private DispatcherTimer? _maskDeferTimer;   // 抬起遮罩后延后执行系统命令
     private DispatcherTimer? _maskMinTimer;     // 最短遮盖
     private DispatcherTimer? _maskSettleTimer;  // 内容区尺寸静默
     private DispatcherTimer? _maskCapTimer;     // 绝对上限
@@ -515,6 +521,13 @@ public sealed partial class MainWindow : Window
         try
         {
             SendMessage(hwnd, WM_SYSCOMMAND, _maskPendingWParam, _maskPendingLParam);
+
+            // 计时起点必须落在这里（窗口真正开始变形），而不是抬起遮罩那一刻：
+            // "最短遮盖"和"尺寸静默"都是相对变形期定义的，若从 t=0 算起，defer 会被算进遮盖时长里，
+            // 变形尾段就会在遮罩淡出之后露出来。
+            _maskSettlePending = true;
+            RestartTimer(_maskMinTimer);
+            RestartTimer(_maskSettleTimer);
         }
         catch { }
         finally
@@ -533,8 +546,8 @@ public sealed partial class MainWindow : Window
         RestartTimer(_maskSettleTimer);
     }
 
-    /// <summary>抬起遮罩：直接赋值 Opacity，不做可见性切换与入场动画，使这次变更与下一次
-    /// XAML 合成提交同帧上屏。返回 true 表示确实抬起（调用方据此决定是否压后系统命令）。</summary>
+    /// <summary>抬起遮罩：硬切（直接赋值 Opacity，不做入场动画、不做可见性切换），使这次变更与
+    /// 下一次 XAML 合成提交同帧上屏。返回 true 表示确实抬起（调用方据此决定是否压后系统命令）。</summary>
     private bool ShowResizeMask()
     {
         if (!_maskReady) return false;
@@ -549,9 +562,11 @@ public sealed partial class MainWindow : Window
 
             ResizeMask.Opacity = 1.0;
 
+            // min/settle 在这里启动只为兜底（万一 defer tick 没能重放命令，遮罩也能自己落下）；
+            // 正式计时起点在 MaskDeferTimer_Tick 里，命令重放后会重新 Start 这两个计时器。
             RestartTimer(_maskMinTimer);
             RestartTimer(_maskSettleTimer);
-            RestartTimer(_maskCapTimer);
+            RestartTimer(_maskCapTimer);   // 绝对上限从抬起算起，不后移
             return true;
         }
         catch { return false; }
@@ -594,11 +609,13 @@ public sealed partial class MainWindow : Window
         _maskCapTimer?.Stop();
         _maskSettlePending = false;
 
+        // 掐掉上一轮可能仍在 HoldEnd 的淡出 Storyboard，避免两个动画抢同一个 Opacity。
+        _maskFadeStoryboard?.Stop();
         try
         {
             var animation = new DoubleAnimation
             {
-                From = 1.0,
+                // 不写 From：从当前值起步，上一轮淡出没跑完时也不会先跳到 1 再回落。
                 To = 0.0,
                 Duration = new Duration(TimeSpan.FromMilliseconds(MaskFadeMs)),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
