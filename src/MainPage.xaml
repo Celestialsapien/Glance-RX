@@ -12,10 +12,8 @@
 
     <Page.Resources>
         <Style TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
-            <Setter Property="ToolTipService.Placement" Value="Bottom"/>
         </Style>
         <Style TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
-            <Setter Property="ToolTipService.Placement" Value="Bottom"/>
         </Style>
         <Style x:Key="ZoomFlyoutItemStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
             <Setter Property="IsTabStop" Value="False"/>
@@ -31,7 +29,7 @@
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="CornerRadius" Value="8"/>
             <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
-            <Setter Property="Background" Value="{ThemeResource SolidBackgroundFillColorBaseBrush}"/>
+            <Setter Property="Background" Value="{ThemeResource FlyoutPresenterBackground}"/>
             <Setter Property="MinWidth" Value="80"/>
             <Setter Property="Transitions">
                 <Setter.Value>
@@ -69,7 +67,52 @@
                 </Setter.Value>
             </Setter>
         </Style>
-
+        <!-- 设置菜单专用磨砂样式：acrylic 背景与缩放菜单一致（FlyoutPresenterBackground 与浮动面板同支，深/浅色
+             自适应），但 RenderTransformOrigin=0.5,0 使其从顶沿向下展开，匹配 BottomEdgeAlignedRight
+             的向下弹出朝向（缩放菜单用 0.5,1 向上展开，两者动画方向各自正确、材质统一）。 -->
+        <Style x:Key="SettingsFlyoutPresenterStyle" TargetType="FlyoutPresenter">
+            <Setter Property="Padding" Value="4,4"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+            <Setter Property="Background" Value="{ThemeResource FlyoutPresenterBackground}"/>
+            <Setter Property="MinWidth" Value="80"/>
+            <Setter Property="Transitions">
+                <Setter.Value>
+                    <TransitionCollection/>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="FlyoutPresenter">
+                        <Border x:Name="FlyoutPresenterRoot"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="{TemplateBinding CornerRadius}"
+                                Padding="{TemplateBinding Padding}"
+                                RenderTransformOrigin="0.5,0"
+                                Loaded="FlyoutPresenterRoot_Loaded">
+                            <Border.RenderTransform>
+                                <ScaleTransform x:Name="FlyoutScale" ScaleY="0"/>
+                            </Border.RenderTransform>
+                            <Border.Resources>
+                                <Storyboard x:Name="OpenAnimation">
+                                    <DoubleAnimation Storyboard.TargetName="FlyoutScale"
+                                                     Storyboard.TargetProperty="ScaleY"
+                                                     From="0" To="1" Duration="0:0:0.2">
+                                        <DoubleAnimation.EasingFunction>
+                                            <CubicEase EasingMode="EaseOut"/>
+                                        </DoubleAnimation.EasingFunction>
+                                    </DoubleAnimation>
+                                </Storyboard>
+                            </Border.Resources>
+                            <ContentPresenter Content="{TemplateBinding Content}"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
     </Page.Resources>
 
@@ -104,7 +147,7 @@
               SizeChanged="TopToolbarHost_SizeChanged">
         <Border x:Name="TopToolbar"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" Padding="12,6"
-                Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                Background="{ThemeResource FlyoutPresenterBackground}"
                 Opacity="0" IsHitTestVisible="False"
                 PointerEntered="TopToolbar_PointerEntered" PointerExited="TopToolbar_PointerExited">
             <Border.RenderTransform>
@@ -115,14 +158,14 @@
             <!-- Left Section: pinned to the left border; its width never shifts the centered title or right controls -->
             <StackPanel x:Name="TopLeftPanel" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" HorizontalAlignment="Left">
                     <!-- Sidebar Toggle Button -->
-                    <Button x:Name="ToggleSidebarButton" Click="ToggleSidebar_Click" Padding="8,6" ToolTipService.ToolTip="Mostrar/Ocultar índice">
+                    <Button x:Name="ToggleSidebarButton" Click="ToggleSidebar_Click" Padding="8,6">
                         <SymbolIcon Symbol="AllApps"/>
                     </Button>
                     
 
 
                     <!-- Previous Page Button -->
-                    <Button x:Name="PrevPageButton" Click="PrevPage_Click" Padding="10,6" ToolTipService.ToolTip="Página anterior">
+                    <Button x:Name="PrevPageButton" Click="PrevPage_Click" Padding="10,6">
                         <TextBlock Text="▲" FontSize="11"/>
                     </Button>
                     
@@ -137,7 +180,7 @@
                     <TextBlock x:Name="TotalPagesText" Text="/ 0" VerticalAlignment="Center" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" Margin="4,0,8,0" FontSize="13"/>
                     
                     <!-- Next Page Button -->
-                    <Button x:Name="NextPageButton" Click="NextPage_Click" Padding="10,6" ToolTipService.ToolTip="Página siguiente">
+                    <Button x:Name="NextPageButton" Click="NextPage_Click" Padding="10,6">
                         <TextBlock Text="▼" FontSize="11"/>
                     </Button>
 
@@ -145,10 +188,10 @@
                     <AppBarSeparator Margin="4,0"/>
 
                                         <!-- Annotation Mode Toggles -->
-                    <ToggleButton x:Name="ReadModeButton" IsChecked="True" Click="ReadMode_Click" Padding="10,6" ToolTipService.ToolTip="Modo Lectura / Navegar">
+                    <ToggleButton x:Name="ReadModeButton" IsChecked="True" Click="ReadMode_Click" Padding="10,6">
                         <SymbolIcon Symbol="Read"/>
                     </ToggleButton>
-                    <ToggleButton x:Name="PenModeButton" Click="PenMode_Click" Padding="10,6" ToolTipService.ToolTip="Modo Lápiz / Escritura libre">
+                    <ToggleButton x:Name="PenModeButton" Click="PenMode_Click" Padding="10,6">
                         <SymbolIcon Symbol="Edit"/>
                     </ToggleButton>
 
@@ -157,7 +200,7 @@
                 <!-- Right Section: Rotate and Settings Menu -->
                 <StackPanel x:Name="TopRightPanel" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" HorizontalAlignment="Right">
                     <!-- Rotate Button -->
-                    <Button x:Name="RotateButton" Click="Rotate_Click" Padding="8,6" ToolTipService.ToolTip="Rotar vista (90°)">
+                    <Button x:Name="RotateButton" Click="Rotate_Click" Padding="8,6">
                         <SymbolIcon Symbol="Rotate"/>
                     </Button>
 
@@ -167,7 +210,7 @@
                     </Button>
 
                     <!-- Split View Button -->
-                    <ToggleButton x:Name="SplitViewToggleButton" Click="SplitViewToggle_Click" Padding="8,6" ToolTipService.ToolTip="Vista Dividida (Comparar PDFs)" Visibility="Collapsed">
+                    <ToggleButton x:Name="SplitViewToggleButton" Click="SplitViewToggle_Click" Padding="8,6" Visibility="Collapsed">
                         <SymbolIcon Symbol="TwoPage"/>
                     </ToggleButton>
 
@@ -182,10 +225,10 @@
                     </Button>
 
                     <!-- Settings Button -->
-                    <Button x:Name="SettingsButton" Padding="8,6" ToolTipService.ToolTip="Configuración">
+                    <Button x:Name="SettingsButton" Padding="8,6">
                         <SymbolIcon Symbol="Setting"/>
                         <Button.Flyout>
-                            <Flyout x:Name="SettingsFlyout" Placement="BottomEdgeAlignedRight">
+                            <Flyout x:Name="SettingsFlyout" Placement="BottomEdgeAlignedRight" FlyoutPresenterStyle="{StaticResource SettingsFlyoutPresenterStyle}">
                                 <StackPanel x:Name="SettingsFlyoutPanel" Spacing="16" Width="260" Padding="4" KeyDown="SettingsFlyout_KeyDown">
                                     <TextBlock x:Name="SettingsTitleText" Text="Configuración" FontSize="18" FontWeight="SemiBold"/>
                                     
@@ -233,7 +276,7 @@
         <Popup x:Name="PenOptionsPopup"
                ShouldConstrainToRootBounds="True">
             <Border x:Name="PenOptionsCapsule"
-                    Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                    Background="{ThemeResource FlyoutPresenterBackground}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="20"
@@ -250,13 +293,13 @@
                         <StackPanel.RenderTransform>
                             <TranslateTransform Y="-1"/>
                         </StackPanel.RenderTransform>
-                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#FFFF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Yellow" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Amarillo"/>
-                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#00FF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Lime" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Verde"/>
-                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#00FFFF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Cyan" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Celeste"/>
-                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#FF00FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Magenta" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Rosa"/>
-                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#FF0000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Red" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Rojo"/>
-                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#0000FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Blue" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Azul"/>
-                        <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="#888888" Padding="0" ToolTipService.ToolTip="Color Negro"/>
+                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#FFFF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Yellow" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#00FF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Lime" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#00FFFF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Cyan" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#FF00FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Magenta" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#FF0000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Red" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#0000FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Blue" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
                     </StackPanel>
 
                     <!-- Vertical separator hairline -->
@@ -269,31 +312,31 @@
                          bounds by 1px on each side, covering any rectangular template
                          background corners that WinUI may render. -->
                     <StackPanel x:Name="ThicknessPresetPanel" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-                        <Button x:Name="Thickness1Button" Click="ThicknessPreset_Click" Tag="1" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14" ToolTipService.ToolTip="1 px">
+                        <Button x:Name="Thickness1Button" Click="ThicknessPreset_Click" Tag="1" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness1Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="2"  CornerRadius="1"   HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness2Button" Click="ThicknessPreset_Click" Tag="2" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14" ToolTipService.ToolTip="2 px">
+                        <Button x:Name="Thickness2Button" Click="ThicknessPreset_Click" Tag="2" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness2Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="3"  CornerRadius="1.5" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness3Button" Click="ThicknessPreset_Click" Tag="3.5" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14" ToolTipService.ToolTip="3.5 px">
+                        <Button x:Name="Thickness3Button" Click="ThicknessPreset_Click" Tag="3.5" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness3Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="4"  CornerRadius="2"   HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness7Button" Click="ThicknessPreset_Click" Tag="7" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14" ToolTipService.ToolTip="7 px">
+                        <Button x:Name="Thickness7Button" Click="ThicknessPreset_Click" Tag="7" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness7Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="7"  CornerRadius="3.5" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness14Button" Click="ThicknessPreset_Click" Tag="14" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14" ToolTipService.ToolTip="14 px">
+                        <Button x:Name="Thickness14Button" Click="ThicknessPreset_Click" Tag="14" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness14Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="14" CornerRadius="7"   HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
@@ -415,7 +458,7 @@
                             </Storyboard>
                         </Grid.Resources>
                         <Border x:Name="SecondaryOpenPillBorder"
-                                Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                                Background="{ThemeResource FlyoutPresenterBackground}"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="18"
@@ -424,7 +467,7 @@
                                     Width="36" Height="36" CornerRadius="18" Padding="0"
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                                     Background="Transparent" BorderThickness="0"
-                                    ToolTipService.ToolTip="Abrir segundo PDF">
+                                   >
                                 <Path Width="16" Height="16" Data="M8,1 L8,15 M1,8 L15,8"
                                       Stroke="{ThemeResource SystemControlForegroundBaseHighBrush}"
                                       StrokeThickness="1.5" StrokeLineJoin="Miter"/>
@@ -447,7 +490,7 @@
                             </Storyboard>
                         </Grid.Resources>
                         <Border x:Name="SecondaryClosePillBorder"
-                                Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                                Background="{ThemeResource FlyoutPresenterBackground}"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="18"
@@ -456,7 +499,7 @@
                                     Width="36" Height="36" CornerRadius="18" Padding="0"
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                                     Background="Transparent" BorderThickness="0"
-                                    ToolTipService.ToolTip="Cerrar Comparación">
+                                   >
                                 <Path Width="14" Height="14" Data="M1,1 L13,13 M13,1 L1,13"
                                       Stroke="{ThemeResource SystemControlForegroundBaseHighBrush}"
                                       StrokeThickness="1.5" StrokeLineJoin="Miter"/>
@@ -482,7 +525,7 @@
                         </Storyboard>
                     </Grid.Resources>
                     <Border x:Name="BottomZoomPillBorder"
-                            Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                            Background="{ThemeResource FlyoutPresenterBackground}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1"
                             CornerRadius="20"
@@ -493,25 +536,25 @@
                             <Button x:Name="ZoomOutButton" Click="ZoomOut_Click" Width="32" Height="32" CornerRadius="16"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                                     Background="Transparent" BorderThickness="0"
-                                    ToolTipService.ToolTip="Alejar (10%)">
+                                   >
                                 <Path Width="16" Height="16" Data="M1,8 L15,8" Stroke="{ThemeResource SystemControlForegroundBaseHighBrush}" StrokeThickness="1.5" StrokeLineJoin="Miter"/>
                             </Button>
                             <Button x:Name="ZoomInButton" Click="ZoomIn_Click" Width="32" Height="32" CornerRadius="16"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                                     Background="Transparent" BorderThickness="0"
-                                    ToolTipService.ToolTip="Acercar (10%)">
+                                   >
                                 <Path Width="16" Height="16" Data="M8,1 L8,15 M1,8 L15,8" Stroke="{ThemeResource SystemControlForegroundBaseHighBrush}" StrokeThickness="1.5" StrokeLineJoin="Miter"/>
                             </Button>
                             <Button x:Name="ZoomValueButton" Padding="8,4" MinWidth="56" Height="28" CornerRadius="14"
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                                     Background="Transparent" BorderThickness="0"
-                                    ToolTipService.ToolTip="Zoom rápido">
+                                   >
                                 <TextBlock x:Name="ZoomValueText" Text="100%" TextAlignment="Center"
                                            VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold"
                                            Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
                                            Margin="0,-1,0,0"/>
                                 <Button.Flyout>
-                                    <Flyout x:Name="ZoomPresetFlyout" Placement="Top" FlyoutPresenterStyle="{StaticResource ZoomFlyoutPresenterStyle}" Closed="ZoomPresetFlyout_Closed">
+                                    <Flyout x:Name="ZoomPresetFlyout" Placement="Top" FlyoutPresenterStyle="{StaticResource ZoomFlyoutPresenterStyle}" Opening="ZoomPresetFlyout_Opening" Closed="ZoomPresetFlyout_Closed">
                                         <StackPanel x:Name="ZoomPresetPanel" Spacing="0">
                                             <Button Content="10%" Click="ZoomPreset_Click" Tag="10" Style="{StaticResource ZoomFlyoutItemStyle}"/>
                                             <Button Content="25%" Click="ZoomPreset_Click" Tag="25" Style="{StaticResource ZoomFlyoutItemStyle}"/>
@@ -528,7 +571,7 @@
                             <Button x:Name="FitWidthButton" Click="FitWidth_Click" Width="32" Height="32" CornerRadius="16"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                                     Background="Transparent" BorderThickness="0"
-                                    ToolTipService.ToolTip="Ajustar Ancho">
+                                   >
                                 <Path Width="18" Height="18" Data="M2,7 L2,2 L7,2 M11,2 L16,2 L16,7 M16,11 L16,16 L11,16 M7,16 L2,16 L2,11" Stroke="{ThemeResource SystemControlForegroundBaseHighBrush}" StrokeThickness="1.5" StrokeLineJoin="Miter"/>
                             </Button>
                         </StackPanel>
@@ -556,7 +599,7 @@
                         </Storyboard>
                     </Grid.Resources>
                     <Border x:Name="SaveToastBorder"
-                            Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                            Background="{ThemeResource FlyoutPresenterBackground}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1"
                             CornerRadius="20" Padding="0,4,0,4" Height="42"

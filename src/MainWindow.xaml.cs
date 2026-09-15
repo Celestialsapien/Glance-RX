@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.UI;
 using System;
 using Microsoft.UI.Input;
@@ -68,8 +69,12 @@ public sealed partial class MainWindow : Window
         // 首个 XAML 合成帧呈现后再揭开——用户只看到深色窗口直接出现（见
         // ArmColdStartCloak 注释）。必须在 Activate 之前武装，故放构造器末尾。
         ArmColdStartCloak();
+        // 最大化/还原过渡遮罩：必须在 Activate 之前装好（见文件末尾同名段落）。
+        InstallResizeMaskSignals();
+        if (WindowRoot != null) WindowRoot.SizeChanged += WindowRoot_SizeChanged;
         CompositionTarget.Rendering += OnFirstFrameReady;
-        WindowRoot.Loaded += OnRootLoadedReveal;
+        // 同上判空：两处守卫会让可空流分析把 WindowRoot 视为可能为 null（否则 CS8602）。
+        if (WindowRoot != null) WindowRoot.Loaded += OnRootLoadedReveal;
         if (_uncloakSafetyTimer == null)
         {
             _uncloakSafetyTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(3000) };
@@ -225,14 +230,14 @@ public sealed partial class MainWindow : Window
                           (theme == ElementTheme.Default &&
                            Application.Current.RequestedTheme == ApplicationTheme.Dark);
 
-            if (!isDark)
-            {
-                rootGrid.Background = new SolidColorBrush(Color.FromArgb(0xFF, 0xFA, 0xFA, 0xFA));
-            }
-            else
-            {
-                rootGrid.Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x1C, 0x1C, 0x1C));
-            }
+            var bg = (!isDark)
+                ? new SolidColorBrush(Color.FromArgb(0xFF, 0xFA, 0xFA, 0xFA))
+                : new SolidColorBrush(Color.FromArgb(0xFF, 0x1C, 0x1C, 0x1C));
+
+            rootGrid.Background = bg;
+
+            // 遮罩与窗口底共用同一支笔刷：过渡期观感 = 内容区变回窗口背景色（跟主题自动同步）。
+            if (ResizeMask != null) ResizeMask.Background = bg;
 
             // 原生窗口层也同步为主题实色，消除"窗口可见 → 首个 XAML 合成帧"间隙的白色（见
             // ApplyNativeWindowBackground 注释）。无论 XAML 主题资源何时就位，间隙都是深色。
@@ -363,6 +368,8 @@ public sealed partial class MainWindow : Window
             _uncloakSafetyTimer = null;
         }
         DisarmColdStartCloak();
+        // 首个合成帧已就位 → 允许过渡遮罩工作（避免启动期窗口自定位被误蒙）。
+        _maskReady = true;
     }
 
     /// <summary>取窗口 HWND：AppWindow 在构造期即已创建，Id 恒可用。</summary>
@@ -371,6 +378,268 @@ public sealed partial class MainWindow : Window
         try { return Microsoft.UI.Win32Interop.GetWindowFromWindowId(AppWindow.Id); }
         catch { return IntPtr.Zero; }
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 窗口最大化/还原过渡遮罩：窗口子类拦 WM_SYSCOMMAND（SC_MAXIMIZE/SC_RESTORE），
+    // 同步把遮罩 Opacity 置 1，然后压住本帧、16ms 后把系统命令交回默认窗口过程 ——
+    // 遮罩先上屏，窗口才开始变形，同帧竞态从根上不存在。
+    //
+    // 单纯"让遮罩来得更早"无解：遮罩与窗口变形始终在同一帧竞争，Win2D 画布走独立
+    // swap chain、有自己的 present 路径，抖动帧总能抢先一帧（2026-09-14/15 多轮实测）。
+    // 故方向反过来 —— 不抢遮罩，而是把窗口操作拖后一帧。
+    // ═════════════════════════════════════════════════════════════════════
+
+    private const double MaskDeferMs = 16.0;       // 盖遮罩后延迟一帧再执行系统命令
+    private const double MaskMinShowMs = 260.0;    // 最短遮盖时长（须盖过 OS 窗口动画时长）
+    private const double MaskSizeStableMs = 150.0; // 内容区尺寸静默多久算"过渡已完成"
+    private const double MaskFadeMs = 160.0;       // 淡出时长
+    private const double MaskHardCapMs = 1200.0;   // 绝对上限（兜底，绝不永久遮住）
+
+    private const uint WM_SYSCOMMAND = 0x0112;
+    private const int SC_MAXIMIZE = 0xF030;
+    private const int SC_RESTORE = 0xF120;
+    private const uint MaskSubclassId = 0x474C4E43; // 'GLNC'：子类身份标识
+
+    [System.Runtime.InteropServices.UnmanagedFunctionPointer(
+        System.Runtime.InteropServices.CallingConvention.Winapi)]
+    private delegate IntPtr SubclassProcDelegate(
+        IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam,
+        UIntPtr uIdSubclass, UIntPtr dwRefData);
+
+    [System.Runtime.InteropServices.DllImport("comctl32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetWindowSubclass(
+        IntPtr hWnd, SubclassProcDelegate pfnSubclass, UIntPtr uIdSubclass, UIntPtr dwRefData);
+
+    [System.Runtime.InteropServices.DllImport("comctl32.dll")]
+    private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+    // 必须钉死 W 入口：user32.dll 不导出 SendMessage（它是 winuser.h:3707 的宏），
+    // 不写 EntryPoint 会按 CharSet 回落到 SendMessageA。
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW",
+        CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    // 必须长期持有委托引用：交给原生层后若被 GC 回收，回调即野指针 → 崩溃。
+    private SubclassProcDelegate? _maskSubclassProc;
+    private IntPtr _maskHwnd = IntPtr.Zero;
+    private bool _maskSubclassInstalled;
+
+    private DispatcherTimer? _maskDeferTimer;   // 延迟一帧执行系统命令
+    private DispatcherTimer? _maskMinTimer;     // 最短遮盖
+    private DispatcherTimer? _maskSettleTimer;  // 内容区尺寸静默
+    private DispatcherTimer? _maskCapTimer;     // 绝对上限
+    private Storyboard? _maskFadeStoryboard;
+
+    private IntPtr _maskPendingWParam = IntPtr.Zero;
+    private IntPtr _maskPendingLParam = IntPtr.Zero;
+    private bool _maskDeferReplaying;   // 重放守卫：防止子类再次拦截自己发出的消息
+    private bool _maskReady;            // 首个合成帧之后才允许遮罩工作
+    private bool _maskVisible;
+    private bool _maskFading;
+    private bool _maskMinElapsed;
+    private bool _maskSettlePending;
+
+    /// <summary>装窗口子类接管 WM_SYSCOMMAND；走 comctl32 子类链（自动链式转发），
+    /// 不替换 GWLP_WNDPROC，避免与 WinUI 自身窗口过程互相覆盖。</summary>
+    private void InstallResizeMaskSignals()
+    {
+        // 计时器先建好：即使子类安装失败（拿不到 HWND），逻辑也完整、只是收不到信号。
+        if (_maskDeferTimer == null)
+        {
+            _maskDeferTimer = NewMaskTimer(MaskDeferMs, MaskDeferTimer_Tick);
+            _maskMinTimer = NewMaskTimer(MaskMinShowMs, MaskMinTimer_Tick);
+            _maskSettleTimer = NewMaskTimer(MaskSizeStableMs, MaskSettleTimer_Tick);
+            _maskCapTimer = NewMaskTimer(MaskHardCapMs, MaskCapTimer_Tick);
+        }
+
+        if (_maskSubclassInstalled) return;
+        try
+        {
+            var hwnd = GetWindowHandleSafely();
+            if (hwnd == IntPtr.Zero) return;
+
+            _maskSubclassProc = ResizeMaskWindowProc;
+            if (SetWindowSubclass(hwnd, _maskSubclassProc, new UIntPtr(MaskSubclassId), UIntPtr.Zero))
+            {
+                _maskHwnd = hwnd;
+                _maskSubclassInstalled = true;
+            }
+        }
+        catch { }
+    }
+
+    private IntPtr ResizeMaskWindowProc(
+        IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam,
+        UIntPtr uIdSubclass, UIntPtr dwRefData)
+    {
+        try
+        {
+            if (uMsg == WM_SYSCOMMAND && !_maskDeferReplaying)
+            {
+                int command = (int)(wParam.ToInt64() & 0xFFF0);
+                bool isMaximize = command == SC_MAXIMIZE;
+                // 从任务栏恢复（窗口最小化中）不是"还原窗口"语义，不遮。
+                bool isRestore = command == SC_RESTORE && !IsIconic(hWnd);
+
+                if (isMaximize || isRestore)
+                {
+                    // 遮罩确实抬起才值得把命令压后一帧，否则不白加延迟。
+                    if (ShowResizeMask() && _maskDeferTimer != null)
+                    {
+                        _maskPendingWParam = wParam;
+                        _maskPendingLParam = lParam;
+                        RestartTimer(_maskDeferTimer);   // 本帧压住，等遮罩上屏后再放行
+                        return IntPtr.Zero;
+                    }
+                }
+            }
+        }
+        catch { }
+
+        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+    }
+
+    /// <summary>把被压住的系统命令交回默认窗口过程，窗口此时才开始变形。</summary>
+    private void MaskDeferTimer_Tick(object? sender, object e)
+    {
+        _maskDeferTimer?.Stop();
+        var hwnd = _maskHwnd;
+        if (hwnd == IntPtr.Zero) return;
+
+        _maskDeferReplaying = true;
+        try
+        {
+            SendMessage(hwnd, WM_SYSCOMMAND, _maskPendingWParam, _maskPendingLParam);
+        }
+        catch { }
+        finally
+        {
+            _maskDeferReplaying = false;
+            _maskPendingWParam = IntPtr.Zero;
+            _maskPendingLParam = IntPtr.Zero;
+        }
+    }
+
+    /// <summary>内容区尺寸变化：遮罩还盖着就重置"静默"计时（过渡仍在进行）。</summary>
+    private void WindowRoot_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (!_maskVisible || _maskFading) return;
+        _maskSettlePending = true;
+        RestartTimer(_maskSettleTimer);
+    }
+
+    /// <summary>抬起遮罩：直接赋值 Opacity，不做可见性切换与入场动画，使这次变更与下一次
+    /// XAML 合成提交同帧上屏。返回 true 表示确实抬起（调用方据此决定是否压后系统命令）。</summary>
+    private bool ShowResizeMask()
+    {
+        if (!_maskReady) return false;
+        try
+        {
+            _maskFadeStoryboard?.Stop();
+            _maskFadeStoryboard = null;
+            _maskFading = false;
+            _maskVisible = true;
+            _maskMinElapsed = false;
+            _maskSettlePending = true;
+
+            ResizeMask.Opacity = 1.0;
+
+            RestartTimer(_maskMinTimer);
+            RestartTimer(_maskSettleTimer);
+            RestartTimer(_maskCapTimer);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private void MaskMinTimer_Tick(object? sender, object e)
+    {
+        _maskMinTimer?.Stop();
+        _maskMinElapsed = true;
+        TryFadeOutResizeMask();
+    }
+
+    private void MaskSettleTimer_Tick(object? sender, object e)
+    {
+        _maskSettleTimer?.Stop();
+        _maskSettlePending = false;
+        TryFadeOutResizeMask();
+    }
+
+    private void MaskCapTimer_Tick(object? sender, object e)
+    {
+        _maskCapTimer?.Stop();
+        StartResizeMaskFadeOut();
+    }
+
+    /// <summary>最短遮盖已满足 且 尺寸已静默 ⇒ 过渡结束，开始淡出；否则等另一个条件。</summary>
+    private void TryFadeOutResizeMask()
+    {
+        if (!_maskVisible || _maskFading) return;
+        if (!_maskMinElapsed || _maskSettlePending) return;
+        StartResizeMaskFadeOut();
+    }
+
+    private void StartResizeMaskFadeOut()
+    {
+        if (!_maskVisible || _maskFading) return;
+        _maskFading = true;
+        _maskMinTimer?.Stop();
+        _maskSettleTimer?.Stop();
+        _maskCapTimer?.Stop();
+        _maskSettlePending = false;
+
+        try
+        {
+            var animation = new DoubleAnimation
+            {
+                From = 1.0,
+                To = 0.0,
+                Duration = new Duration(TimeSpan.FromMilliseconds(MaskFadeMs)),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            Storyboard.SetTarget(animation, ResizeMask);
+            Storyboard.SetTargetProperty(animation, "Opacity");
+
+            var sb = new Storyboard();
+            sb.Children.Add(animation);
+            sb.Completed += (s, e) =>
+            {
+                _maskFading = false;
+                _maskVisible = false;
+                try { ResizeMask.Opacity = 0.0; } catch { }
+            };
+            _maskFadeStoryboard = sb;
+            sb.Begin();
+        }
+        catch
+        {
+            // 淡出动画起不来也必须落下遮罩，绝不把窗口蒙死。
+            _maskFading = false;
+            _maskVisible = false;
+            try { ResizeMask.Opacity = 0.0; } catch { }
+        }
+    }
+
+    private static DispatcherTimer NewMaskTimer(double ms, EventHandler<object> tick)
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
+        timer.Tick += tick;
+        return timer;
+    }
+
+    private static void RestartTimer(DispatcherTimer? timer)
+    {
+        if (timer == null) return;
+        timer.Stop();
+        timer.Start();
+    }
+
 
     /// <summary>
     /// Updates the title bar button colors to match the current theme.
@@ -584,3 +853,4 @@ public sealed partial class MainWindow : Window
         }
     }
 }
+

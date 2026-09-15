@@ -6,7 +6,7 @@ User interface and application logic for Glance PDF viewer. Handles rendering, a
 
 Glance's frontend is built in C# with WinUI 3 to provide:
 
-- **Native Windows 11 UI:** Mica backdrop, Fluent Design, native aesthetics
+- **Native Windows 11 UI:** acrylic flyouts, Fluent Design, native aesthetics
 - **Rapid Development:** High-level C# with .NET 10.0 ecosystem
 - **Modern XAML:** Declarative UI with data binding and MVVM
 - **FFI Bridge:** P/Invoke interop with Rust backend (`glance_native.dll`)

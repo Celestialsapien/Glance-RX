@@ -599,40 +599,6 @@ public sealed partial class MainPage : Page
         try
         {
             // Set all UI element strings based on system language (detected in LocalizationService)
-            bool isEs = Glance.Services.LocalizationService.IsSpanish;
-
-            // Toolbars & Buttons ToolTips
-            if (ToggleSidebarButton != null) ToolTipService.SetToolTip(ToggleSidebarButton, Glance.Services.LocalizationService.Get("ToggleSidebar"));
-            if (PrevPageButton != null) ToolTipService.SetToolTip(PrevPageButton, Glance.Services.LocalizationService.Get("PrevPage"));
-            if (NextPageButton != null) ToolTipService.SetToolTip(NextPageButton, Glance.Services.LocalizationService.Get("NextPage"));
-
-            if (ReadModeButton != null) ToolTipService.SetToolTip(ReadModeButton, Glance.Services.LocalizationService.Get("ReadMode"));
-            if (PenModeButton != null) ToolTipService.SetToolTip(PenModeButton, Glance.Services.LocalizationService.Get("PenMode"));
-
-            // Colors ToolTips
-            if (ColorYellowButton != null) ToolTipService.SetToolTip(ColorYellowButton, Glance.Services.LocalizationService.Get("ColorYellow"));
-            if (ColorGreenButton != null) ToolTipService.SetToolTip(ColorGreenButton, Glance.Services.LocalizationService.Get("ColorGreen"));
-            if (ColorCyanButton != null) ToolTipService.SetToolTip(ColorCyanButton, Glance.Services.LocalizationService.Get("ColorCyan"));
-            if (ColorMagentaButton != null) ToolTipService.SetToolTip(ColorMagentaButton, Glance.Services.LocalizationService.Get("ColorMagenta"));
-            if (ColorRedButton != null) ToolTipService.SetToolTip(ColorRedButton, Glance.Services.LocalizationService.Get("ColorRed"));
-            if (ColorBlueButton != null) ToolTipService.SetToolTip(ColorBlueButton, Glance.Services.LocalizationService.Get("ColorBlue"));
-            if (ColorBlackButton != null) ToolTipService.SetToolTip(ColorBlackButton, Glance.Services.LocalizationService.Get("ColorBlack"));
-
-            // Zoom & Buttons
-            if (ZoomOutButton != null) ToolTipService.SetToolTip(ZoomOutButton, Glance.Services.LocalizationService.Get("ZoomOut"));
-            if (ZoomInButton != null) ToolTipService.SetToolTip(ZoomInButton, Glance.Services.LocalizationService.Get("ZoomIn"));
-            if (ZoomValueButton != null) ToolTipService.SetToolTip(ZoomValueButton, Glance.Services.LocalizationService.Get("QuickZoom"));
-            if (FitWidthButton != null) ToolTipService.SetToolTip(FitWidthButton, Glance.Services.LocalizationService.Get("FitWidth"));
-            if (RotateButton != null) ToolTipService.SetToolTip(RotateButton, Glance.Services.LocalizationService.Get("Rotate"));
-            if (LayoutToggleButton != null)
-            {
-                ToolTipService.SetToolTip(LayoutToggleButton, Glance.Services.LocalizationService.Get(
-                    GpuViewer != null && GpuViewer.IsHorizontalLayout ? "LayoutModeHorizontal" : "LayoutModeVertical"));
-            }
-            if (SplitViewToggleButton != null) ToolTipService.SetToolTip(SplitViewToggleButton, Glance.Services.LocalizationService.Get("SplitView"));
-            if (SaveButton != null) ToolTipService.SetToolTip(SaveButton, Glance.Services.LocalizationService.Get("SaveOriginal"));
-            if (PrintButton != null) ToolTipService.SetToolTip(PrintButton, Glance.Services.LocalizationService.Get("PrintTooltip"));
-            if (SettingsButton != null) ToolTipService.SetToolTip(SettingsButton, Glance.Services.LocalizationService.Get("Settings"));
 
             // Settings Panel
             if (SettingsTitleText != null) SettingsTitleText.Text = Glance.Services.LocalizationService.Get("Settings");
@@ -655,9 +621,6 @@ public sealed partial class MainPage : Page
             // Sidebar
             if (ThumbnailsHeader != null) ThumbnailsHeader.Text = Glance.Services.LocalizationService.Get("Thumbnails");
 
-            // Comparison
-            if (OpenSecondPdfButton != null) ToolTipService.SetToolTip(OpenSecondPdfButton, Glance.Services.LocalizationService.Get("OpenSecondPdf"));
-            if (CloseSecondPdfButton != null) ToolTipService.SetToolTip(CloseSecondPdfButton, Glance.Services.LocalizationService.Get("CloseComparison"));
         }
         catch { }
     }
@@ -3881,8 +3844,6 @@ public sealed partial class MainPage : Page
         LayoutToggleIcon.RenderTransform = horiz
             ? new Microsoft.UI.Xaml.Media.RotateTransform { Angle = 90 }
             : null;
-        ToolTipService.SetToolTip(LayoutToggleButton, Glance.Services.LocalizationService.Get(
-            horiz ? "LayoutModeHorizontal" : "LayoutModeVertical"));
     }
 
     private void SplitViewToggle_Click(object sender, RoutedEventArgs e)
@@ -4007,6 +3968,20 @@ public sealed partial class MainPage : Page
                 if (IsPointOverZoomPill()) return;          // 指针仍在胶囊上，保持可见
                 BottomPillHideAnim?.Begin();                // 指针已离开胶囊，淡出
             });
+    }
+
+    /// <summary>
+    /// 快速缩放菜单展开瞬间：强制缩放胶囊同步可见（二者同生共死）。
+    /// 竞态根因：胶囊正在淡出（此前 BottomZoomPill_PointerExited 或 _zoomPillHideTimer 已触发
+    /// BottomPillHideAnim）时点到 ZoomValueButton，菜单展开但胶囊仍按在途动画继续隐到 0，
+    /// 留下"悬空菜单"。本处理先停掉在途淡出再重新淡入，使菜单始终有胶囊陪衬。
+    /// 注：胶囊显隐只动画 Opacity（MainPage.xaml:523-528），Opacity=0 时仍 IsHitTestVisible，
+    /// 故不可见的 ZoomValueButton 仍可点击——这正是竞态能被触发的前提，此处用 Opening 补上不变量。
+    /// </summary>
+    private void ZoomPresetFlyout_Opening(object sender, object e)
+    {
+        BottomPillHideAnim?.Stop();   // 取消在途淡出，避免它与下面的淡入抢同一 Opacity 属性
+        BottomPillShowAnim?.Begin();  // 重新淡入：菜单展开期间胶囊必可见
     }
 
     // 缩放胶囊隐藏兜底：Flyout/light-dismiss 覆盖层关闭瞬间的输入上下文切换、快速移动等会让
