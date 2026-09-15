@@ -381,24 +381,25 @@ public sealed partial class MainWindow : Window
 
     // ═════════════════════════════════════════════════════════════════════
     // 窗口最大化/还原过渡遮罩：窗口子类拦 WM_SYSCOMMAND（SC_MAXIMIZE/SC_RESTORE），
-    // 本帧吞掉命令、同步硬切抬起遮罩（Opacity 直接置 1），等 MaskDeferMs 后才把命令交回默认窗口过程 ——
+    // 本帧吞掉命令、同步启动遮罩淡入，淡入完成并多等一帧后，才把命令交回默认窗口过程 ——
     // 一律"先盖后动"：窗口变形时遮罩早已不透明，不存在"看到内容抖一下才盖上"。
     //
-    // 抬起用硬切而非淡入：用户 2026-09-16 明确表示能接受"啪"地盖上，不接受的是盖上【前】看到抖动；
-    // 淡入会让总动画变长，故只保留淡出 —— 硬切本身也是最快的遮盖方式。
+    // ★ 淡入不是观感糖，是机制必需品 —— 硬切挡不住抖动（2026-09-16 实测：硬切 + 50ms 延迟仍会抖）。
+    //   硬切只是一次性属性变更，XAML 提交【一帧】就结束，那一帧若被 UI 线程挤掉，遮罩就迟到；
+    //   淡入是运行中的动画，会持续驱动每一帧合成，几十毫秒内每帧都在画遮罩，
+    //   到放行命令时它必定已稳定上屏多帧。这就是"加淡入不抖、去掉就抖"的原因。
     //
-    // MaskDeferMs 为什么不能小：它要保证遮罩那一帧已经真正上屏。16ms（一帧）时偶有抢不赢的情况
-    // —— 遮罩与窗口变形同帧竞争，Win2D 画布走独立 swap chain、有自己的 present 路径，
-    // 抖动帧总能抢先一帧（2026-09-14/15 多轮实测）。取 50ms（约三帧）留出余量，
-    // 又远低于 100ms 的"即时"感知阈值，不会有迟滞感。
+    //   MaskDeferMs（淡入之后的帧余量）单独加大【无效】：它拉长的只是"遮罩已提交但不再被重画"的
+    //   静默期，不产生新的合成帧。16ms / 32ms / 50ms 三档都试过，都挡不住（2026-09-16）。
     //
     // 注：遮盖时长（最短遮盖 / 尺寸静默）以【命令重放、窗口开始变形】为起点，不是以抬起遮罩为起点。
     // ═════════════════════════════════════════════════════════════════════
 
-    private const double MaskDeferMs = 50.0;       // 抬起遮罩后延迟放行系统命令（约三帧，给遮罩上屏留余量）
+    private const double MaskFadeInMs = 60.0;      // 淡入时长（驱动连续合成、保证遮罩真正上屏；不是装饰）
+    private const double MaskDeferMs = 16.0;       // 淡入完成后的帧余量（放行命令前的最后一帧）
     private const double MaskMinShowMs = 260.0;    // 最短遮盖时长（须盖过 OS 窗口动画时长）
     private const double MaskSizeStableMs = 150.0; // 内容区尺寸静默多久算"过渡已完成"
-    private const double MaskFadeMs = 100.0;       // 淡出时长
+    private const double MaskFadeMs = 60.0;        // 淡出时长
     private const double MaskHardCapMs = 1200.0;   // 绝对上限（兜底，绝不永久遮住）
 
     private const uint WM_SYSCOMMAND = 0x0112;
@@ -435,7 +436,7 @@ public sealed partial class MainWindow : Window
     private IntPtr _maskHwnd = IntPtr.Zero;
     private bool _maskSubclassInstalled;
 
-    private DispatcherTimer? _maskDeferTimer;   // 抬起遮罩后延后执行系统命令
+    private DispatcherTimer? _maskDeferTimer;   // 淡入完成后（+一帧余量）执行系统命令
     private DispatcherTimer? _maskMinTimer;     // 最短遮盖
     private DispatcherTimer? _maskSettleTimer;  // 内容区尺寸静默
     private DispatcherTimer? _maskCapTimer;     // 绝对上限
@@ -457,7 +458,8 @@ public sealed partial class MainWindow : Window
         // 计时器先建好：即使子类安装失败（拿不到 HWND），逻辑也完整、只是收不到信号。
         if (_maskDeferTimer == null)
         {
-            _maskDeferTimer = NewMaskTimer(MaskDeferMs, MaskDeferTimer_Tick);
+            // 必须等淡入跑完：放行命令时遮罩要已完全不透明，否则窗口会在遮罩半透明时变形。
+            _maskDeferTimer = NewMaskTimer(MaskFadeInMs + MaskDeferMs, MaskDeferTimer_Tick);
             _maskMinTimer = NewMaskTimer(MaskMinShowMs, MaskMinTimer_Tick);
             _maskSettleTimer = NewMaskTimer(MaskSizeStableMs, MaskSettleTimer_Tick);
             _maskCapTimer = NewMaskTimer(MaskHardCapMs, MaskCapTimer_Tick);
@@ -522,9 +524,9 @@ public sealed partial class MainWindow : Window
         {
             SendMessage(hwnd, WM_SYSCOMMAND, _maskPendingWParam, _maskPendingLParam);
 
-            // 计时起点必须落在这里（窗口真正开始变形），而不是抬起遮罩那一刻：
-            // "最短遮盖"和"尺寸静默"都是相对变形期定义的，若从 t=0 算起，defer 会被算进遮盖时长里，
-            // 变形尾段就会在遮罩淡出之后露出来。
+            // 计时起点必须落在这里（窗口真正开始变形），而不是淡入开始那一刻：
+            // "最短遮盖"和"尺寸静默"都是相对变形期定义的，若从 t=0 算起，淡入的 60ms（以及 defer 本身）
+            // 会被算进遮盖时长里，变形尾段就会在遮罩淡出之后露出来。
             _maskSettlePending = true;
             RestartTimer(_maskMinTimer);
             RestartTimer(_maskSettleTimer);
@@ -546,8 +548,8 @@ public sealed partial class MainWindow : Window
         RestartTimer(_maskSettleTimer);
     }
 
-    /// <summary>抬起遮罩：硬切（直接赋值 Opacity，不做入场动画、不做可见性切换），使这次变更与
-    /// 下一次 XAML 合成提交同帧上屏。返回 true 表示确实抬起（调用方据此决定是否压后系统命令）。</summary>
+    /// <summary>抬起遮罩：走淡入（不是硬切 —— 见段头注释，淡入是驱动连续合成的机制必需品）。
+    /// 返回 true 表示确实抬起（调用方据此决定是否压后系统命令）。</summary>
     private bool ShowResizeMask()
     {
         if (!_maskReady) return false;
@@ -560,7 +562,7 @@ public sealed partial class MainWindow : Window
             _maskMinElapsed = false;
             _maskSettlePending = true;
 
-            ResizeMask.Opacity = 1.0;
+            RunMaskFade(1.0, MaskFadeInMs);
 
             // min/settle 在这里启动只为兜底（万一 defer tick 没能重放命令，遮罩也能自己落下）；
             // 正式计时起点在 MaskDeferTimer_Tick 里，命令重放后会重新 Start 这两个计时器。
@@ -609,15 +611,21 @@ public sealed partial class MainWindow : Window
         _maskCapTimer?.Stop();
         _maskSettlePending = false;
 
-        // 掐掉上一轮可能仍在 HoldEnd 的淡出 Storyboard，避免两个动画抢同一个 Opacity。
+        // 可能还在淡入途中（例如绝对上限兜底触发），先掐掉，避免两个 Storyboard 抢同一个 Opacity。
         _maskFadeStoryboard?.Stop();
+        RunMaskFade(0.0, MaskFadeMs, finishing: true);
+    }
+
+    /// <summary>跑一次 Opacity 过渡：to=1 淡入、to=0 淡出。故意不写 From —— 从当前值起步，
+    /// 淡入被打断时不会先跳到 1 再回落。finishing=true 表示这是收尾的淡出（结束后清状态）。</summary>
+    private void RunMaskFade(double to, double ms, bool finishing = false)
+    {
         try
         {
             var animation = new DoubleAnimation
             {
-                // 不写 From：从当前值起步，上一轮淡出没跑完时也不会先跳到 1 再回落。
-                To = 0.0,
-                Duration = new Duration(TimeSpan.FromMilliseconds(MaskFadeMs)),
+                To = to,
+                Duration = new Duration(TimeSpan.FromMilliseconds(ms)),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
             Storyboard.SetTarget(animation, ResizeMask);
@@ -627,19 +635,19 @@ public sealed partial class MainWindow : Window
             sb.Children.Add(animation);
             sb.Completed += (s, e) =>
             {
-                _maskFading = false;
-                _maskVisible = false;
-                try { ResizeMask.Opacity = 0.0; } catch { }
+                // 动画跑完必须把属性值固化到终态：Storyboard 结束后若被 Stop/回收，
+                // Opacity 会回弹到基值 —— 抬起时回弹到 0 等于遮罩当场消失。
+                try { ResizeMask.Opacity = to; } catch { }
+                if (finishing) { _maskFading = false; _maskVisible = false; }
             };
             _maskFadeStoryboard = sb;
             sb.Begin();
         }
         catch
         {
-            // 淡出动画起不来也必须落下遮罩，绝不把窗口蒙死。
-            _maskFading = false;
-            _maskVisible = false;
-            try { ResizeMask.Opacity = 0.0; } catch { }
+            // 动画起不来也必须落在终态：淡入失败退化成硬切盖住，淡出失败退化成直接落下。
+            try { ResizeMask.Opacity = to; } catch { }
+            if (finishing) { _maskFading = false; _maskVisible = false; }
         }
     }
 
