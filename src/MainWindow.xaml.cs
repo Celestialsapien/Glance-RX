@@ -396,10 +396,10 @@ public sealed partial class MainWindow : Window
     // ═════════════════════════════════════════════════════════════════════
 
     private const double MaskFadeInMs = 60.0;      // 淡入时长（驱动连续合成、保证遮罩真正上屏；不是装饰）
-    private const double MaskDeferMs = 16.0;       // 淡入完成后的帧余量（放行命令前的最后一帧）
-    private const double MaskMinShowMs = 260.0;    // 最短遮盖时长（须盖过 OS 窗口动画时长）
-    private const double MaskSizeStableMs = 150.0; // 内容区尺寸静默多久算"过渡已完成"
-    private const double MaskFadeMs = 60.0;        // 淡出时长
+    private const double MaskDeferMs = 8.0;        // 淡入完成后的帧余量（放行命令前的余量；8=半帧，偏冒险）
+    private const double MaskMinShowMs = 80.0;     // 最短遮盖地板（SizeChanged 不触发时的兜底；正常由 settle 接管）
+    private const double MaskSizeStableMs = 20.0;  // 内容区尺寸静默多久算"过渡已完成"（动画停后才跑，留一帧余量防尾段露闪）
+    private const double MaskFadeMs = 40.0;        // 淡出时长（纯观感，无机制职责，可压短）
     private const double MaskHardCapMs = 1200.0;   // 绝对上限（兜底，绝不永久遮住）
 
     private const uint WM_SYSCOMMAND = 0x0112;
