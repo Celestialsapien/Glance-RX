@@ -71,7 +71,6 @@ public sealed partial class MainWindow : Window
         ArmColdStartCloak();
         // 最大化/还原过渡遮罩：必须在 Activate 之前装好（见文件末尾同名段落）。
         InstallResizeMaskSignals();
-        if (WindowRoot != null) WindowRoot.SizeChanged += WindowRoot_SizeChanged;
         CompositionTarget.Rendering += OnFirstFrameReady;
         // 同上判空：两处守卫会让可空流分析把 WindowRoot 视为可能为 null（否则 CS8602）。
         if (WindowRoot != null) WindowRoot.Loaded += OnRootLoadedReveal;
@@ -392,13 +391,14 @@ public sealed partial class MainWindow : Window
     //   MaskDeferMs（淡入之后的帧余量）单独加大【无效】：它拉长的只是"遮罩已提交但不再被重画"的
     //   静默期，不产生新的合成帧。16ms / 32ms / 50ms 三档都试过，都挡不住（2026-09-16）。
     //
-    // 注：遮盖时长（最短遮盖 / 尺寸静默）以【命令重放、窗口开始变形】为起点，不是以抬起遮罩为起点。
+    // 注：遮盖时长（最短遮盖）以【命令重放、窗口开始变形】为起点，不是以抬起遮罩为起点。
+    // 遮罩只盖住开头那段 glitch，到固定短时长（MaskMinShowMs）就淡出，让后面的平滑缩放露出来——
+    // 不再等 OS 最大化动画结束（那通常 ~200ms，远大于真实 glitch，会无谓地盖住整段缩放）。
     // ═════════════════════════════════════════════════════════════════════
 
     private const double MaskFadeInMs = 60.0;      // 淡入时长（驱动连续合成、保证遮罩真正上屏；不是装饰）
     private const double MaskDeferMs = 8.0;        // 淡入完成后的帧余量（放行命令前的余量；8=半帧，偏冒险）
-    private const double MaskMinShowMs = 80.0;     // 最短遮盖地板（SizeChanged 不触发时的兜底；正常由 settle 接管）
-    private const double MaskSizeStableMs = 20.0;  // 内容区尺寸静默多久算"过渡已完成"（动画停后才跑，留一帧余量防尾段露闪）
+    private const double MaskMinShowMs = 80.0;     // 最短遮盖：命令重放后固定遮盖时长，盖住开头 glitch，不等动画结束
     private const double MaskFadeMs = 40.0;        // 淡出时长（纯观感，无机制职责，可压短）
     private const double MaskHardCapMs = 1200.0;   // 绝对上限（兜底，绝不永久遮住）
 
@@ -438,7 +438,6 @@ public sealed partial class MainWindow : Window
 
     private DispatcherTimer? _maskDeferTimer;   // 淡入完成后（+一帧余量）执行系统命令
     private DispatcherTimer? _maskMinTimer;     // 最短遮盖
-    private DispatcherTimer? _maskSettleTimer;  // 内容区尺寸静默
     private DispatcherTimer? _maskCapTimer;     // 绝对上限
     private Storyboard? _maskFadeStoryboard;
 
@@ -449,7 +448,6 @@ public sealed partial class MainWindow : Window
     private bool _maskVisible;
     private bool _maskFading;
     private bool _maskMinElapsed;
-    private bool _maskSettlePending;
 
     /// <summary>装窗口子类接管 WM_SYSCOMMAND；走 comctl32 子类链（自动链式转发），
     /// 不替换 GWLP_WNDPROC，避免与 WinUI 自身窗口过程互相覆盖。</summary>
@@ -461,7 +459,6 @@ public sealed partial class MainWindow : Window
             // 必须等淡入跑完：放行命令时遮罩要已完全不透明，否则窗口会在遮罩半透明时变形。
             _maskDeferTimer = NewMaskTimer(MaskFadeInMs + MaskDeferMs, MaskDeferTimer_Tick);
             _maskMinTimer = NewMaskTimer(MaskMinShowMs, MaskMinTimer_Tick);
-            _maskSettleTimer = NewMaskTimer(MaskSizeStableMs, MaskSettleTimer_Tick);
             _maskCapTimer = NewMaskTimer(MaskHardCapMs, MaskCapTimer_Tick);
         }
 
@@ -525,11 +522,9 @@ public sealed partial class MainWindow : Window
             SendMessage(hwnd, WM_SYSCOMMAND, _maskPendingWParam, _maskPendingLParam);
 
             // 计时起点必须落在这里（窗口真正开始变形），而不是淡入开始那一刻：
-            // "最短遮盖"和"尺寸静默"都是相对变形期定义的，若从 t=0 算起，淡入的 60ms（以及 defer 本身）
+            // "最短遮盖"是相对变形期定义的，若从 t=0 算起，淡入的 60ms（以及 defer 本身）
             // 会被算进遮盖时长里，变形尾段就会在遮罩淡出之后露出来。
-            _maskSettlePending = true;
             RestartTimer(_maskMinTimer);
-            RestartTimer(_maskSettleTimer);
         }
         catch { }
         finally
@@ -538,14 +533,6 @@ public sealed partial class MainWindow : Window
             _maskPendingWParam = IntPtr.Zero;
             _maskPendingLParam = IntPtr.Zero;
         }
-    }
-
-    /// <summary>内容区尺寸变化：遮罩还盖着就重置"静默"计时（过渡仍在进行）。</summary>
-    private void WindowRoot_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        if (!_maskVisible || _maskFading) return;
-        _maskSettlePending = true;
-        RestartTimer(_maskSettleTimer);
     }
 
     /// <summary>抬起遮罩：走淡入（不是硬切 —— 见段头注释，淡入是驱动连续合成的机制必需品）。
@@ -560,14 +547,12 @@ public sealed partial class MainWindow : Window
             _maskFading = false;
             _maskVisible = true;
             _maskMinElapsed = false;
-            _maskSettlePending = true;
 
             RunMaskFade(1.0, MaskFadeInMs);
 
-            // min/settle 在这里启动只为兜底（万一 defer tick 没能重放命令，遮罩也能自己落下）；
-            // 正式计时起点在 MaskDeferTimer_Tick 里，命令重放后会重新 Start 这两个计时器。
+            // min 在这里启动只为兜底（万一 defer tick 没能重放命令，遮罩也能自己落下）；
+            // 正式计时起点在 MaskDeferTimer_Tick 里，命令重放后会重新 Start 这个计时器。
             RestartTimer(_maskMinTimer);
-            RestartTimer(_maskSettleTimer);
             RestartTimer(_maskCapTimer);   // 绝对上限从抬起算起，不后移
             return true;
         }
@@ -581,24 +566,17 @@ public sealed partial class MainWindow : Window
         TryFadeOutResizeMask();
     }
 
-    private void MaskSettleTimer_Tick(object? sender, object e)
-    {
-        _maskSettleTimer?.Stop();
-        _maskSettlePending = false;
-        TryFadeOutResizeMask();
-    }
-
     private void MaskCapTimer_Tick(object? sender, object e)
     {
         _maskCapTimer?.Stop();
         StartResizeMaskFadeOut();
     }
 
-    /// <summary>最短遮盖已满足 且 尺寸已静默 ⇒ 过渡结束，开始淡出；否则等另一个条件。</summary>
+    /// <summary>最短遮盖已满足 ⇒ 过渡开头那段 glitch 已盖过，开始淡出，让后面的平滑缩放露出来。</summary>
     private void TryFadeOutResizeMask()
     {
         if (!_maskVisible || _maskFading) return;
-        if (!_maskMinElapsed || _maskSettlePending) return;
+        if (!_maskMinElapsed) return;
         StartResizeMaskFadeOut();
     }
 
@@ -607,9 +585,7 @@ public sealed partial class MainWindow : Window
         if (!_maskVisible || _maskFading) return;
         _maskFading = true;
         _maskMinTimer?.Stop();
-        _maskSettleTimer?.Stop();
         _maskCapTimer?.Stop();
-        _maskSettlePending = false;
 
         // 可能还在淡入途中（例如绝对上限兜底触发），先掐掉，避免两个 Storyboard 抢同一个 Opacity。
         _maskFadeStoryboard?.Stop();
