@@ -27,22 +27,5 @@
             navigation events and the Loaded lifecycle.
         -->
         <Frame x:Name="RootFrame" Grid.Row="1" />
-
-        <!--
-            窗口最大化/还原过渡遮罩。
-            位置：窗口根 Grid（窗口合成层），只盖 Row=1（标题栏以下的内容区）——
-            不碰标题栏、不碰窗口边框，但完整覆盖工具栏/侧栏/视口/底部胶囊。
-            负边距为过扫：窗口放大时 XAML 布局若慢一帧，新露出的边也仍在遮罩内
-            （实际显示被窗口自身裁剪，观感即"内容区整体变回窗口背景色"）。
-            常驻 Visible + Opacity=0，抬起走淡入（不是硬切 —— 淡入驱动连续合成，硬切挡不住抖动）。
-            见 MainWindow.xaml.cs 的"窗口最大化/还原过渡遮罩"段。
-        -->
-        <Border x:Name="ResizeMask"
-                Grid.Row="1"
-                Canvas.ZIndex="1000"
-                IsHitTestVisible="False"
-                Opacity="0"
-                Margin="-4000,0,-4000,-4000"
-                Background="#FF1C1C1C" />
     </Grid>
 </Window>
