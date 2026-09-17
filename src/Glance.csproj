@@ -11,26 +11,29 @@
     <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')">win-$(Platform).pubxml</PublishProfile>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
+    <!--
+      便携版：Glance 只以非打包（unpackaged）形态分发，永不做 MSIX。
+      WindowsPackageType=None 是所有打包链路的总开关 —— 缺省时 WinAppSDK 与
+      Microsoft.Windows.SDK.BuildTools.WinApp 都会把工程当成"已打包"（见 WinApp.targets
+      的 _WinAppRunSupportActive 判据），从而走 package identity 注册路径。
+      注：本项目 WindowsAppSDKSelfContained=true，故该值不会额外打开 bootstrap 自动初始化
+      （BootstrapCommon.targets 的前提是 WindowsAppSDKSelfContained!=true）→ 运行时行为零变化。
+    -->
+    <WindowsPackageType>None</WindowsPackageType>
     <EnableMsixTooling>false</EnableMsixTooling>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
-    <PackageCertificateKeyFile>Glance_TestKey_New.pfx</PackageCertificateKeyFile>
     <SelfContained>true</SelfContained>
     <PublishSelfContained>true</PublishSelfContained>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
+  <!-- 仅保留运行时要用的图标：MainWindow.xaml:20 的 ImageIconSource 与
+       MainWindow.xaml.cs:106 的 AppWindow.SetIcon("Assets/AppIcon.ico")。
+       其余 Assets\*.png 原先只服务于具体 MSIX 清单，已随打包一并删除。 -->
   <ItemGroup>
-    <Content Include="Assets\SplashScreen.scale-200.png" />
-    <Content Include="Assets\LockScreenLogo.scale-200.png" />
-    <Content Include="Assets\Square150x150Logo.scale-200.png" />
-    <Content Include="Assets\Square44x44Logo.scale-200.png" />
-    <Content Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
-    <Content Include="Assets\Square44x44Logo.targetsize-48_altform-lightunplated.png" />
-    <Content Include="Assets\StoreLogo.png" />
     <Content Include="Assets\AppIcon.ico" />
-    <Content Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
 
   <!-- 设计手感调参文件：复制到 exe 同级目录，运行时可由用户直接编辑（无需重新编译）。 -->
@@ -43,41 +46,13 @@
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 
-
-  <!--
-    Defining the "Msix" ProjectCapability here allows the Single-project MSIX Packaging
-    Tools extension to be activated for this project even if the Windows App SDK Nuget
-    package has not yet been restored.
-  -->
-  <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
-    <ProjectCapability Include="Msix" />
-  </ItemGroup>
-
-  <!--
-    Microsoft.Windows.SDK.BuildTools.WinApp adds first-class support for
-    `dotnet run` on packaged WinUI apps: it hooks the .NET CLI Run target to
-    register a debug identity via the winapp CLI and launch the app with
-    package identity (AUMID).
-    Set <EnableWinAppRunSupport>false</EnableWinAppRunSupport> in a
-    <PropertyGroup> above to opt out.
-  -->
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.4.0" />
     <!-- GPU 呈现层 (Win2D / CanvasVirtualControl)。版本需与 WindowsAppSDK 2.2.0 + .NET 10 兼容。 -->
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.1" />
     <PackageReference Include="PDFsharp" Version="6.1.1" />
   </ItemGroup>
-
-  <!--
-    Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution
-    Explorer "Package and Publish" context menu entry to be enabled for this project even if
-    the Windows App SDK Nuget package has not yet been restored.
-  -->
-  <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
-    <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
-  </PropertyGroup>
 
   <!-- Publish Properties (only apply during publish, not build) -->
   <PropertyGroup Condition="'$(PublishDir)' != ''">
@@ -118,19 +93,9 @@
     <Message Text="Copied native DLLs to $(OutputPath)" Importance="High" />
   </Target>
 
-  <!-- Exclude testing assets from final build and packaging to pass WACK -->
+  <!-- 剔除 PdfSharp 的测试资产（若某版本开始附带）。对便携版输出/发布同样有效。 -->
   <Target Name="ExcludePdfSharpQuality" AfterTargets="Build;Publish;CopyFilesToOutputDirectory">
     <Delete Files="$(OutputPath)PdfSharp.Quality.dll" Condition="Exists('$(OutputPath)PdfSharp.Quality.dll')" />
     <Delete Files="$(PublishDir)PdfSharp.Quality.dll" Condition="Exists('$(PublishDir)PdfSharp.Quality.dll') and '$(PublishDir)' != ''" />
-  </Target>
-
-  <Target Name="ExcludePdfSharpQualityFromPayload" AfterTargets="GetPackagingOutputs">
-    <ItemGroup>
-      <PackagingOutputs Remove="@(PackagingOutputs)" Condition="$([System.String]::new('%(Identity)').Contains('PdfSharp.Quality'))" />
-      <AppxPackagePayload Remove="@(AppxPackagePayload)" Condition="$([System.String]::new('%(Identity)').Contains('PdfSharp.Quality'))" />
-      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="$([System.String]::new('%(Identity)').Contains('PdfSharp.Quality'))" />
-      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.String]::new('%(Identity)').Contains('PdfSharp.Quality'))" />
-      <RuntimeCopyLocalItems Remove="@(RuntimeCopyLocalItems)" Condition="$([System.String]::new('%(Identity)').Contains('PdfSharp.Quality'))" />
-    </ItemGroup>
   </Target>
 </Project>

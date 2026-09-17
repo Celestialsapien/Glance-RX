@@ -1,8 +1,5 @@
 {
   "profiles": {
-    "Glance (Package)": {
-      "commandName": "MsixPackage"
-    },
     "Glance (Unpackaged)": {
       "commandName": "Project"
     }
