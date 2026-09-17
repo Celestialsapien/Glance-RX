@@ -167,7 +167,11 @@ DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default
 UiTransitionMs = 150              # 默认 150 | default
 
 # 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。/ Auto-hide delay after pointer leaves (ms).
-ToolbarHideDelayMs = 180          # 默认 180 | default";
+ToolbarHideDelayMs = 180          # 默认 180 | default
+";
+        // ⚠ 上面末尾那个换行是【刻意】的，别删：让本字面量与 src/config.txt 逐字一致（含末尾换行）。
+        //   删掉它 => 本字面量会比 src/config.txt 少一个换行，"删文件=恢复出厂"生成的那份就与仓库那份不同。
+        // The trailing newline above is deliberate: keeps this literal byte-identical to src/config.txt.
 
         // ---------------- 缩放范围 / Zoom range ----------------
         public static double MinZoom = 0.1;                 // 最小缩放比例 / min zoom ratio (10%)

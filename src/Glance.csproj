@@ -133,8 +133,4 @@
       <RuntimeCopyLocalItems Remove="@(RuntimeCopyLocalItems)" Condition="$([System.String]::new('%(Identity)').Contains('PdfSharp.Quality'))" />
     </ItemGroup>
   </Target>
-
-  <Target Name="PrintPackagingOutputs" AfterTargets="ExcludePdfSharpQualityFromPayload">
-    <WriteLinesToFile File="$(MSBuildProjectDirectory)\packaging_outputs.txt" Lines="@(PackagingOutputs->'%(Identity) = %(TargetPath)')" Overwrite="true" />
-  </Target>
 </Project>

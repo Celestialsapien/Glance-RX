@@ -23,6 +23,10 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
+# ⚠ 绝不可改为 "abort"：所有 extern "C" 入口都靠 safe_ffi! 的 catch_unwind 兜底
+#   （见 src/ffi/bindings.rs），panic 跨 FFI 边界 = UB 静默崩。
+#   显式声明，防止被 workspace / 本机 profile 覆盖悄悄改掉。
+panic = "unwind"
 
 [dev-dependencies]
 tempfile = "3"
