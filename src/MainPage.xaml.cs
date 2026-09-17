@@ -556,7 +556,8 @@ public sealed partial class MainPage : Page
             UpdateWindowTitle(_pendingFileToLoad.Name);
             try
             {
-                await LoadPdfAsync(_pendingFileToLoad);
+                // 激活参数里的 StorageFile 由 OS 直接给出，取其 Path 不额外付费。
+                await LoadPdfAsync(_pendingFileToLoad.Path);
             }
             catch (Exception)
             {
@@ -579,9 +580,12 @@ public sealed partial class MainPage : Page
                 string filePath = App.PendingFilePath;
                 App.PendingFilePath = null; // Clear immediately to prevent re-use
                 
-                StorageFile file = await StorageFile.GetFileFromPathAsync(filePath);
-                UpdateWindowTitle(file.Name);
-                await LoadPdfAsync(file);
+                // 直接按路径打开：不再经 StorageFile.GetFileFromPathAsync。本地文件实测该调用
+                // 耗 49ms（进程相对 729.0→778.0ms），而引擎最终只消费路径字符串（见下方
+                // _currentPdfPath），属纯浪费。Sumatra 全链路同样只传路径：
+                // CreateEngineFromFile(path, pwdUI, chmInFixedUI)（SumatraPDF.cpp:2047 / 4232）。
+                UpdateWindowTitle(Path.GetFileName(filePath));
+                await LoadPdfAsync(filePath);
             }
             catch (Exception)
             {
@@ -716,7 +720,7 @@ public sealed partial class MainPage : Page
             UpdateWindowTitle(file.Name);
             try
             {
-                await LoadPdfAsync(file);
+                await LoadPdfAsync(file.Path);
             }
             catch (Exception ex)
             {
@@ -1558,9 +1562,9 @@ public sealed partial class MainPage : Page
         return null;
     }
 
-    private async Task LoadPdfAsync(StorageFile file)
+    private async Task LoadPdfAsync(string path)
     {
-        if (file == null) return;
+        if (string.IsNullOrEmpty(path)) return;
 
         // Cancel page rendering FIRST to release the semaphore and prevent deadlocks!
         if (_pdfRenderCts != null)
@@ -1584,7 +1588,7 @@ public sealed partial class MainPage : Page
 
             // 切换文档前，先保存旧 PDF 的阅读位置/缩放（此时 GpuViewer 仍显示旧文档）。
             SaveCurrentViewState();
-            _currentPdfPath = file.Path;
+            _currentPdfPath = path;
             _canOverwriteOriginal = true; // 默认可覆盖；引擎初始化成功后按加密/只读重写
             // 渲染源直接指向当前文档本身，加载时绝不复制任何副本（便携性 + 无信息泄露）。
             HasUnsavedChanges = false;
@@ -1625,7 +1629,7 @@ public sealed partial class MainPage : Page
                 }
                 catch (PdfPasswordRequiredException)
                 {
-                    var entered = await PromptForPasswordAsync(file.Name, isRetry);
+                    var entered = await PromptForPasswordAsync(Path.GetFileName(path), isRetry);
                     if (entered == null)
                     {
                         // User cancelled the password prompt — revert to welcome screen.
