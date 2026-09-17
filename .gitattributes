@@ -1,0 +1,36 @@
+# ============================================================================
+# 换行与文本属性 / Line endings & text attributes
+# ----------------------------------------------------------------------------
+# 为什么需要这个文件：
+#   仓库里有一对【必须逐字一致】的文件 —— src/config.txt 与 src/Tuning.cs 中的
+#   DefaultConfigText 字面量（"删 config.txt = 恢复出厂"会用它重新生成）。
+#   只要两者换行风格不同（一个 LF 一个 CRLF），这个不变量就【静默】失效：
+#   没有任何构建步骤会检查它，也没有任何报错。
+#
+# 背景：本机 core.autocrlf=true 而此前没有 .gitattributes，导致工作区里
+#   14 个 .cs/.xaml/.csproj 是 CRLF、其余是 LF（索引一直是全 LF）。
+#   本文件把换行钉死为 LF，消除这个失效模式。
+#
+# 若你日后再新增"必须逐字一致"的文件对，请把两条路径都显式写在这里。
+# ============================================================================
+
+# 默认：一律 LF（索引与工作区）。二进制由 git 自动识别并跳过转换。
+* text=auto eol=lf
+
+# 必须逐字一致的那一对：显式钉死，即使上面的默认规则被改也仍然成立。
+src/config.txt  text eol=lf
+src/Tuning.cs   text eol=lf
+
+# 二进制：不转换、不按文本 diff。
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.dll    binary
+*.exe    binary
+*.pdb    binary
+*.winmd  binary
+*.pfx    binary
+*.rlib   binary
+*.rmeta  binary
