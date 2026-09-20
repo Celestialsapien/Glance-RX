@@ -122,58 +122,34 @@ public sealed partial class MainPage : Page
     private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _penForegroundBrush =
         new(Microsoft.UI.Colors.Black);
 
-    // Brushes for the color swatch buttons in the Pen options capsule.
-    // A selected swatch is visually marked with a persistent white border
-    // (similar to how the thickness presets use a gray background highlight).
-    private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _colorButtonWhiteRingBrush =
-        new(Windows.UI.Color.FromArgb(255, 255, 255, 255));
-    private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _colorButtonDefaultRingBrush =
-        new(Windows.UI.Color.FromArgb(255, 0x88, 0x88, 0x88));
+    // 颜色按钮不再有任何包围环，仅用「圆点大小」区分状态：
+    // 未选中 = 原大小；悬浮/选中 = 1.72×。
+    // ScaleTransform 共享实例，多个按钮引用同一对象，不参与布局（无位移跳动）。
+    private readonly Microsoft.UI.Xaml.Media.ScaleTransform _colorSwatchScale = new()
+    { ScaleX = 1.72, ScaleY = 1.72 };
+    private Button? _selectedColorButton; // 当前选中的颜色按钮（悬浮恢复时判断用）
 
     // Currently selected pen thickness (replaces the old ThicknessSlider).
     private double _activeThickness = 3.5;
     private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _thicknessPresetTransparentBrush =
         new(Microsoft.UI.Colors.Transparent);
-    private Microsoft.UI.Xaml.Media.Brush? _thicknessPresetSelectedBrush;
-    private Microsoft.UI.Xaml.Media.Brush? _thicknessPresetHoverBrush;
-    private Microsoft.UI.Xaml.Media.Brush GetPresetSelectedBrush()
+    // 粗细预设按钮的选中/悬浮背景。颜色按主题自适应（浅色=中灰、深色=亮灰）：
+    // SystemControlBackgroundListMediumBrush 在深色主题下解析偏暗，与深色胶囊底色对比不足，
+    // 故不再复用该主题资源，改为两套显式颜色，主题切换时由 ApplyPenOptionThemeBrushes 更新。
+    private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _thicknessPresetSelectedBrush =
+        new(Windows.UI.Color.FromArgb(255, 0xC0, 0xC0, 0xC0));
+
+    /// <summary>
+    /// 按当前主题（浅色/深色）设置画笔胶囊选中提示色：
+    /// 粗细选中背景：浅色=中灰、深色=亮灰（保证与深浅胶囊底色都有足够对比）。
+    /// （颜色按钮无环、纯靠大小区分，无需主题适配。）
+    /// </summary>
+    private void ApplyPenOptionThemeBrushes()
     {
-        if (_thicknessPresetSelectedBrush == null)
-        {
-            if (Application.Current != null &&
-                Application.Current.Resources.TryGetValue("SystemControlBackgroundListMediumBrush", out object v) &&
-                v is Microsoft.UI.Xaml.Media.Brush b)
-            {
-                _thicknessPresetSelectedBrush = b;
-            }
-            else
-            {
-                _thicknessPresetSelectedBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Gray);
-            }
-        }
-        return _thicknessPresetSelectedBrush;
-    }
-    // Light gray brush used as the hover/press background on thickness preset
-    // buttons (so users get a clear affordance without the white ring). Selected
-    // buttons keep the darker GetPresetSelectedBrush on hover so the selected
-    // state stays visually distinct from a plain hover.
-    private Microsoft.UI.Xaml.Media.Brush GetPresetHoverBrush()
-    {
-        if (_thicknessPresetHoverBrush == null)
-        {
-            if (Application.Current != null &&
-                Application.Current.Resources.TryGetValue("SystemControlBackgroundListLowBrush", out object v) &&
-                v is Microsoft.UI.Xaml.Media.Brush b)
-            {
-                _thicknessPresetHoverBrush = b;
-            }
-            else
-            {
-                _thicknessPresetHoverBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(
-                    Windows.UI.Color.FromArgb(255, 0x33, 0x33, 0x33));
-            }
-        }
-        return _thicknessPresetHoverBrush;
+        bool dark = this.ActualTheme == ElementTheme.Dark;
+        _thicknessPresetSelectedBrush.Color = dark
+            ? Windows.UI.Color.FromArgb(255, 0x52, 0x52, 0x52)
+            : Windows.UI.Color.FromArgb(255, 0xC0, 0xC0, 0xC0);
     }
 
     // Undo/Redo history stack
@@ -222,6 +198,8 @@ public sealed partial class MainPage : Page
         SetButtonsNonTabStop();
         // Popup（PenOptionsPopup）内按钮在独立视觉树，主页面冒泡事件抓不到，单独订阅处理。
         AttachDefocusToPopupButtons();
+        // 颜色按钮悬浮预览：环=按钮自身色+放大一圈（Popup 内元素需单独挂事件）。
+        AttachColorSwatchHover();
 
         // 全局键盘聚焦拦截：禁止任何焦点落到 ButtonBase（用户要求按钮只由鼠标单击触发，
         // 无 Tab+Enter 触发路径，点后焦点也不残留→Enter/Space 不重触发）。不限 FocusState：
@@ -293,6 +271,20 @@ public sealed partial class MainPage : Page
         ApplyWelcomeChrome(true);   // 初始就是欢迎页（赋同值不触发回调，故显式应用一次）
 
         this.Loaded += MainPage_Loaded;
+        // 主题切换（设置面板选择/跟随系统变化）时刷新画笔胶囊的选中提示色，
+        // 并重刷当前选中的颜色环与粗细背景，保证深浅色模式下对比清晰。
+        this.ActualThemeChanged += (s, e) => RefreshPenOptionThemeHighlights();
+    }
+
+    /// <summary>
+    /// 主题变化后：更新胶囊提示色 brush，并重刷当前选中态（颜色大小提示 + 粗细背景）。
+    /// 共享 brush 对象改色后，重新调用高亮函数让每个按钮重新取 brush 引用并重绘。
+    /// </summary>
+    private void RefreshPenOptionThemeHighlights()
+    {
+        ApplyPenOptionThemeBrushes();
+        SyncColorSwatchHighlight();
+        SelectThicknessPreset(_activeThickness);
     }
 
     /// <summary>
@@ -481,6 +473,13 @@ public sealed partial class MainPage : Page
         // retract inside the window, not only when leaving it.
         this.AddHandler(PointerMovedEvent, new PointerEventHandler(Root_PointerMoved), true);
 
+        // 页面基础的指针事件同样锚定"最近一次真实移动"的时刻。工具栏子级若把事件标记 Handled，
+        // 页面基础（handledEventsToo）仍会运行、Root_PointerMoved 却不会——此处只记录时刻，
+        // 不做任何命中/归属判定（判定一律交给 Root_PointerMoved，避免两处结论互相打架）。
+        this.AddHandler(PointerEnteredEvent, new PointerEventHandler(Root_PointerActivity), true);
+        this.AddHandler(PointerPressedEvent, new PointerEventHandler(Root_PointerActivity), true);
+        this.AddHandler(PointerExitedEvent, new PointerEventHandler(Root_PointerActivity), true);
+
 
         // Keep the floating pen-options capsule anchored below the Pen button on resize,
         // and keep the top toolbar positioned flush under the window title bar.
@@ -508,31 +507,14 @@ public sealed partial class MainPage : Page
             ApplyPenHighlight();
         }
 
-        // Color swatch buttons: keep the original swatch color visible on hover/press
-        // (the default Dark-theme button template would otherwise overlay the swatch
-        // with a near-black system brush, making e.g. "Yellow" look dark on hover and
-        // "flash the color then turn dark" on click). Instead, use a bright white ring
-        // (border) as a clear "glow" indicator while preserving the swatch color.
-        foreach (var btn in new[] { ColorYellowButton, ColorGreenButton, ColorCyanButton,
-                                    ColorMagentaButton, ColorRedButton, ColorBlueButton, ColorBlackButton })
-        {
-            if (btn?.Background is SolidColorBrush swatch)
-            {
-                var swatchBrush = new SolidColorBrush(swatch.Color);
-                var ringBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255));
-
-                btn.Resources["ButtonBackgroundPointerOver"] = swatchBrush;
-                btn.Resources["ButtonBackgroundPressed"] = swatchBrush;
-                btn.Resources["ButtonBorderBrushPointerOver"] = ringBrush;
-                btn.Resources["ButtonBorderBrushPressed"] = ringBrush;
-            }
-        }
-
         // Thickness preset buttons: no white-ring affordance on hover/press (the gray
         // highlight on the inner ThicknessXHighlight Border is the only selected-state
         // indicator). We only need to keep the system from overlaying a near-black
         // PointerOver/Pressed background on top of the transparent button / inner highlight,
         // which is already handled by HighlightThicknessPreset.
+
+        // 首次按当前主题定色（ActualTheme 此时已确定），再设置默认选中高亮。
+        ApplyPenOptionThemeBrushes();
 
         // Mark the default thickness preset (3.5 px) as selected.
         SelectThicknessPreset(3.5);
@@ -815,7 +797,7 @@ public sealed partial class MainPage : Page
         await dialog.ShowAsync();
     }
 
-    /// <summary>保存当前 PDF 的阅读位置与缩放到本地（按路径区分），供重开时精确还原。</summary>
+    /// <summary>保存当前 PDF 的阅读位置、缩放与窗口几何到本地（按路径区分），供重开时精确还原。</summary>
     private void SaveCurrentViewState()
     {
         if (string.IsNullOrEmpty(_currentPdfPath)) return;
@@ -831,6 +813,10 @@ public sealed partial class MainPage : Page
             LayoutMode = (int)GpuViewer.LayoutMode,
             SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
+        // 窗口几何由 MainWindow 填写（只有它持有 AppWindow）：普通状态取 AppWindow.Position/Size，
+        // 最大化取 GetWindowPlacement 的 rcNormalPosition（SumatraPDF.cpp:775-841）。
+        if ((Application.Current as App)?.MainWindow is MainWindow mainWindow)
+            mainWindow.CaptureWindowGeometry(data, _currentPdfPath);
         ViewStateStore.Save(_currentPdfPath, data);
     }
 
@@ -2760,6 +2746,25 @@ public sealed partial class MainPage : Page
         return p.X >= r.Left && p.X <= r.Right && p.Y >= r.Top && p.Y <= r.Bottom;
     }
 
+    // 指针当前是否落在【已展开】的顶层工具栏矩形内（物理像素屏幕矩形 + 实时光标坐标）。
+    // 与 IsPointerOverExpandedToolbar 同一判据、同一工具，只是用途不同：那个决定"用哪种光标"，
+    // 这个决定"悬停标志该是什么值"。二者同源，故不存在"工具栏被判定为不在指针下、光标却仍排除在外"
+    // 这类自相矛盾的中间态。
+    //
+    // 这是唯一不会被 WinUI 吞掉的命中判据：一旦有 Popup（设置菜单/画笔胶囊/快速缩放菜单）打开，
+    // 输入上下文切换会吞掉工具栏自身的 PointerEntered/Exited，而 PointerMoved 虽仍到达页面根，
+    // 其 OriginalSource 却会停在浮层之前的最后命中元素上（上游 FindTopmostPopupHit 亦为此专门绕开
+    // 主树命中测试）——即"工具栏/胶囊"这两个来源在浮层打开期间都不可靠，只有几何命中可靠。
+    private bool IsPointerOverTopToolbarRect()
+    {
+        if (!IsTopToolbarShown) return false;
+        RECT? tr = GetTopToolbarScreenRect();
+        if (tr == null) return false;
+        if (!GetCursorPos(out POINT p)) return false;
+        RECT r = tr.Value;
+        return p.X >= r.Left && p.X <= r.Right && p.Y >= r.Top && p.Y <= r.Bottom;
+    }
+
     // 计算已展开工具栏的屏幕矩形（物理像素），用于把圆环光标排除在工具栏之外。
     // 工具栏是 Border(TopToolbar)，其 TransformToVisual(null) 坐标为【有效像素】，需乘以 XamlRoot.RasterizationScale
     // 再叠加客户区原点(ClientToScreen)的【物理像素】屏幕坐标。该变换含 RenderTransform(下滑动画)，
@@ -3250,6 +3255,24 @@ public sealed partial class MainPage : Page
     private DispatcherTimer? _toolbarHideTimer;
     private Storyboard? _toolbarAnim;
 
+    // 工具栏铺满内容区全宽时，指针"在工具栏内"不会产生任何移动事件（点击工具栏上没有独立
+    // 处理指针的元素时尤其如此）：此时工具栏的"指针在内部"过渡在上一拍已建立，故"工具栏外"
+    // 的 PointerExited 不可能派发，任何悬停标志都无从失效——收起被 PointerOwnsToolbar 卡住。
+    // 取严格的零容差：工具栏满宽时 || 必精确成立，任何非满宽布局（边距/居中式工具栏）都保留容差。
+    private const double ToolbarWidthFitEpsilon = 0.5;
+
+    // 最近一次指针移动的时间戳（Stopwatch 口径，与 UI 更新解耦）。
+    // 悬停标志的兜底依据：鼠标已离开工具栏矩形时移动事件必然发生；若工具栏矩形已不含指针、
+    // 却长时间没有 PointerMoved 事件到达，说明按钮的指针处理器把它标记了 Handled 而未冒泡到
+    private static readonly System.Diagnostics.Stopwatch PointerMoveClock = System.Diagnostics.Stopwatch.StartNew();
+    private long _lastPointerMoveMs = PointerMoveClock.ElapsedMilliseconds;
+    private long _lastPointerOutsideMs = PointerMoveClock.ElapsedMilliseconds;
+
+    // 由【根元素】冒泡上来的悬停校正标志：按钮里任何把 Handled 置真的指针处理器都能让 Root_PointerMoved
+    // 完全断流（本页就有两例：GpuViewer 的画布移动处理、鼠标悬停 Thumb 时的范围自动滚动）。
+    // 置真后，以上一次真实移动时刻为基准过 ToolbarHideDelayMs 再校正一次；任何真实移动都会复位它。
+    private bool _toolbarHoverSuspect;
+
     // 工具栏「指针归属」：仅含工具栏本体与笔胶囊。
     // 标题栏的「保持展开」由 SetTitleBarHover(true)→CancelToolbarHide 接管（它也会取消待定收起），
     // 不再纳入此处拦截——否则其 leave 事件被吞时 _pointerInTitleBar 卡成 true，工具栏永远收不起来
@@ -3373,6 +3396,19 @@ public sealed partial class MainPage : Page
             _toolbarHideTimer.Tick += (_, __) =>
             {
                 _toolbarHideTimer!.Stop();
+                if (_pageInputHasFocus) return;
+                if (!PointerOwnsToolbar)
+                {
+                    // 悬停标志未必可信：工具栏内按钮若把移动事件标记 Handled，Root_PointerMoved
+                    // 会完全断流（标志既建不起来、也无从失效）。故此处用实时光标与工具栏矩形做一次
+                    // 权威核对：
+                    //   指针确实还在工具栏上 → 补上归属并重新等待。否则"指针在工具栏上却不收起"这条
+                    //   不变量就完全押在悬停标志上，标志一丢（按钮吞掉移动事件）工具栏就在指针下收起，
+                    //   用户看到的正是"鼠标还在工具栏上，工具栏却消失了"。
+                    //   已离开 → 走 PointerVerifyToolbarHover 复核（满宽场景下标志可能失效）。
+                    if (IsPointerOverTopToolbarRect()) _pointerInTopToolbar = true;
+                    else if (!_toolbarHoverSuspect) PointerVerifyToolbarHover();
+                }
                 if (PointerOwnsToolbar || _pageInputHasFocus) return;
                 if (IsAuxiliaryPopupOpen())
                 {
@@ -3410,6 +3446,58 @@ public sealed partial class MainPage : Page
         return false;
     }
 
+    /// <summary>
+    /// 工具栏【本体内】的指针移动：重建"指针在工具栏上"的归属。
+    /// 本处理器挂在 Border 本身（不是页面根，且没有 handledEventsToo）：工具栏内任何按钮一旦
+    /// 把移动事件标记 Handled，冒泡就到此为止、Root_PointerMoved 永不运行 —— 这正是"悬停标志
+    /// 已过期、收起却被 PointerOwnsToolbar 卡住"的成因。此处是工具栏内部唯一还能看到真实指针的
+    /// 位置。排除本 Border 的直接子元素（按钮命中时子元素负责，避免把归属从"工具栏"误改成"按钮"）。
+    /// </summary>
+    private void TopToolbar_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (ReferenceEquals(e.OriginalSource, TopToolbar)) return;
+        _pointerInTopToolbar = true;
+        _pointerInTitleBar = false;
+        CancelToolbarHide();
+    }
+
+    /// <summary>
+    /// 指针在工具栏的命中区外移动（工具栏的父级，即页面根）：此时指针【确实已被工具栏的
+    /// 命中区排除】——否则它不会去命中工具栏的父级。但这未必等于"指针已在工具栏矩形之外"：
+    /// 工具栏下方留边距处的元素把移动事件标记 Handled 并继续冒泡。故此处只做标记、不做判定：
+    /// 由当次 PointerMoved 的收敛分支（Root_PointerMoved）或下一拍的权威核对来裁定；全程不放宽
+    /// 任何隐藏路径，只是把"标志与实时光标不一致"这件事记下来。
+    /// </summary>
+    private void TopToolbarHost_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (!IsTopToolbarShown || !PointerOwnsToolbar) return;
+        if (IsPointerOverTopToolbarRect()) _toolbarHoverSuspect = true;
+    }
+
+    /// <summary>
+    /// 悬停标志的兜底校正：工具栏矩形已不含实时光标、却长时间没有 PointerMoved 事件到达时，
+    /// 认定标志失效并请求收起（是否真收起仍由 PointerOwnsToolbar / 输入框焦点 / 浮层判据共同裁定）。
+    /// 只在工具栏满宽（铺满内容区）时由调用方放行：满宽时"指针在工具栏内"不可能产生任何移动事件，
+    /// 故"无事件 + 矩形不含指针"必然是标志失效；非满宽布局（工具栏未铺满）时这个推论不成立，故整体跳过。
+    /// </summary>
+    private void PointerVerifyToolbarHover()
+    {
+        if (TopToolbar == null || TopToolbarHost == null) return;
+        if (TopToolbar.ActualWidth < TopToolbarHost.ActualWidth - ToolbarWidthFitEpsilon) return;
+
+        long now = PointerMoveClock.ElapsedMilliseconds;
+        if (now - _lastPointerMoveMs < ToolbarHideDelayMs) return;   // 移动事件仍在流，标志是新鲜的
+
+        _lastPointerMoveMs = now;
+        if (IsPointerOverTopToolbarRect()) return;                   // 指针确实还在工具栏上 → 保持
+        _pointerInTopToolbar = false;
+        RequestHideTopToolbar();
+    }
+
+    // 工具栏的"指针在内部"归属只在这四个位置建立：①本 Border 的 PointerEntered/②PointerMoved
+    // （工具栏内按钮吞掉移动事件时的兜底）、③页面基础的几何核对（悬浮列表、无事件可派发时）、
+    // ④笔胶囊的 PointerEntered（胶囊与工具栏同属一个悬停区域）。
+    // 全都不依赖"工具栏收到 PointerExited"——那是被 WinUI 吞得最厉害的一环。
     private void TopToolbar_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
         _pointerInTopToolbar = true;
@@ -3419,11 +3507,12 @@ public sealed partial class MainPage : Page
 
     private void TopToolbar_PointerExited(object sender, PointerRoutedEventArgs e)
     {
-        // Toolbar + pen capsule + title bar behave as one combined hover region.
+        // 只降级、不收起：本事件在浮层打开/关闭时会被误派发（指针其实一直在工具栏上），
+        // 而正确的 PointerEntered 可能被同一轮输入上下文切换吞掉，据此收起就会把工具栏从指针下抽走。
+        // 真正的收起一律由几何核对（悬浮列表 / 无事件时的兜底核对）裁定，那两处只看实时光标位置。
+        // 例如：展开的设置菜单（遮住工具栏）→ 移到画笔按钮 → 菜单收起 → 指针重新落到工具栏，
+        // 钩子里重算的正是实时光标位置，故"第一次点击只收起菜单"这一预期行为不受影响。
         _pointerInTopToolbar = false;
-        // 焦点仍在页码输入框时，鼠标移出工具栏到画面也不收起（点过输入框未输入不应收起工具栏）。
-        if (_pageInputHasFocus) return;
-        RequestHideTopToolbar();
     }
 
     private void PenOptionsCapsule_PointerEntered(object sender, PointerRoutedEventArgs e)
@@ -3465,6 +3554,17 @@ public sealed partial class MainPage : Page
     /// covers the cases where WinUI silently swallows a PointerExited (fast moves, pointer
     /// capture during scrolling, focus changes), which used to leave the bar stuck open.
     /// </summary>
+    /// <summary>
+    /// 页面基础的指针活动"打点"（handledEventsToo）：只把最近一次真实指针输入的时刻记下来，
+    /// 供"无移动事件"路径判定标志是否还有效。命中测试与归属判定一概不在这里做
+    /// （Root_PointerMoved 才是唯一权威，避免两处结论互相打架）。
+    /// </summary>
+    private void Root_PointerActivity(object sender, PointerRoutedEventArgs e)
+    {
+        _lastPointerMoveMs = PointerMoveClock.ElapsedMilliseconds;
+        _toolbarHoverSuspect = false;
+    }
+
     private void Root_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
         // The pointer is inside the page content, so it is definitely NOT on the title bar.
@@ -3474,11 +3574,16 @@ public sealed partial class MainPage : Page
 
         try { _lastPointerPoint = e.GetCurrentPoint(this).Position; } catch { /* 装饰 */ }
 
-        // 用「指针实际命中的元素」权威纠正所有 chrome 区域归属（标题栏/工具栏/笔胶囊/缩放胶囊/
-        // 次要胶囊/滚动条），避免各自的 PointerEntered/Exited 被 WinUI 吞掉导致标志卡死/错位。
+        // 用「指针实际命中的元素 + 实时光标位置」权威纠正所有 chrome 区域归属（标题栏/工具栏/笔胶囊/
+        // 缩放胶囊/次要胶囊/滚动条），避免各自的 PointerEntered/Exited 被 WinUI 吞掉导致标志卡死/错位。
         // 滚动条归属由本函数按 OriginalSource 是否在任一 ScrollBar 内维护（见 IsInsideScrollBar / _pointerOverScrollBar）。
         var src = e.OriginalSource as DependencyObject;
-        bool overToolbar = (src != null) && (ReferenceEquals(src, TopToolbar) || IsDescendantOf(src, TopToolbar));
+        bool overToolbarRect = IsPointerOverTopToolbarRect();
+        // 命中元素落在工具栏内【且】实时坐标确实在工具栏矩形内 → 才认定为"在工具栏上"。
+        // 只取命中元素是不够的：设置菜单/画笔胶囊打开期间，浮层被命中且遮住工具栏时，OriginalSource
+        // 仍会停在工具栏按钮上（浮层不参与主树冒泡），据此会误判成"指针还在工具栏"。
+        bool overToolbar = overToolbarRect &&
+            (src != null) && (ReferenceEquals(src, TopToolbar) || IsDescendantOf(src, TopToolbar));
         bool overCapsule = (src != null) && (ReferenceEquals(src, PenOptionsCapsule) || IsDescendantOf(src, PenOptionsCapsule));
         bool overZoom = (src != null) && (ReferenceEquals(src, BottomZoomPill) || IsDescendantOf(src, BottomZoomPill));
         bool overSecondary = (src != null) && ((ReferenceEquals(src, SecondaryOpenPill) || IsDescendantOf(src, SecondaryOpenPill))
@@ -3487,16 +3592,28 @@ public sealed partial class MainPage : Page
         // 右侧对比视图排除已改用 IsPointerOverCompareView() 的屏幕矩形判定（容器可见即整片右侧右半区恢复原生），
         // 不再依赖 Root_PointerMoved 维护标志（容器是空 Grid、空白区不命中测试，标志法会漏判未加载对比 PDF 的状态）。
 
-        _pointerInTopToolbar = overToolbar;
+        // 工具栏归属：命中工具栏 + 实时光标在工具栏矩形内 → 建立；否则按【几何】收敛（指针已不在矩形内，
+        // 归属必然是过期的）。收敛不看命中元素是为了防"标志只进不出"：命中元素在浮层遮住工具栏时
+        // 仍会停在工具栏按钮上，只看它就会把过期归属一直供着。
+        // 归真也不指望本函数一定运行：按钮吞掉移动事件时本函数根本不跑，那时由页面基础的几何核对补上。
+        _pointerInTopToolbar = overToolbar || overToolbarRect;
         _pointerInPenCapsule = overCapsule;
         _pointerInBottomZoomPill = overZoom;
         _pointerInSecondaryPill = overSecondary;
         _pointerOverScrollBar = overScrollBar;
 
+        _lastPointerMoveMs = PointerMoveClock.ElapsedMilliseconds;
+        _toolbarHoverSuspect = false;   // 有真实移动事件到达 → 下面的悬停标志是权威的，撤销待校定
+
         if (IsTopToolbarShown)
         {
-            // 指针确实在工具栏 / 胶囊上（或输入框持焦）→ 保持展开；否则按正常逻辑收起。
-            if (overToolbar || overCapsule || _pageInputHasFocus)
+            // 收起判据不止"指针不在工具栏上"：任何打开的浮层（设置菜单/工具提示/快速缩放菜单）都必须
+            // 让工具栏先留在原地。菜单打开期间若收起工具栏，菜单关闭时指针可能已不在工具栏矩形内，
+            // 工具栏就再也不展开了 —— 而"展开的设置菜单 → 点画笔按钮（第一次点击只收起菜单）→ 再点
+            // 才切模式"是用户已经习惯的两步式，工具栏必须陪到最后。
+            // 判据放在收起判定里、而不是仅放在定时器里：定时器 180ms 已到期时（指针在工具栏上悬停很久
+            // 后打开菜单）这里若仍按"不在工具栏上"请求收起，一进一出就在同一个 tick 里把工具栏关掉。
+            if (overToolbar || overCapsule || _pageInputHasFocus || IsAuxiliaryPopupOpen())
                 CancelToolbarHide();
             else
                 RequestHideTopToolbar();
@@ -3698,77 +3815,114 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// Highlights the selected thickness preset button and clears the others.
-    /// The gray highlight is now painted on the inner ThicknessXHighlight Border
-    /// (which sits on a 2px Margin inside the button) so it does not crowd the
-    /// preview line, and the preview line stays strictly centered.
-    /// The button-level Background is kept Transparent; we only update the theme
-    /// brush fallbacks so any legacy PointerOver/Pressed system overlay stays at bay.
+    /// 选中/悬浮/按下的背景完全由按钮控件的 Background 属性（DP）承载，
+    /// 与左侧颜色按钮直接改 BorderBrush 同一个模式：改 DP 属性会立即重绘，
+    /// 不存在"重开才生效"的问题。内部 highlight Border 永远透明，不再参与着色。
     /// </summary>
     private void HighlightThicknessPreset(Button? selected)
     {
         if (ThicknessPresetPanel == null) return;
+        var uniformBg = _thicknessPresetSelectedBrush;
         foreach (var child in ThicknessPresetPanel.Children)
         {
-            if (child is Button b && b.Content is Grid g && g.Children.Count >= 1)
+            if (child is Button b)
             {
-                Border? highlightBorder = null;
-                if (g.Children[0] is Border inner && inner.Name != null && inner.Name.EndsWith("Highlight", StringComparison.Ordinal))
-                {
-                    highlightBorder = inner;
-                }
-                // Fallback: search by name if ordering differs
-                if (highlightBorder == null)
-                {
-                    foreach (var el in g.Children)
-                    {
-                        if (el is Border br && br.Name != null && br.Name.EndsWith("Highlight", StringComparison.Ordinal))
-                        {
-                            highlightBorder = br;
-                            break;
-                        }
-                    }
-                }
-
-                if (highlightBorder != null)
-                {
-                    highlightBorder.Background = (b == selected) ? GetPresetSelectedBrush() : _thicknessPresetTransparentBrush;
-                }
-
-                // Keep button Background transparent in the normal state (the highlight
-                // is on the inner border). On PointerOver/Pressed, give a clear affordance:
-                //   - selected button -> the darker selected-gray (so hover does not visually
-                //     downgrade the selected state)
-                //   - unselected button -> a lighter gray hover background
-                var transparentBg = _thicknessPresetTransparentBrush;
-                var hoverBg = (b == selected) ? GetPresetSelectedBrush() : GetPresetHoverBrush();
-                b.Background = transparentBg;
-                b.Resources["ButtonBackgroundPointerOver"] = hoverBg;
-                b.Resources["ButtonBackgroundPressed"] = hoverBg;
+                // 常态：选中按钮 = 深灰，未选中 = 透明（直接赋 DP，点击立即生效）
+                b.Background = (b == selected) ? uniformBg : _thicknessPresetTransparentBrush;
+                // 悬浮/按下也统一用同一个深灰，杜绝状态切换配色变化；
+                // 选中按钮在这些状态下颜色保持不变（无任何变换）。
+                b.Resources["ButtonBackgroundPointerOver"] = uniformBg;
+                b.Resources["ButtonBackgroundPressed"] = uniformBg;
             }
         }
     }
 
     /// <summary>
-    /// Highlights the selected color swatch with a persistent white border ring and
-    /// clears the ring on the others so the user can see at a glance which color is active.
+    /// 把单一颜色按钮刷新为「选中/未选中」对应的视觉：
+    ///  - 选中：1.36×；未选中：原大小
+    ///  - 无任何包围环：BorderBrush 恒透明，并同步覆盖 PointerOver/Pressed
+    ///    模板资源为透明，防止悬浮/按下时模板用主题白环覆盖出框。
+    /// </summary>
+    private void RefreshColorSwatchState(Button b)
+    {
+        bool isSel = (b == _selectedColorButton);
+        var transparent = _thicknessPresetTransparentBrush;
+        b.BorderBrush = transparent;
+        b.Resources["ButtonBorderBrushPointerOver"] = transparent;
+        b.Resources["ButtonBorderBrushPressed"] = transparent;
+        if (isSel)
+        {
+            b.RenderTransform = _colorSwatchScale;
+            b.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
+        }
+        else
+        {
+            b.RenderTransform = null;
+        }
+    }
+
+    /// <summary>
+    /// Highlights the selected color swatch and clears the others.
     /// </summary>
     private void HighlightColorSwatch(Button? selected)
+    {
+        _selectedColorButton = selected;
+        if (ColorSelectorPanel == null) return;
+        foreach (var child in ColorSelectorPanel.Children)
+        {
+            if (child is Button b) RefreshColorSwatchState(b);
+        }
+    }
+
+    /// <summary>
+    /// 悬浮预览：放大到 1.72×（无环）；离开后由 PointerExited 恢复为
+    /// 选中（1.72×）或未选中（原大小）。
+    /// </summary>
+    private void ColorSwatch_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Button b)
+        {
+            var transparent = _thicknessPresetTransparentBrush;
+            b.BorderBrush = transparent;
+            b.Resources["ButtonBorderBrushPointerOver"] = transparent;
+            b.Resources["ButtonBorderBrushPressed"] = transparent;
+            b.RenderTransform = _colorSwatchScale;
+            b.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
+        }
+    }
+
+    private void ColorSwatch_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Button b) RefreshColorSwatchState(b);
+    }
+
+    /// <summary>
+    /// 给颜色按钮逐个挂悬浮/离开事件（悬浮预览用），并一次性覆盖
+    /// PointerOver/Pressed 模板资源：
+    ///  - Background（悬浮/按下背景）= 按钮自身色：模板不会把圆点压暗
+    ///  - BorderBrush（悬浮/按下边框）= 透明：无任何包围环
+    /// </summary>
+    private void AttachColorSwatchHover()
     {
         if (ColorSelectorPanel == null) return;
         foreach (var child in ColorSelectorPanel.Children)
         {
             if (child is Button b)
             {
-                b.BorderBrush = (b == selected)
-                    ? _colorButtonWhiteRingBrush
-                    : _colorButtonDefaultRingBrush;
+                if (b.Background is SolidColorBrush swatch)
+                {
+                    var swatchBrush = new SolidColorBrush(swatch.Color);
+                    b.Resources["ButtonBackgroundPointerOver"] = swatchBrush;
+                    b.Resources["ButtonBackgroundPressed"] = swatchBrush;
+                }
+                b.PointerEntered += ColorSwatch_PointerEntered;
+                b.PointerExited += ColorSwatch_PointerExited;
             }
         }
     }
 
     /// <summary>
-    /// Programmatically syncs the color-swatch white-ring highlight to match the
+    /// Programmatically syncs the color-swatch highlight to match the
     /// currently stored _activeColorHex (used on load / after deserializing settings).
     /// </summary>
     private void SyncColorSwatchHighlight()

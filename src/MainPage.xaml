@@ -143,7 +143,15 @@
              inside slides DOWN as a rigid whole (TranslateTransform, no scaling / no
              deformation); whatever is still above the host's top edge is clipped away, so
              the bar looks like it emerges from behind the window title bar. -->
+        <!-- Toolbar host: at the page root, therefore INSIDE the popup/hit-test root. WinUI raises
+             PointerExited on it only when the pointer leaves the whole root (e.g. for the pen
+             capsule, which lives in a popup). Used purely as a "pointer is outside the toolbar"
+             watermark: a freshly opened flyout masks the toolbar and makes it raise a spurious
+             PointerExited even though the pointer never left the toolbar row. -->
         <Grid x:Name="TopToolbarHost" VerticalAlignment="Top" Canvas.ZIndex="50"
+              Background="Transparent"
+              PointerMoved="TopToolbar_PointerMoved"
+              PointerExited="TopToolbarHost_PointerExited"
               SizeChanged="TopToolbarHost_SizeChanged">
         <Border x:Name="TopToolbar"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" Padding="12,6"
@@ -293,13 +301,13 @@
                         <StackPanel.RenderTransform>
                             <TranslateTransform Y="-1"/>
                         </StackPanel.RenderTransform>
-                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#FFFF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Yellow" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
-                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#00FF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Lime" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
-                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#00FFFF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Cyan" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
-                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#FF00FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Magenta" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
-                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#FF0000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Red" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
-                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#0000FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Blue" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
-                        <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="#888888" Padding="0"/>
+                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#FFFF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Yellow" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#00FF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Lime" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#00FFFF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Cyan" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#FF00FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Magenta" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#FF0000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Red" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#0000FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Blue" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
                     </StackPanel>
 
                     <!-- Vertical separator hairline -->
@@ -312,31 +320,31 @@
                          bounds by 1px on each side, covering any rectangular template
                          background corners that WinUI may render. -->
                     <StackPanel x:Name="ThicknessPresetPanel" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-                        <Button x:Name="Thickness1Button" Click="ThicknessPreset_Click" Tag="1" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
+                        <Button x:Name="Thickness1Button" Click="ThicknessPreset_Click" Tag="1" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness1Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="2"  CornerRadius="1"   HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness2Button" Click="ThicknessPreset_Click" Tag="2" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
+                        <Button x:Name="Thickness2Button" Click="ThicknessPreset_Click" Tag="2" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness2Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="3"  CornerRadius="1.5" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness3Button" Click="ThicknessPreset_Click" Tag="3.5" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
+                        <Button x:Name="Thickness3Button" Click="ThicknessPreset_Click" Tag="3.5" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness3Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="4"  CornerRadius="2"   HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness7Button" Click="ThicknessPreset_Click" Tag="7" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
+                        <Button x:Name="Thickness7Button" Click="ThicknessPreset_Click" Tag="7" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness7Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="7"  CornerRadius="3.5" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
                             </Grid>
                         </Button>
-                        <Button x:Name="Thickness14Button" Click="ThicknessPreset_Click" Tag="14" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
+                        <Button x:Name="Thickness14Button" Click="ThicknessPreset_Click" Tag="14" Width="28" Height="28" MinWidth="28" MinHeight="28" VerticalAlignment="Center" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" CornerRadius="14">
                             <Grid>
                                 <Border x:Name="Thickness14Highlight" Margin="-1,-1,-1,-1" CornerRadius="15" Background="Transparent"/>
                                 <Border Width="18" Height="14" CornerRadius="7"   HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
