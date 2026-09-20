@@ -7,9 +7,10 @@ using System.Text.Json;
 namespace Glance.Services;
 
 /// <summary>
-/// 借鉴 SumatraPDF：把【所有 PDF】的阅读位置/缩放集中存进【单个 txt 文件】。
+/// 借鉴 SumatraPDF：把【所有 PDF】的阅读位置/缩放/窗口几何集中存进【单个 txt 文件】。
 /// 路径在程序本体目录（AppContext.BaseDirectory，即 Glance.exe 同级），适配便携版——绝不写 C 盘 AppData。
-/// 按 PDF 完整路径作键；重开同一 PDF 时精确还原视图（缩放/滚动偏移/旋转）。
+/// 按 PDF 完整路径作键；重开同一 PDF 时精确还原视图（缩放/滚动偏移/旋转）+ 窗口大小位置。
+/// 窗口部分对应 Sumatra 的 FileState.windowState / windowPos（src/Settings.h:285/300）。
 /// </summary>
 public static class ViewStateStore
 {
@@ -89,4 +90,17 @@ public class ViewStateData
 
     /// <summary>保存时刻（UTC Unix 秒），用于诊断与未来按时间排序。</summary>
     public long SavedAtUtc { get; set; }
+
+    /// <summary>窗口状态：0=未记录（旧记录 → 走默认右半屏），1=Normal，2=Maximized。
+    /// 取值对齐 Sumatra 的 WIN_STATE_*（sumatrapdf-master/src/AppSettings.h:5-10）；Glance 无
+    /// 全屏/演示模式，故只保留前两档。</summary>
+    public int WindowState { get; set; }
+
+    /// <summary>窗口矩形（屏幕物理像素，与 AppWindow.Position/Size、MoveAndResize 同一坐标系）。
+    /// 恒为【非最大化】矩形：最大化时存 GetWindowPlacement 的 rcNormalPosition，下次先按正常
+    /// 尺寸摆好再最大化，取消最大化后仍是用户原来的窗口大小（SumatraPDF.cpp:820-830）。</summary>
+    public int WindowX { get; set; }
+    public int WindowY { get; set; }
+    public int WindowWidth { get; set; }
+    public int WindowHeight { get; set; }
 }

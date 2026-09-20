@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Windows.UI;
 using System;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Input;
 
 namespace Glance;
@@ -18,39 +19,58 @@ public sealed partial class MainWindow : Window
 {
     private bool _isClosingConfirmed = false;
 
+    /// <summary>该窗口是否应以最大化还原（来自 per-PDF 记忆）。真正的 Maximize 由 App.OnLaunched
+    /// 在 Activate() 之后执行——ctor 内调 OverlappedPresenter.Maximize 会被 WinUI3 推迟到首帧之后
+    /// 生效，触发"揭示后再全屏 resize"的白闪。</summary>
+    internal bool ShouldRestoreMaximized { get; private set; }
+
     public MainWindow()
     {
         InitializeComponent();
 
-
-        // Set default window size and position BEFORE the window is shown,
-        // to avoid the initial flash at default size/position.
-        // Height = screen working area height (screen minus taskbar),
-        // Width  = half of screen working area width,
-        // Position = top-right corner of the screen.
+        // 解析"启动时要打开的 PDF"必须先于窗口摆放：只有知道是哪个文档，才能取它的 per-document
+        // 窗口几何（Sumatra 同样在 CreateWindow 之前定好 windowPos，SumatraPDF.cpp:3094-3112）。
+        // 此块原先位于构造器后段（Navigate 之前），仅做位置前移，判据与逻辑完全不变。
+        Windows.Storage.StorageFile? fileToOpen = null;
         try
         {
-            var displayArea = Microsoft.UI.Windowing.DisplayArea.Primary;
-            if (displayArea != null)
+            var activatedArgs = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
+            if (activatedArgs != null && activatedArgs.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
             {
-                var workArea = displayArea.WorkArea;
-                var appWindow = this.AppWindow;
-
-                int windowWidth = workArea.Width / 2;
-                int windowHeight = workArea.Height;
-                int windowX = workArea.X + (workArea.Width - windowWidth);
-                int windowY = workArea.Y;
-
-                appWindow.MoveAndResize(new Windows.Graphics.RectInt32
+                if (activatedArgs.Data is Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs && fileArgs.Files.Count > 0)
                 {
-                    X = windowX,
-                    Y = windowY,
-                    Width = windowWidth,
-                    Height = windowHeight
-                });
+                    fileToOpen = fileArgs.Files[0] as Windows.Storage.StorageFile;
+                }
             }
         }
         catch { }
+
+        // Fallback: check command-line arguments for a PDF file path.
+        // This handles unpackaged mode where file association passes the file path as a command-line argument.
+        if (fileToOpen == null)
+        {
+            try
+            {
+                var cmdArgs = Environment.GetCommandLineArgs();
+                // args[0] is the executable path, args[1] is the first argument (the PDF file path)
+                if (cmdArgs.Length > 1)
+                {
+                    string pdfPath = cmdArgs[1];
+                    if (System.IO.File.Exists(pdfPath) &&
+                        System.IO.Path.GetExtension(pdfPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+                    {
+                        App.PendingFilePath = pdfPath;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Set window size and position BEFORE the window is shown, to avoid the initial
+        // flash at default size/position. Default geometry = Height: screen working area
+        // height (screen minus taskbar), Width: half of it, Position: top-right corner.
+        // If this PDF has a remembered geometry in GlanceViewStates.txt, that wins.
+        ApplyInitialWindowGeometry(fileToOpen?.Path ?? App.PendingFilePath);
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
@@ -104,42 +124,6 @@ public sealed partial class MainWindow : Window
         else
         {
             AppWindow.SetIcon("Assets/AppIcon.ico");
-        }
-
-        // Check for file activation arguments
-        Windows.Storage.StorageFile? fileToOpen = null;
-        try
-        {
-            var activatedArgs = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
-            if (activatedArgs != null && activatedArgs.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
-            {
-                if (activatedArgs.Data is Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs && fileArgs.Files.Count > 0)
-                {
-                    fileToOpen = fileArgs.Files[0] as Windows.Storage.StorageFile;
-                }
-            }
-        }
-        catch { }
-
-        // Fallback: check command-line arguments for a PDF file path.
-        // This handles unpackaged mode where file association passes the file path as a command-line argument.
-        if (fileToOpen == null)
-        {
-            try
-            {
-                var cmdArgs = Environment.GetCommandLineArgs();
-                // args[0] is the executable path, args[1] is the first argument (the PDF file path)
-                if (cmdArgs.Length > 1)
-                {
-                    string pdfPath = cmdArgs[1];
-                    if (System.IO.File.Exists(pdfPath) &&
-                        System.IO.Path.GetExtension(pdfPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
-                    {
-                        App.PendingFilePath = pdfPath;
-                    }
-                }
-            }
-            catch { }
         }
 
         // Navigate the root frame to the main page on startup.
@@ -369,6 +353,188 @@ public sealed partial class MainWindow : Window
     {
         try { return Microsoft.UI.Win32Interop.GetWindowFromWindowId(AppWindow.Id); }
         catch { return IntPtr.Zero; }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // per-document 窗口几何记忆
+    // 照抄 Sumatra 的 FileState.windowState / FileState.windowPos：
+    //   保存：RememberDefaultWindowPosition / UpdateDisplayStateWindowRect
+    //         — sumatrapdf-master/src/SumatraPDF.cpp:775-841
+    //   恢复：CreateMainWindow（先摆非最大化矩形，再 SW_MAXIMIZE）
+    //         — SumatraPDF.cpp:3094-3123
+    //   可见性校正：EnsureAreaVisibility — AppTools.cpp:427-446
+    // 坐标系全部为屏幕物理像素，与 AppWindow.Position/Size、MoveAndResize 同一系 → 精确往返。
+    // ─────────────────────────────────────────────────────────────────────
+
+    private const int WIN_STATE_NONE = 0;        // Glance 扩展：旧记录没有窗口字段 → 走默认几何
+    private const int WIN_STATE_NORMAL = 1;      // AppSettings.h:5-10
+    private const int WIN_STATE_MAXIMIZED = 2;
+
+    private const int SM_CYCAPTION = 4;          // winuser.h:7251
+    private const int kMinWinDx = 50;            // AppTools.cpp:424-425
+    private const int kMinWinDy = 50;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    /// <summary>winuser.h:3244 tagWINDOWPLACEMENT：三个 UINT + 两个 POINT + 一个 RECT = 44 字节
+    /// （x64 同为 44，因为三个字段都是 32 位）。length 必须等于该值，否则调用直接失败。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWPLACEMENT
+    {
+        public int length;
+        public int flags;
+        public int showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsZoomed(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    /// <summary>按该 PDF 记录的几何摆放窗口。只在【新建窗口】时调用——进程内打开另一个 PDF 不动
+    /// 窗口（Sumatra 语义：per-document windowPos 仅 CreateMainWindow 生效）。未命中记录时用
+    /// Glance 默认：工作区右半屏、全高。</summary>
+    private void ApplyInitialWindowGeometry(string? pdfPath)
+    {
+        try
+        {
+            var displayArea = Microsoft.UI.Windowing.DisplayArea.Primary;
+            if (displayArea == null) return;
+            var workArea = displayArea.WorkArea;
+
+            // Glance 默认几何（原构造器里的固定值）：工作区右半屏、全高。
+            int defW = workArea.Width / 2;
+            int defH = workArea.Height;
+
+            int x = workArea.X + (workArea.Width - defW);
+            int y = workArea.Y;
+            int w = defW;
+            int h = defH;
+            int state = WIN_STATE_NONE;
+
+            var vs = string.IsNullOrEmpty(pdfPath) ? null : Glance.Services.ViewStateStore.Load(pdfPath);
+            if (vs != null && vs.WindowState != WIN_STATE_NONE && vs.WindowWidth > 0 && vs.WindowHeight > 0)
+            {
+                x = vs.WindowX;
+                y = vs.WindowY;
+                w = vs.WindowWidth;
+                h = vs.WindowHeight;
+                state = vs.WindowState;
+                EnsureAreaVisibility(ref x, ref y, ref w, ref h, defW, defH);
+            }
+
+            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32 { X = x, Y = y, Width = w, Height = h });
+
+            // 最大化：先摆好非最大化矩形，把"是否最大化"记下来，真正的 Maximize 由 App.OnLaunched
+            // 在 _window.Activate() 之后执行（见该处注释）。WinUI3 的 OverlappedPresenter 在窗口显示前
+            // 不接收 presenter 状态变更，若在此处 Maximize 会被推迟到首帧之后生效，触发
+            // "揭示后再全屏 resize"的白闪。
+            ShouldRestoreMaximized = state == WIN_STATE_MAXIMIZED;
+        }
+        catch { }
+    }
+
+    /// <summary>照抄 Sumatra 的 EnsureAreaVisibility（AppTools.cpp:427-446）：把记住的矩形按
+    /// "该矩形所在显示器"的工作区校正，避免显示器拔除/分辨率变化后窗口落在屏幕外看不见。
+    /// defaultW/defaultH 对应 Sumatra 该槽位里的"默认窗口尺寸"（那边按 A4 比例算，Glance 是右半屏）。</summary>
+    private static void EnsureAreaVisibility(ref int x, ref int y, ref int w, ref int h, int defaultW, int defaultH)
+    {
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromRect(
+            new Windows.Graphics.RectInt32 { X = x, Y = y, Width = w, Height = h },
+            Microsoft.UI.Windowing.DisplayAreaFallback.Nearest);
+        if (area == null) area = Microsoft.UI.Windowing.DisplayArea.Primary;
+        if (area == null) return;
+        var workArea = area.WorkArea;
+
+        // 既不能太小，也不能比显示器还大。
+        if (w < kMinWinDx || w > workArea.Width) w = Math.Min(defaultW, workArea.Width);
+        if (h < kMinWinDy || h > workArea.Height) h = Math.Min(defaultH, workArea.Height);
+
+        // 标题栏下半部若完全落在可见工作区之外，窗口就等于"丢了"——挪到工作区左上角。
+        int half = GetSystemMetrics(SM_CYCAPTION) / 2;
+        bool titleBarVisible =
+            x < workArea.X + workArea.Width && x + w > workArea.X &&
+            y + half < workArea.Y + workArea.Height && y + half + half > workArea.Y;
+        if (!titleBarVisible)
+        {
+            x = workArea.X;
+            y = workArea.Y;
+        }
+    }
+
+    /// <summary>把当前窗口几何写进该 PDF 的视图记录（SumatraPDF.cpp:833-841 的 Glance 等价）。
+    /// 只在退出/切换文档保存视图状态时调用，不做实时监听——与 Sumatra 一致。</summary>
+    public void CaptureWindowGeometry(Glance.Services.ViewStateData data, string pdfPath)
+    {
+        try
+        {
+            var hwnd = GetWindowHandleSafely();
+            if (hwnd == IntPtr.Zero) return;
+
+            // 最小化时窗口矩形是 (-32000,-32000) 这类占位坐标，不能记账；沿用该 PDF 上一次记录
+            // （Sumatra 同样是"最小化时不更新 windowPos"，SumatraPDF.cpp:816-818）。
+            if (IsIconic(hwnd))
+            {
+                var prev = Glance.Services.ViewStateStore.Load(pdfPath);
+                if (prev == null) return;
+                data.WindowState = prev.WindowState;
+                data.WindowX = prev.WindowX;
+                data.WindowY = prev.WindowY;
+                data.WindowWidth = prev.WindowWidth;
+                data.WindowHeight = prev.WindowHeight;
+                return;
+            }
+
+            if (IsZoomed(hwnd))
+            {
+                // 最大化时 AppWindow.Position/Size 是最大化矩形；改用 GetWindowPlacement 的
+                // rcNormalPosition（非最大化矩形），顺带记住窗口原本在哪台显示器上（#5277，
+                // SumatraPDF.cpp:822-829）。
+                var wp = new WINDOWPLACEMENT { length = Marshal.SizeOf<WINDOWPLACEMENT>() };
+                if (!GetWindowPlacement(hwnd, ref wp)) return;
+                data.WindowX = wp.rcNormalPosition.Left;
+                data.WindowY = wp.rcNormalPosition.Top;
+                data.WindowWidth = wp.rcNormalPosition.Right - wp.rcNormalPosition.Left;
+                data.WindowHeight = wp.rcNormalPosition.Bottom - wp.rcNormalPosition.Top;
+                data.WindowState = WIN_STATE_MAXIMIZED;
+            }
+            else
+            {
+                data.WindowX = AppWindow.Position.X;
+                data.WindowY = AppWindow.Position.Y;
+                data.WindowWidth = AppWindow.Size.Width;
+                data.WindowHeight = AppWindow.Size.Height;
+                data.WindowState = WIN_STATE_NORMAL;
+            }
+        }
+        catch { }
     }
 
     /// <summary>

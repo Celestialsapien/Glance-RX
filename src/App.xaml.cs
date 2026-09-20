@@ -88,6 +88,17 @@ public partial class App : Application
         ApplySavedTheme();
 
         _window.Activate();
+
+        // 若本次新建窗口需从记录恢复"最大化"状态：真正的 Maximize 必须放在 Activate 之后。
+        // 窗口此刻仍被 MainWindow ctor 武装的 DWM cloak 遮罩，最大化 resize 在不可见状态下完成、
+        // 不播动画，首个合成帧即全屏深色，消除"先正常矩形揭示再全屏 resize"的白闪。
+        // （WinUI3 的 OverlappedPresenter 在窗口显示前不接收状态变更，ctor 内 Maximize 会被推迟到
+        // 首帧之后才生效，正是白闪根因。）普通（非最大化）窗口不进入此分支，行为不变。
+        if (_window is MainWindow mw && mw.ShouldRestoreMaximized &&
+            mw.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        {
+            presenter.Maximize();
+        }
     }
 
     /// <summary>
