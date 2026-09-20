@@ -480,8 +480,10 @@ internal sealed class TileRenderCache : IDisposable
     /// `dm->GetViewPort()` 相交即可（IsTileVisible / Paint 的 bounds 都是那么写的）。
     /// Glance 的 tile 在未旋转页帧、视口在屏幕帧，两者差一个「绕页中心转 +rot」
     /// → 这里把视口按 -rot 转回页帧取 AABB。
-    /// AABB ⊇ 旋转后的视口，故用它做可见性判定 / 绘制裁剪【只会多画、绝不漏画】；
+    /// AABB ⊇ 旋转后的视口，故用它做可见性判定【只会多画、绝不漏画】；
     /// rot==0 时即视口本身（与 Sumatra 完全一致，零行为变化）。
+    /// ⚠ 它的原点不是 (0,0)，rot!=0 时可能落在页面中部 —— 只能当可见性判据，
+    ///    不能无条件当绘制裁剪区（Sumatra 的 bounds 是屏幕脏矩形，两者不是一回事）。
     /// </summary>
     private Rect PageFrameViewPort(Rect pageOnScreen)
     {
@@ -743,15 +745,28 @@ internal sealed class TileRenderCache : IDisposable
                     else
                     {
                         // 同瓦片不同 zoom → 原位改参（Sumatra 原样）。
+                        // ⚠ Sumatra 的 req 只存 zoom/rotation，设备几何在渲染线程里按 zoom
+                        //   现算，故"只改 zoom"是自洽的。Glance 把几何物化成了
+                        //   DevW/DevH/X0/Y0/X1/Y1（入队时由 GetTileRectDevice 算好），
+                        //   若此处只改 Zoom 不改几何，就会出现「req.Zoom 是新值、DevW 是旧值」
+                        //   的撕裂 —— 引擎按旧 DevW 出图，绘制侧按新 Zoom 反算期望尺寸，
+                        //   factor = 旧zoom/新zoom ≠ 1 → 该页【整页被重采样】= 整页均匀糊。
+                        //   故必须与 Render() 入队路径做同一套几何重算。
                         req.Zoom = zoom;
                         req.Rotation = rotation;
+                        GetTileRectDevice(pageNo, zoom, tile,
+                            out int devW2, out int devH2, out int x02, out int y02, out int x12, out int y12);
+                        req.DevW = devW2; req.DevH = devH2;
+                        req.X0 = x02; req.Y0 = y02; req.X1 = x12; req.Y1 = y12;
                     }
                     return;
                 }
             }
 
             if (Exists(dm, pageNo, rotation, zoom, tile))
+            {
                 return;   // 已按正确参数渲染过
+            }
 
             Render(dm, pageNo, rotation, zoom, tile, predictivePages, predictiveOriginPageNo);
         }
@@ -1009,7 +1024,10 @@ internal sealed class TileRenderCache : IDisposable
                                 (tile is null || req.Tile.Res != tile.Value.Res ||
                                  !IsTileVisible(req.PageNo, tile.Value, 0.5));
             if (i != curPos) _requests[curPos] = req;
-            if (shouldRemove) _requestCount--;
+            if (shouldRemove)
+            {
+                _requestCount--;
+            }
             else curPos++;
         }
     }
@@ -1134,6 +1152,7 @@ internal sealed class TileRenderCache : IDisposable
 
     // ---------------- PaintTile / Paint（1184-1360，HDC → Win2D sink） ----------------
 
+
     /// <summary>RenderCache::PaintTile：画一颗瓦片；未命中按需请求。返回 renderDelay。
     /// isTargetRes 期用了替身（缩放过渡）→ neededScaling=true（conservation 不清其他分辨率）。</summary>
     private int PaintTile(Rect isect, int pageNo, TilePosition tile, Rect tileOnScreenFull,
@@ -1150,7 +1169,8 @@ internal sealed class TileRenderCache : IDisposable
             if (isTargetRes) neededScaling = true;
             lock (_cacheAccess) entry = FindLocked(_host, pageNo, 0, KInvalidZoom, tile);
             renderDelay = GetRenderDelay(_host, pageNo, tile);
-            if (renderMissing && TileRenderDelay.Undefined == renderDelay && !IsRenderQueueFull)
+            bool undef = TileRenderDelay.Undefined == renderDelay;
+            if (renderMissing && undef && !IsRenderQueueFull)
             {
                 RequestRendering(_host, pageNo, tile);
                 renderDelay = 1;

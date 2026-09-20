@@ -2964,7 +2964,31 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
                 ds.FillRectangle(dest, _placeholderColor);   // 占位色铺在旋转后的矩形上
                 PageFrameForTiles(dest, out var pageOnScreenPx, out var pivot);
                 if (rot != 0)
-                    ds.Transform = savedTransform * Matrix3x2.CreateRotation((float)(rot * Math.PI / 180.0), pivot);
+                {
+                    var rotM = Matrix3x2.CreateRotation((float)(rot * Math.PI / 180.0), pivot);
+                    if (rot == 90 || rot == 270)
+                    {
+                        // ⚠ 90/270 半像素对齐修正（2026-09-20 根因，"旋转后落定整页糊"的真凶）：
+                        // pivot=页中心（整数或 x.5 物理像素）。绕 pivot 转 90° 的落点
+                        //   x' = cx+cy-y, y' = x+cy-cx —— 要全为整数（=零插值 1:1 直拷），
+                        //   当且仅当 cx+cy 与 cy-cx 都是整数，即 cx、cy【同奇偶】。
+                        // 页宽高奇偶不同 → cx/cy 一整一半 → 整页内容落半像素网格
+                        //   → GPU 对每个像素双线性插值 → 整页均匀糊。
+                        //   （C# 侧 factor/ratio/target 全部正确=1.0，糊发生在 GPU 光栅化
+                        //   最后一刻，任何 C# 侧日志都看不见——这就是四轮日志分析扑空的原因。）
+                        // 180° 天然免疫：x'=2cx-x，2cx 恒为整数。0° 无旋转同样免疫。
+                        // 修复：补 δ=(-frac(cx+cy), -frac(cy-cx)) ∈ {0,±0.5}² 物理像素平移
+                        //   （矩阵顺序：先旋转后平移 = R * T），把落点拉回整数网格。
+                        //   页面整体最多挪 0.5 物理像素（≈0.4 DIP），不可见；换来零重采样。
+                        double px = pivot.X * dpi, py = pivot.Y * dpi;
+                        double sSum = px + py, dDif = py - px;
+                        float fdx = (float)((Math.Round(sSum) - sSum) / dpi);
+                        float fdy = (float)((Math.Round(dDif) - dDif) / dpi);
+                        if (fdx != 0f || fdy != 0f)
+                            rotM = rotM * Matrix3x2.CreateTranslation(fdx, fdy);   // 行向量约定：v*(R*T)=先 R 后 T
+                    }
+                    ds.Transform = savedTransform * rotM;
+                }
                 try { cache.Paint(p.Index, pageOnScreenPx, renderMissing, zoomPx); }
                 catch { }
                 if (rot != 0) ds.Transform = savedTransform;
