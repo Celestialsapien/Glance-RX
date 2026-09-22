@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
@@ -104,6 +105,16 @@ public sealed partial class MainPage : Page
     private SettingsService _settingsService = new();
     private uint _totalPages = 0;
 
+    // 侧边栏：缩略图 / 书签 / 大纲
+    private readonly BookmarkStore _bookmarkStore = new();
+    private readonly ObservableCollection<BookmarkViewModel> _bookmarks = new();
+    private readonly ObservableCollection<OutlineItemViewModel> _outlineItems = new();
+    private enum SidebarMode { Thumbnails, Bookmarks, Outline }
+    private SidebarMode _currentSidebarMode = SidebarMode.Thumbnails;
+    // （侧边栏开关的阅读位置补偿已整体移到 GpuPageView：CaptureHostResizeAnchor / BeginHostResizeReanchor。
+    //   快照在 ToggleSidebar_Click 里【翻转前】同步取，重锚由 PaneOpening/PaneClosing 排一个 Low 回合触发，
+    //   这里不再保留任何延时器或视口尺寸字段。）
+
     // （旧 CPU 渲染路径的性能参数/预览层/滚动门控已随 GPU 化整体移除；
     //   页位图缓存与预取策略统一由 GpuPageView 内部管理。）
 
@@ -113,7 +124,7 @@ public sealed partial class MainPage : Page
     private EditMode _currentMode = EditMode.Navigate;
     private bool _isDrawingHighlight = false;
     private AnnotationViewModel? _activeHighlight;
-    private string _activeColorHex = "#FFFF00"; // Default Yellow
+    private string _activeColorHex = "#F2C200"; // Default Yellow
 
     // Live highlight brushes for the Pen mode ToggleButton: the checked-state background
     // and foreground are overridden to follow the currently selected pen color.
@@ -217,6 +228,8 @@ public sealed partial class MainPage : Page
         this.AddHandler(KeyDownEvent, new KeyEventHandler(OnKeyDownSuppressTab), true);
 
         PageListView.ItemsSource = _pages;
+        BookmarkListView.ItemsSource = _bookmarks;
+        OutlineListView.ItemsSource = _outlineItems;
 
         // GPU 视图 → 工具栏回显：滚动更新页码框/侧栏选中；缩放更新百分比显示。
         GpuViewer.CurrentPageChanged += (s, idx) =>
@@ -271,9 +284,72 @@ public sealed partial class MainPage : Page
         ApplyWelcomeChrome(true);   // 初始就是欢迎页（赋同值不触发回调，故显式应用一次）
 
         this.Loaded += MainPage_Loaded;
+        // 侧边栏展开/收起时驱动 Content 层的投影载体：SplitView Pane 自身阴影无法落到主视图，
+        // 故在 ViewerContainerGrid 内放了一枚透明投影元素（SidebarDropShadow），由事件联动显隐。
+        //
+        // 【开关侧边栏 = 保持"阅读位置不变量"，而不是死板 fit 到视口】
+        // 目标（用户拍板）：纵向布局下，开关前/后视口左右两条边线切到的内容完全一致 ——
+        //   侧边栏 Inline 挤开等同于把主轴视口按比例缩放，zoom 随之等比缩放，于是"视口里可见的
+        //   文档宽度"不变，阅读内容不产生任何左右位移。原本 fit 宽度 ⇒ 开关后仍恰好 fit 新宽度；
+        //   原本 ¼ fit ⇒ 仍是 ¼。（更早被否的两版：① 无脑 FitWidth 重适应 → 把用户手动调好的倍率
+        //   拽回 fit，判为"太硬"；② 以视口中心为不动点 → 左右两端各平移 (vpW'/2)(1/z − 1/z')，
+        //   判为"左右端切到的内容变了"。）
+        //
+        // 时机：翻转 IsPaneOpen【之前】同步取不变量快照（列宽在过渡起点即变，事后读不到旧几何）；
+        // 重锚则挂在**过渡起点**事件（PaneOpening / PaneClosing）上、再让出一个 Low 布局回合 ——
+        // 这样 PDF 的缩放弹簧与侧边栏滑动【同时开始】，整个开关是一段连贯动画，而不是滑动完再"啪"地缩放。
+        // 依据（WinUI 2.2.1 generic.xaml 的 SplitView 模板）：开/关【两个方向】的 ContentRoot.(Grid.Column)
+        // 都在 KeyTime=0 离散切换（开 generic.xaml:35397-35398 → 1；关 :35358-35359 → 0），
+        // 即【布局宽度在过渡起点就已到位】；其后的动画只是 ContentTransform/PaneTransform 的
+        // TranslateX **渲染**滑动（不改宽度）—— 所以重锚时机对开、关两个方向都成立。
+        // 所以过渡起点之后一个 Low 回合，Viewer.Viewport* 必然已是最终值，正是起弹簧的时机；
+        // 而旧版写死 120ms + 挂在过渡终点，等于"等滑完再瞬间缩放"，手感断裂。
+        // 兜底：即便事件时序与预期有出入，BeginHostResizeReanchor 起手还会调一次 Viewer.UpdateLayout()，
+        // 把列宽变更强制落到布局上再读 Viewport* ⇒ "起弹簧时几何已到位"不依赖该事件的精确时序。
+        // 连开连关也天然合并：快照每次翻转前覆盖一次，GpuPageView 内部以降清标志去重。
+        // 【侧边栏自身的滑动时长不在此处干预】曾经试过用 VSM 公开 API 改模板关键帧的 KeyTime
+        // （一路调到开 500ms / 关 400ms，是框架默认 0.2s/0.1s 的 2.5~4 倍），用户实测**无感**、明确放弃
+        // ⇒ 已整体移除，恢复框架默认。⚠ 无感的原因**未确证**：从 2.5 倍差异不可能感知不到这一点看，
+        // 更像是那段代码**压根没生效**（两条可疑路径：① PaneOpening/PaneClosing 可能在 VisualStateManager
+        // 状态切换【之后】才触发，于是每次都赶不上本次 storyboard；② 模板根的 VisualStateGroups /
+        // VisualTransition.Storyboard 取不到时被 try/catch 静默吞掉）。**别再加回来** ——
+        // 要遍历模板 Storyboard，失败还只能静默回退，收益与复杂度不成正比。
+        SidebarSplitView.PaneOpening += (s, e) => QueueSidebarReanchor();
+        SidebarSplitView.PaneClosing += (s, e) =>
+        {
+            if (SidebarDropShadow != null) SidebarDropShadow.Visibility = Visibility.Collapsed;
+            QueueSidebarReanchor();
+        };
+        SidebarSplitView.PaneOpened += (s, e) =>
+        {
+            if (SidebarDropShadow != null) SidebarDropShadow.Visibility = Visibility.Visible;
+            UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
+        };
+        // 整个侧边栏隐藏（如回到欢迎页）时，投影一并收起。
+        SidebarSplitView.RegisterPropertyChangedCallback(UIElement.VisibilityProperty,
+            (s, dp) =>
+            {
+                if (SidebarSplitView.Visibility != Visibility.Visible && SidebarDropShadow != null)
+                    SidebarDropShadow.Visibility = Visibility.Collapsed;
+            });
+
         // 主题切换（设置面板选择/跟随系统变化）时刷新画笔胶囊的选中提示色，
         // 并重刷当前选中的颜色环与粗细背景，保证深浅色模式下对比清晰。
         this.ActualThemeChanged += (s, e) => RefreshPenOptionThemeHighlights();
+    }
+
+    // 侧边栏开关的重锚触发点：过渡起点事件之后排一个 Low 回合再重锚。
+    // Low 在布局/渲染之后执行 ⇒ 此时 SplitView 已把列宽离散改到最终值、Viewport* 也已刷新，可以起弹簧。
+    // 快照在 ToggleSidebar_Click 翻转前取；GpuViewer 不可见时 CaptureHostResizeAnchor 会直接 return
+    // （_hostResizeCaptureValid 恒 false），BeginHostResizeReanchor 自行早退。
+    private void QueueSidebarReanchor()
+    {
+        if (GpuViewer == null || GpuViewer.Visibility != Visibility.Visible) return;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (GpuViewer == null || GpuViewer.Visibility != Visibility.Visible) return;
+            GpuViewer.BeginHostResizeReanchor();
+        });
     }
 
     /// <summary>
@@ -605,8 +681,8 @@ public sealed partial class MainPage : Page
             if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = Glance.Services.LocalizationService.Get("WelcomeOpenButton");
 
             // Sidebar
-            if (ThumbnailsHeader != null) ThumbnailsHeader.Text = Glance.Services.LocalizationService.Get("Thumbnails");
-
+            if (AddBookmarkButtonText != null) AddBookmarkButtonText.Text = Glance.Services.LocalizationService.Get("AddBookmark");
+            ApplySidebarMode(); // refresh header text after localization strings are ready
         }
         catch { }
     }
@@ -1674,6 +1750,10 @@ public sealed partial class MainPage : Page
             await LoadAnnotationsAsync(_currentPdfPath);
             GpuViewer.InvalidateOverlay(); // 结构变化 → 整层重建
 
+            // 加载用户书签与文档大纲。
+            await LoadBookmarksAsync();
+            await LoadOutlineAsync();
+
             // Proactively return the transient load-time allocation spike to
             // the OS a few seconds after opening, instead of waiting minutes
             // for Windows to trim the working set on its own.
@@ -1769,7 +1849,44 @@ public sealed partial class MainPage : Page
 
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
+        // 【翻转前】同步冻结"阅读位置不变量"：SplitView 的列宽在过渡起点(KeyTime=0)即变，翻转后读不到旧几何。
+        // 这里只取快照、不改视图；随后 PaneOpening/PaneClosing（过渡起点）会排队一次重锚，
+        // 由 GpuPageView 用弹簧把 zoom 推到目标值，且全程保持视口左右边线切到的内容不变。
+        GpuViewer?.CaptureHostResizeAnchor();
         SidebarSplitView.IsPaneOpen = !SidebarSplitView.IsPaneOpen;
+    }
+
+    private void SidebarMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is ToggleButton btn && btn.Tag is string tag)
+        {
+            _currentSidebarMode = tag switch
+            {
+                "Bookmarks" => SidebarMode.Bookmarks,
+                "Outline" => SidebarMode.Outline,
+                _ => SidebarMode.Thumbnails,
+            };
+            ApplySidebarMode();
+        }
+    }
+
+    private void ApplySidebarMode()
+    {
+        ModeThumbnailsButton.IsChecked = _currentSidebarMode == SidebarMode.Thumbnails;
+        ModeBookmarksButton.IsChecked = _currentSidebarMode == SidebarMode.Bookmarks;
+        ModeOutlineButton.IsChecked = _currentSidebarMode == SidebarMode.Outline;
+
+        PageListView.Visibility = _currentSidebarMode == SidebarMode.Thumbnails ? Visibility.Visible : Visibility.Collapsed;
+        BookmarkListView.Visibility = _currentSidebarMode == SidebarMode.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
+        OutlineListView.Visibility = _currentSidebarMode == SidebarMode.Outline ? Visibility.Visible : Visibility.Collapsed;
+        AddBookmarkButton.Visibility = _currentSidebarMode == SidebarMode.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
+
+        SidebarHeaderText.Text = _currentSidebarMode switch
+        {
+            SidebarMode.Bookmarks => Glance.Services.LocalizationService.Get("SidebarBookmarks"),
+            SidebarMode.Outline => Glance.Services.LocalizationService.Get("SidebarOutline"),
+            _ => Glance.Services.LocalizationService.Get("SidebarThumbnails"),
+        };
     }
 
     private void PageListView_ItemClick(object sender, ItemClickEventArgs e)
@@ -1778,6 +1895,176 @@ public sealed partial class MainPage : Page
         if (clickedItem != null && clickedItem.PageIndex != _currentPageIndex)
         {
             NavigateToPage(clickedItem.PageIndex);
+        }
+    }
+
+    // ---------- Bookmarks ----------
+
+    private void AddBookmark_Click(object sender, RoutedEventArgs e)
+    {
+        if (_totalPages == 0 || _currentPageIndex < 0 || _currentPageIndex >= _totalPages) return;
+        var existing = _bookmarks.FirstOrDefault(b => b.PageIndex == _currentPageIndex);
+        if (existing != null)
+        {
+            existing.IsEditing = true;
+            existing.EditText = existing.DisplayName;
+            BookmarkListView.SelectedItem = existing;
+            return;
+        }
+        var vm = new BookmarkViewModel
+        {
+            PageIndex = _currentPageIndex,
+            DisplayName = string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), _currentPageIndex + 1),
+            IsEditing = true,
+        };
+        vm.EditText = vm.DisplayName;
+        _bookmarks.Add(vm);
+        BookmarkListView.SelectedItem = vm;
+        _ = SaveBookmarksAsync();
+    }
+
+    private void BookmarkItem_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is BookmarkViewModel bm)
+        {
+            if (bm.PageIndex != _currentPageIndex)
+                NavigateToPage(bm.PageIndex);
+        }
+    }
+
+    private void BookmarkEdit_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
+        bm.EditText = bm.DisplayName;
+        bm.IsEditing = true;
+    }
+
+    private void BookmarkConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
+        string text = bm.EditText.Trim();
+        if (!string.IsNullOrEmpty(text)) bm.DisplayName = text;
+        bm.IsEditing = false;
+        _ = SaveBookmarksAsync();
+    }
+
+    private void BookmarkCancel_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
+        bm.IsEditing = false;
+    }
+
+    private void BookmarkDelete_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
+        _bookmarks.Remove(bm);
+        _ = SaveBookmarksAsync();
+    }
+
+    private void BookmarkEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            BookmarkConfirm_Click(sender, e);
+            e.Handled = true;
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            BookmarkCancel_Click(sender, e);
+            e.Handled = true;
+        }
+    }
+
+    private void BookmarkEditBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        // Commit on outside click; if the user clicked Cancel/Delete the button handler already changed state.
+        if (sender is TextBox tb && tb.DataContext is BookmarkViewModel bm && bm.IsEditing)
+        {
+            BookmarkConfirm_Click(sender, e);
+        }
+    }
+
+    private BookmarkViewModel? GetBookmarkModel(object sender)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is BookmarkViewModel bm) return bm;
+        return null;
+    }
+
+    private async Task SaveBookmarksAsync()
+    {
+        if (string.IsNullOrEmpty(_currentPdfPath)) return;
+        try
+        {
+            var list = _bookmarks.Select(b => new PdfBookmark { PageIndex = b.PageIndex, DisplayName = b.DisplayName }).ToList();
+            await _bookmarkStore.SaveAsync(_currentPdfPath, list);
+        }
+        catch { /* best-effort persistence */ }
+    }
+
+    private async Task LoadBookmarksAsync()
+    {
+        _bookmarks.Clear();
+        if (string.IsNullOrEmpty(_currentPdfPath)) return;
+        try
+        {
+            var saved = await _bookmarkStore.LoadAsync(_currentPdfPath);
+            foreach (var b in saved.OrderBy(x => x.PageIndex))
+            {
+                string name = string.IsNullOrWhiteSpace(b.DisplayName)
+                    ? string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), b.PageIndex + 1)
+                    : b.DisplayName;
+                _bookmarks.Add(new BookmarkViewModel { PageIndex = b.PageIndex, DisplayName = name });
+            }
+        }
+        catch { /* best-effort load */ }
+    }
+
+    // ---------- Outline ----------
+
+    private async Task LoadOutlineAsync()
+    {
+        _outlineItems.Clear();
+        if (string.IsNullOrEmpty(_currentPdfPath)) return;
+        try
+        {
+            var nodes = await PdfOutlineLoader.LoadAsync(_currentPdfPath, _currentPdfPassword);
+            if (nodes.Count == 0)
+            {
+                _outlineItems.Add(new OutlineItemViewModel
+                {
+                    Title = Glance.Services.LocalizationService.Get("NoOutline"),
+                    PageIndex = -1,
+                    Indent = 0,
+                });
+                return;
+            }
+            FlattenOutline(nodes, 0);
+        }
+        catch { /* best-effort outline */ }
+    }
+
+    private void FlattenOutline(List<OutlineNode> nodes, int depth)
+    {
+        foreach (var n in nodes)
+        {
+            _outlineItems.Add(new OutlineItemViewModel
+            {
+                Title = string.IsNullOrWhiteSpace(n.Title) ? "(untitled)" : n.Title,
+                PageIndex = n.PageIndex,
+                Indent = depth * 16.0,
+            });
+            if (n.Children != null && n.Children.Count > 0)
+            {
+                FlattenOutline(n.Children, depth + 1);
+            }
+        }
+    }
+
+    private void OutlineListView_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is OutlineItemViewModel item && item.PageIndex >= 0 && item.PageIndex < _totalPages)
+        {
+            NavigateToPage(item.PageIndex);
         }
     }
 
@@ -3051,7 +3338,7 @@ public sealed partial class MainPage : Page
             //   ① 正交方向掩码边呈像素级平台 = 发平；② 边缘半透明像素的预乘暗色被按不透明显示 = 黑边。
             // 改为【掩码全 0 + 32bpp 预乘 alpha】→ 系统走 alpha 混合：边缘解析 AA 平滑、透明区 alpha=0 真透明。
             int diameter = (int)Math.Clamp(_activeThickness * 3.0, 14, 20);
-            string colorHex = _activeColorHex ?? "#FFFF00";
+            string colorHex = _activeColorHex ?? "#F2C200";
             if (_hRingCursor != IntPtr.Zero && _ringDiameter == diameter && _ringColorHex == colorHex)
                 return;
             DestroyRingCursor();
@@ -3142,7 +3429,7 @@ public sealed partial class MainPage : Page
     {
         try
         {
-            string s = (hex ?? "#FFFF00").Replace("#", "");
+            string s = (hex ?? "#F2C200").Replace("#", "");
             if (s.Length == 8) s = s.Substring(2); // 去掉 alpha
             if (s.Length < 6) s = s.PadRight(6, '0');
             byte r = Convert.ToByte(s.Substring(0, 2), 16);
@@ -3706,9 +3993,13 @@ public sealed partial class MainPage : Page
         double h = TopToolbarHost.ActualHeight;
         if (w <= 0 || h <= 0) return;
 
+        // 裁剪区向下预留阴影空间：工具栏向下投影（BlurRadius 20 + Offset 6 ≈ 26px），
+        // 否则会被 TopToolbarHost 的矩形裁剪切掉，立体感出不来。顶部仍为 0，收起时工具栏
+        // 上移仍被裁掉，不影响"从标题栏后滑出"的效果。
+        const double ToolbarShadowAllowance = 36;
         TopToolbarHost.Clip = new Microsoft.UI.Xaml.Media.RectangleGeometry
         {
-            Rect = new Windows.Foundation.Rect(0, 0, w, h)
+            Rect = new Windows.Foundation.Rect(0, 0, w, h + ToolbarShadowAllowance)
         };
 
         // Park the bar out of sight while it is hidden, using the freshly measured height.
@@ -3754,12 +4045,36 @@ public sealed partial class MainPage : Page
 
         var mc = SecondaryClosePill.Margin;
         SecondaryClosePill.Margin = new Thickness(mc.Left, top, mc.Right, mc.Bottom);
+
+        UpdateSidebarTopInset();
+    }
+
+    /// <summary>
+    /// 侧边栏内容顶部让出展开工具栏的高度——否则同一根 Grid 里 ZIndex=50 的工具栏会盖住
+    /// 侧边栏标题行与第一张缩略图的上沿（SidebarSplitView 是 ZIndex=0，恒在其下）。
+    /// 与 UpdateSecondaryPillTopOffset 同一思路：偏移量取自实测的工具栏高度（不硬编码），
+    /// 字号/DPI/按钮内容变化时自动跟随。
+    /// </summary>
+    private void UpdateSidebarTopInset()
+    {
+        if (ThumbnailSidebarPanel == null) return;
+
+        double hostTop = TopToolbarHost?.Margin.Top ?? 0;   // 宿主上提 1px 压住标题栏发丝线
+        double barH = TopToolbar?.ActualHeight ?? 0;
+        if (barH <= 0) barH = 48;                           // 首次布局前的兜底，与 TopToolbarHiddenOffset 同值
+
+        // 在工具栏底边之下再留 6px 呼吸空隙，避免标题行紧贴工具栏发丝线。
+        double top = Math.Max(14, hostTop + barH + 6);
+
+        var p = ThumbnailSidebarPanel.Padding;
+        if (Math.Abs(p.Top - top) > 0.5)
+            ThumbnailSidebarPanel.Padding = new Thickness(p.Left, top, p.Right, p.Bottom);
     }
 
     private string GetActiveColorHexWithOpacity()
     {
         string color = _activeColorHex;
-        if (string.IsNullOrEmpty(color)) color = "#FFFF00";
+        if (string.IsNullOrEmpty(color)) color = "#F2C200";
         
         string clean = color.Replace("#", "");
         if (clean.Length == 8)
@@ -3777,9 +4092,9 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void ApplyPenHighlight()
     {
-        string clean = (_activeColorHex ?? "#FFFF00").Replace("#", "");
+        string clean = (_activeColorHex ?? "#F2C200").Replace("#", "");
         if (clean.Length == 8) clean = clean.Substring(2); // strip alpha
-        if (clean.Length != 6) clean = "FFFF00";
+        if (clean.Length != 6) clean = "F2C200";
 
         byte r = Convert.ToByte(clean.Substring(0, 2), 16);
         byte g = Convert.ToByte(clean.Substring(2, 2), 16);
@@ -3928,7 +4243,7 @@ public sealed partial class MainPage : Page
     private void SyncColorSwatchHighlight()
     {
         if (ColorSelectorPanel == null) return;
-        string target = _activeColorHex ?? "#FFFF00";
+        string target = _activeColorHex ?? "#F2C200";
         Button? match = null;
         foreach (var child in ColorSelectorPanel.Children)
         {
@@ -3965,7 +4280,7 @@ public sealed partial class MainPage : Page
         var button = sender as Button;
         if (button != null && button.Tag != null)
         {
-            _activeColorHex = button.Tag.ToString() ?? "#FFFF00";
+            _activeColorHex = button.Tag.ToString() ?? "#F2C200";
             ApplyPenHighlight();
             HighlightColorSwatch(button);
             if (_penRingActive) RefreshRingCursor();
@@ -4539,7 +4854,7 @@ public sealed partial class MainPage : Page
                     Width = saved.Width,
                     Height = saved.Height,
                     Content = saved.Content,
-                    ColorHex = saved.ColorHex ?? "#FFFF00",
+                    ColorHex = saved.ColorHex ?? "#F2C200",
                     Thickness = saved.Thickness > 0 ? saved.Thickness : 3.5
                 };
                 if (saved.Points != null && saved.Points.Count > 0)
@@ -4593,6 +4908,63 @@ public sealed partial class MainPage : Page
         HasUnsavedChanges = false;
     }
 
+}
+
+public sealed class OutlineItemViewModel
+{
+    public string Title { get; set; } = "";
+    public int PageIndex { get; set; } = -1;   // -1 if the destination could not be resolved
+    public double Indent { get; set; }          // left padding in px reflecting heading depth
+}
+
+public sealed class BookmarkViewModel : INotifyPropertyChanged
+{
+    private string _displayName = "";
+    private string _editText = "";
+    private bool _isEditing;
+
+    public int PageIndex { get; set; }
+
+    public string DisplayName
+    {
+        get => _displayName;
+        set => SetProperty(ref _displayName, value);
+    }
+
+    public bool IsEditing
+    {
+        get => _isEditing;
+        set
+        {
+            if (SetProperty(ref _isEditing, value))
+            {
+                OnPropertyChanged(nameof(IsReadOnly));
+            }
+        }
+    }
+
+    public bool IsReadOnly => !IsEditing;
+
+    public string EditText
+    {
+        get => _editText;
+        set => SetProperty(ref _editText, value);
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private bool SetProperty<T>(ref T storage, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (Equals(storage, value)) return false;
+        storage = value;
+        OnPropertyChanged(propertyName);
+        return true;
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
 }
 
 public class PdfPageViewModel : INotifyPropertyChanged
@@ -4680,7 +5052,7 @@ public class SavedAnnotation
     public double Width { get; set; }
     public double Height { get; set; }
     public string Content { get; set; } = "";
-    public string ColorHex { get; set; } = "#FFFF00";
+    public string ColorHex { get; set; } = "#F2C200";
     public List<SavedPoint> Points { get; set; } = new();
     public double Thickness { get; set; } = 3.5;
     public double RotationAngle { get; set; } = 0.0;
@@ -4693,7 +5065,7 @@ public class AnnotationViewModel : INotifyPropertyChanged
     private double _width;
     private double _height;
     private string _content = "";
-    private string _colorHex = "#FFFF00";
+    private string _colorHex = "#F2C200";
     private double _thickness = 3.5;
     private PointCollection _pointsCollection = new();
 

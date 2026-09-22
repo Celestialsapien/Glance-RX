@@ -757,7 +757,7 @@ public sealed class PdfPrintService : IDisposable
     {
         try
         {
-            string hex = (colorHex ?? "#FFFF00").Replace("#", "");
+            string hex = (colorHex ?? "#F2C200").Replace("#", "");
             if (hex.Length == 6) hex = "FF" + hex;
             return Windows.UI.Color.FromArgb(
                 Convert.ToByte(hex.Substring(0, 2), 16),

@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:Glance"
+    xmlns:services="using:Glance.Services"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     Background="Transparent"
@@ -157,6 +158,7 @@
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" Padding="12,6"
                 Background="{ThemeResource FlyoutPresenterBackground}"
                 Opacity="0" IsHitTestVisible="False"
+                local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="20"
                 PointerEntered="TopToolbar_PointerEntered" PointerExited="TopToolbar_PointerExited">
             <Border.RenderTransform>
                 <TranslateTransform x:Name="TopToolbarTranslate" Y="0"/>
@@ -214,7 +216,7 @@
 
                     <!-- Layout Toggle Button (vertical <-> horizontal continuous) -->
                     <Button x:Name="LayoutToggleButton" Click="LayoutToggle_Click" Padding="8,6">
-                        <FontIcon x:Name="LayoutToggleIcon" FontFamily="Segoe MDL2 Assets" Glyph="&#xE8AB;"/>
+                        <FontIcon x:Name="LayoutToggleIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE8AB;"/>
                     </Button>
 
                     <!-- Split View Button -->
@@ -229,7 +231,7 @@
 
                     <!-- Print Button -->
                     <Button x:Name="PrintButton" Click="Print_Click" Padding="8,6" Visibility="Collapsed">
-                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE749;"/>
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE749;"/>
                     </Button>
 
                     <!-- Settings Button -->
@@ -290,6 +292,7 @@
                     CornerRadius="20"
                     Height="42"
                     Padding="10,6"
+                    local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18"
                     PointerEntered="PenOptionsCapsule_PointerEntered"
                     PointerExited="PenOptionsCapsule_PointerExited">
                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
@@ -301,12 +304,15 @@
                         <StackPanel.RenderTransform>
                             <TranslateTransform Y="-1"/>
                         </StackPanel.RenderTransform>
-                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#FFFF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Yellow" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#00FF00" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Lime" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#00FFFF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Cyan" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#FF00FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Magenta" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#FF0000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Red" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#0000FF" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Blue" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <!-- 画笔色板：高饱和、清晰可分的一组记号笔色（详见 2026-09-22 日志）。
+                             不再强行统一明度——按色相自然分布明度以拉开绿/青/蓝、红/品红之间的区分；
+                             饱和度保持 66–90% 的一致性家族。黄为金黄（白纸上对比有限是其物理属性），黑作中性锚点不动。 -->
+                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#F2C200" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#F2C200" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#2FA84F" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2FA84F" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#16B1C4" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#16B1C4" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#E84FA6" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E84FA6" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#E5393B" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E5393B" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#2E6FE0" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2E6FE0" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
                         <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
                     </StackPanel>
 
@@ -374,22 +380,50 @@
         </Grid>
 
         <!-- Main content area containing SplitView for the Collapsible Sidebar (Visible when PDF is loaded) -->
-        <!-- DisplayMode=Overlay：侧边栏【盖住】主视图左侧，主视图不向右位移（Inline 会挤走主视图，
-             用户要求"只是盖住"）。Pane 背景因此必须改为主题实色——Overlay 下 6/255 透明度会让主视图
-             透出来，缩略图列表不可读。 -->
-        <SplitView Grid.Row="0" x:Name="SidebarSplitView" DisplayMode="Overlay" IsPaneOpen="False" OpenPaneLength="220" Background="Transparent" Visibility="Collapsed">
+        <!-- DisplayMode=Inline：侧边栏【挤开】主视图——主视图向右位移并变窄（而非盖住）。
+             主视图全程可正常导航/缩放（无 light-dismiss 覆盖层遮挡）；展开/收起后由 C# 侧
+             RefitViewerAfterSidebar() 按新视口重新 Fit 一次，保证 PDF 铺满可见区域。 -->
+        <SplitView Grid.Row="0" x:Name="SidebarSplitView" DisplayMode="Inline" IsPaneOpen="False" OpenPaneLength="220" Background="Transparent" Visibility="Collapsed">
             <!-- SplitView Pane: Sidebar with page index -->
             <SplitView.Pane>
-            <!-- 主题实色背景（Overlay 浮层必须不透明/接近不透明，否则主视图透出） -->
-            <Grid x:Name="ThumbnailSidebarPanel" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+            <!-- 主题实色背景（Inline 下 Pane 与主视图并排不重叠，背景取主题画刷即可，干净利落） -->
+            <!-- ⚠ 顶部 Padding 由 C# 侧 UpdateSidebarTopInset() 按实测工具栏高度写入（不在此硬编码）：
+                 工具栏是同一根 Grid 里 ZIndex=50 的浮层，恒盖在 SidebarSplitView（ZIndex=0）之上，
+                 若侧边栏内容从 y=0 起排，展开工具栏会切掉标题行与第一张缩略图的上沿。 -->
+            <Grid x:Name="ThumbnailSidebarPanel" Padding="0,14,0,0" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    
-                    <TextBlock x:Name="ThumbnailsHeader" Text="Miniaturas" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" Margin="16,14,16,6"/>
-                    
-                    <ListView Grid.Row="1" x:Name="PageListView" IsItemClickEnabled="True" ItemClick="PageListView_ItemClick" Background="Transparent" Margin="0,0,0,8" ContainerContentChanging="PageListView_ContainerContentChanging" IsTabStop="False">
+
+                    <!-- Sidebar mode switcher: thumbnails / bookmarks / outline
+                         ⚠ 全项目 FontIcon 一律用此字体族：'Segoe Fluent Icons' 仅 Win11 自带，
+                         写死单字体会在 Win10 落豆腐块。改用 DirectWrite 回退链
+                         "Segoe Fluent Icons,Segoe MDL2 Assets"（= WinUI 内建 SymbolThemeFontFamily
+                         的值）：Win11 全取 Fluent、Win10 全取 MDL2 —— 两平台各自观感统一。 -->
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Stretch" Margin="8,8,8,0" Spacing="4">
+                        <ToggleButton x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;"/>
+                        </ToggleButton>
+                        <ToggleButton x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE728;"/>
+                        </ToggleButton>
+                        <ToggleButton x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE71D;"/>
+                        </ToggleButton>
+                    </StackPanel>
+
+                    <!-- Section header + context action -->
+                    <Grid Grid.Row="1" Margin="16,12,16,6">
+                        <TextBlock x:Name="SidebarHeaderText" Text="Miniaturas" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" VerticalAlignment="Center"/>
+                        <Button x:Name="AddBookmarkButton" Click="AddBookmark_Click" Visibility="Collapsed" HorizontalAlignment="Right" Padding="0" Background="Transparent" BorderThickness="0">
+                            <TextBlock x:Name="AddBookmarkButtonText" Text="添加书签" FontSize="12" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
+                        </Button>
+                    </Grid>
+
+                    <!-- Thumbnails -->
+                    <ListView Grid.Row="2" x:Name="PageListView" IsItemClickEnabled="True" ItemClick="PageListView_ItemClick" Background="Transparent" Margin="0,0,0,8" ContainerContentChanging="PageListView_ContainerContentChanging" IsTabStop="False">
                         <!-- ⚠ 严禁设 CacheLength=0/过小：ItemsStackPanel 只 realized 可见项后，
                              ScrollIntoView/选中项自动滚动对 unrealized 目标项失效 → 侧边栏无法跟随主视图
                              当前页（第41轮实测回归）。保留默认 4.0（视口外前后各 2 屏 realized），
@@ -408,6 +442,43 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
+
+                    <!-- Bookmarks -->
+                    <ListView Grid.Row="2" x:Name="BookmarkListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="local:BookmarkViewModel">
+                                <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch" Tapped="BookmarkItem_Tapped">
+                                    <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"/>
+                                    <TextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" Padding="4,2" VerticalAlignment="Center" Background="Transparent" BorderThickness="1" KeyDown="BookmarkEditBox_KeyDown" LostFocus="BookmarkEditBox_LostFocus"/>
+
+                                    <Button Grid.Column="1" Click="BookmarkEdit_Click" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE70F;" FontSize="12"/>
+                                    </Button>
+                                    <Button Grid.Column="1" Click="BookmarkConfirm_Click" Visibility="{x:Bind IsEditing, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE73E;" FontSize="12"/>
+                                    </Button>
+                                    <Button Grid.Column="2" Click="BookmarkCancel_Click" Visibility="{x:Bind IsEditing, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE711;" FontSize="12"/>
+                                    </Button>
+                                    <Button Grid.Column="3" Click="BookmarkDelete_Click" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE74D;" FontSize="12"/>
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <!-- Outline -->
+                    <ListView Grid.Row="2" x:Name="OutlineListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsItemClickEnabled="True" ItemClick="OutlineListView_ItemClick" IsTabStop="False">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="local:OutlineItemViewModel">
+                                <Grid Padding="4,6" ColumnDefinitions="Auto,*" HorizontalAlignment="Stretch">
+                                    <Rectangle Grid.Column="0" Width="{x:Bind Indent}"/>
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Title}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
                 </Grid>
             </SplitView.Pane>
 
@@ -418,6 +489,17 @@
                     <ColumnDefinition x:Name="SyncScrollColumn" Width="0"/>
                     <ColumnDefinition x:Name="SecondaryViewerColumn" Width="0"/>
                 </Grid.ColumnDefinitions>
+
+                <!-- 侧边栏右侧阴影：Inline 下 Pane 与主视图相邻（不重叠），此处放一枚骑在缝处的
+                     不透明细条，由 ElevationShadow 向右投出柔和阴影压在 PDF 画布上。内容层不被 Pane
+                     裁剪，故阴影可见。可见性由 PaneOpened/PaneClosing 联动；Margin=0 使其恒骑在
+                     内容左缘（即 Pane 右缘 = 缝），随展开动画自动跟随。 -->
+                <Border x:Name="SidebarDropShadow"
+                        HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                        Width="1" Margin="0,0,0,0" Canvas.ZIndex="45"
+                        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Visibility="Collapsed" IsHitTestVisible="False"
+                        local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="16">
+                </Border>
 
                 <local:GpuPageView Grid.Column="0" x:Name="GpuViewer" Visibility="Collapsed" PointerPressed="GpuViewer_PointerPressed"/>
 
@@ -470,7 +552,8 @@
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="18"
-                                Opacity="1">
+                                Opacity="1"
+                                local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18">
                             <Button x:Name="OpenSecondPdfButton" Click="OpenSecondPdf_Click"
                                     Width="36" Height="36" CornerRadius="18" Padding="0"
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
@@ -502,7 +585,8 @@
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="18"
-                                Opacity="0">
+                                Opacity="0"
+                                local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18">
                             <Button x:Name="CloseSecondPdfButton" Click="CloseSecondPdf_Click"
                                     Width="36" Height="36" CornerRadius="18" Padding="0"
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
@@ -539,7 +623,8 @@
                             CornerRadius="20"
                             Padding="6,4"
                             Height="42"
-                            Opacity="0">
+                            Opacity="0"
+                            local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18">
                         <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                             <Button x:Name="ZoomOutButton" Click="ZoomOut_Click" Width="32" Height="32" CornerRadius="16"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
@@ -612,6 +697,7 @@
                             BorderThickness="1"
                             CornerRadius="20" Padding="0,4,0,4" Height="42"
                             Opacity="0" IsHitTestVisible="False"
+                            local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18"
                             Tapped="SaveToastBorder_Tapped">
                         <!-- 内部 Grid 高度 = 42 - 2border - 4pad - 4pad = 32px，与缩放胶囊按钮高度完全一致。
                              左列宽=40 = 2×圆角，图标居中 → 中心落在左半圆圆心(x=20)。
@@ -620,7 +706,7 @@
                                • right=28 文字右缘到边框 28px（8px body gap + 20px 右半圆留白，避免右半边太空）
                                • top=-1, bottom=-1  中文字符行框偏高，轻微上移 1px 视觉纠偏 -->
                         <Grid ColumnDefinitions="40,*" Height="32">
-                            <FontIcon x:Name="SaveToastIcon" Glyph="&#xE73E;" FontSize="18"
+                            <FontIcon x:Name="SaveToastIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE73E;" FontSize="18"
                                       HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,-1"/>
                             <TextBlock x:Name="SaveToastText" Text="已保存" FontSize="16"
                                        Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="2,-1,28,-1"/>

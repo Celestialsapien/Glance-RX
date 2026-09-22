@@ -244,6 +244,21 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// <summary>布局切换看门狗：万一 ScrollViewer 目标被极端夹断且再无 ViewChanged，兜底强制收尾。</summary>
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _layoutWatchdog;
 
+    /// <summary>宿主视口尺寸变化（侧边栏挤开）前的"阅读位置不变量"快照是否有效；见 CaptureHostResizeAnchor。</summary>
+    private bool _hostResizeCaptureValid;
+
+    /// <summary>快照时的缩放（重锚的等比基准）。</summary>
+    private double _hostResizeZ0;
+
+    /// <summary>快照时的视口尺寸（新旧比例的"旧"端；主轴换算是取 vpW 还是 vpH 由布局方向决定）。</summary>
+    private double _hostResizeVpW0, _hostResizeVpH0;
+
+    /// <summary>快照时视口【左缘】切到的文档 X —— 主轴前缘，纵向布局下即"左右边线"里的左线。</summary>
+    private double _hostResizeDocLeftX;
+
+    /// <summary>快照时视口【竖直中心】切到的文档 Y —— 交叉轴中心不动点。</summary>
+    private double _hostResizeDocCenterY;
+
     /// <summary>
     /// 当前连续布局方向。切换时：重排布局 → 若原本处于"适应"缩放则换算为新主轴的适应值
     /// （否则保留用户手动缩放）→ 锚定切换前的当前页，使视口不飘走。
@@ -418,7 +433,11 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         if (z <= 0) z = 1.0;
         if (IsHorizontalLayout)
         {
-            double targetX = Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z);
+            // 末列保护（横向布局）：最后一列的【右缘】永远贴着视口右端（与纵向末页同理），
+            // 消除小缩放下该列短于视口时"先按列首对齐、再被排版/交互 re-clamp 到末端"的一次瞬移。
+            double targetX = index == pages.Count - 1
+                ? EndScrollOffset(horizontal: true, z)
+                : Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z);
             // 直接跳：必须把滚动弹簧权威镜像同步到新位置（并同步 _live*），否则后续 GoToPageSmooth
             // 经 EnsureScrollSprings 把弹簧复位到陈旧 _live 值，弹簧 Value 仍是旧位置被帧泵回写，
             // 视图先弹回旧页再动画过去（Home/End 后首按 PgDn/PgUp 异常 up/down 一次的根因）。
@@ -441,7 +460,12 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         }
         else
         {
-            double targetY = Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
+            // 末页保护：无论缩放倍率，最后一页的【页尾】永远贴着视口底部。小缩放下整页短于视口，
+            // 若按页首对齐会留空隙、且随后被排版/交互 re-clamp 到文档末端，形成一次瞬移；直接贴末端消除跳变。
+            // 较大缩放下整页高于视口时 targetY 本就应被夹到 maxY，本行与之结果一致（无回归）。
+            double targetY = index == pages.Count - 1
+                ? EndScrollOffset(horizontal: false, z)
+                : Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
             _scrollV.Reset(targetY);
             _scrollH.Reset(_liveH);
             SyncLiveView(_liveH, targetY, z);
@@ -487,9 +511,12 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         // 但本方法按页布局 LayoutRect*z 算目标，倍率错一档就飞）。
         double z = CurrentZoom;
         if (z <= 0) z = 1.0;
-        double target = IsHorizontalLayout
-            ? Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z)
-            : Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
+        // 末页/末列：同 GoToPage 的末页保护，把结尾钉在视口末端，避免小缩放下瞬移（大缩放下结果不变）。
+        double target = index == pages.Count - 1
+            ? EndScrollOffset(IsHorizontalLayout, z)
+            : (IsHorizontalLayout
+                ? Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z)
+                : Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z));
         // 复用滚轮弹簧：以"当前【显示位置】(_live* 权威镜像) → 该页起点"的差量作为一次滚动步进，
         // 中途再触发则无缝接续；边界由 AddWheelScroll 自夹（不会越过文档末端）。
         // 关键：差量基准必须用 _live*（当前真实显示偏移），【不能】用弹簧 _scroll*.Target —— 缩放/
@@ -701,6 +728,18 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         double hh = double.IsNaN(Spacer.Height) ? 0 : Spacer.Height;
         maxH = Math.Max(0, w * zoom - vpW);
         maxV = Math.Max(0, hh * zoom - vpH);
+    }
+
+    /// <summary>
+    /// 末页/末列对齐用的"文档末端"滚动偏移（缩放后像素，等价 GetScrollBounds 的对应轴上界）。
+    /// 跳转到最后一页/列时把结尾钉在视口末端：小缩放下整页短于视口，若按页首对齐会留空隙，
+    /// 随后被排版/交互（滚轮、翻页键、re-clamp）拉到末端，形成一次可见瞬移。
+    /// 大缩放下整页高于视口，末端偏移本就是 ChangeView 的夹取下界结果 —— 两种情形结果一致，无回归。
+    /// </summary>
+    private double EndScrollOffset(bool horizontal, double z)
+    {
+        GetScrollBounds(z, out double maxH, out double maxV, Viewer.ViewportWidth, Viewer.ViewportHeight);
+        return horizontal ? maxH : maxV;
     }
 
     /// <summary>内容小于视口时 ScrollViewer 的居中偏移（视口坐标 = 居中量 + 文档坐标×缩放 − 滚动偏移）。</summary>
@@ -919,7 +958,10 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         // 否则是"缩放还在异步落地就被迫关窗"，Viewer 仍停在旧倍率——此时若把 _live* 回退到旧倍率，
         // 画布会闪一帧错位、且 _live* 与真实视图长期脱节(下次双击 toggle 判反)。宁可保留
         // FinishZoom 写入的提交目标，等 Viewer 落地后由闲置同步纠正。
-        if (_pendingRestore == null && IsCommittedZoomReached())
+        // 布局切换 / 宿主几何变更的稳定窗口(_layoutSwitchInFlight)期间一律不同步：那两个窗口的权威
+        // 镜像是 Reanchor 播种的目标值，此刻 Viewer.* 可能仍是被旧 extent 夹断的中间值(常为 0)，
+        // 读了就会把它写进 _live* 并**永不自愈**（CurrentZoom 恒取 _liveZoom）。窗口自己负责收尾。
+        if (_pendingRestore == null && !_layoutSwitchInFlight && IsCommittedZoomReached())
             SyncLiveView(Viewer.HorizontalOffset, Viewer.VerticalOffset, Viewer.ZoomFactor);
         InvalidateBoth();
         NotifyViewState();
@@ -1309,6 +1351,121 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
 
     /// <summary>适应视口（纵向=适应宽度 / 横向=适应高度）。</summary>
     public void FitWidth(bool animate = true) => SetZoomPercent(FitToViewportPercent, animate);
+
+    /// <summary>
+    /// 宿主视口尺寸变化（侧边栏 Inline 挤开主视图）【之前】同步冻结"阅读位置不变量"。
+    /// 必须在翻转 IsPaneOpen / 改列宽之前调用：列宽在过渡起点(KeyTime=0)即变，事后读不到旧几何。
+    ///
+    /// 只冻结两个与缩放无关的量，落定后据此一次性重解，全程不跟帧：
+    ///   · <see cref="_hostResizeDocLeftX"/>   —— 视口**左缘**切到的文档 X（主轴前缘）
+    ///   · <see cref="_hostResizeDocCenterY"/> —— 视口**竖直中心**切到的文档 Y（交叉轴中心）
+    /// 两个量都按"视口坐标 = 居中量 + 文档坐标×缩放 − 滚动偏移"先扣掉居中量（GetCenterOffsets），
+    /// 低缩放整页落入视口时同样算得准。
+    /// </summary>
+    public void CaptureHostResizeAnchor()
+    {
+        double z0 = CurrentZoom;
+        double vpW0 = Viewer.ViewportWidth, vpH0 = Viewer.ViewportHeight;
+        if (z0 <= 0 || vpW0 <= 0 || vpH0 <= 0) return;
+        double h0 = _liveZoom > 0 ? _liveH : Viewer.HorizontalOffset;
+        double v0 = _liveZoom > 0 ? _liveV : Viewer.VerticalOffset;
+        GetCenterOffsets(z0, out double cx0, out double cy0, vpW0, vpH0);
+
+        _hostResizeZ0 = z0;
+        _hostResizeVpW0 = vpW0;
+        _hostResizeVpH0 = vpH0;
+        _hostResizeDocLeftX = (h0 - cx0) / z0;
+        _hostResizeDocCenterY = (v0 - cy0 + vpH0 / 2.0) / z0;
+        _hostResizeCaptureValid = true;
+    }
+
+    /// <summary>
+    /// 宿主几何已生效后调用（侧边栏过渡起点之后一帧）：把阅读位置不变量当作**固定锚点**，
+    /// 用弹簧把 zoom 平滑推到"主轴视口新旧比例"的目标值（而不是瞬时落定）。
+    ///
+    /// 【语义（用户拍板）】纵向布局下，开关侧边栏前后**视口左右边线切到的内容完全一致**：
+    /// 主轴（水平）可见文档区间 = [前缘文档X, 前缘文档X + 主轴视口 ÷ zoom]
+    ///   · 区间长度：zoom 按 vpW 新旧比例等比缩放 ⇒ vpW₁/z₁ = vpW₀/z₀，长度自动不变；
+    ///   · 区间起点：锚点取"主轴前缘 0 × 交叉轴视口中心"，并令**锚点的文档坐标 = 开关前冻结的两个
+    ///     不变量**。由 `ResolveZoomOffsets` 的形式即得
+    ///       h(z) = _zAnimContentX·z + Cx(z) − 0      ⇒ 左缘文档 X ≡ _zAnimContentX（对任意 z 恒成立）
+    ///       v(z) = _zAnimContentY·z + Cy(z) − vpH/2  ⇒ 视口中心文档 Y ≡ _zAnimContentY
+    ///     ⇒ **动画每一帧**左右边线切到的内容都不动，终点与"瞬时公式"逐字等价（同一组不变量、同一处解算）。
+    ///
+    /// 【为什么这里能再用弹簧，而第 7 轮那版不能】
+    /// 旧版的锚点是在【几何已变之后】由 startH 反解的 `_zAnimContentX = (0 − Cx₀ + startH)/z₀`，
+    /// 而且当时 `_vpW` 还是旧视口 —— 同一个量被 StartSmoothZoom 与 FinishZoom(PredictViewport)
+    /// 用两个不同视口解算两次，漂移就藏在缝隙里。现在锚点文档坐标是**开关前冻结的标量**，与新视口无关，
+    /// `_vpW/_vpH` 在起动画前就换成新视口，`ResolveZoomOffsets` 只解一次。
+    /// 收尾仍靠**布局切换稳定窗口**(_layoutSwitchInFlight)：未确认 ScrollViewer 真到达前一律不读 Viewer.*，
+    /// 避免回读到被旧 extent 夹断的 0 而把 `_live*` 永久污染（那正是"偏移到 0,0、影响之后全部开关"的根因）。
+    /// </summary>
+    public void BeginHostResizeReanchor()
+    {
+        if (!_hostResizeCaptureValid) return;
+        _hostResizeCaptureValid = false;   // 用掉即清：一次快照只对应一次重锚
+        var pages = _pages;
+        if (pages.Count == 0) return;
+
+        double z0 = _hostResizeZ0, vpW0 = _hostResizeVpW0, vpH0 = _hostResizeVpH0;
+
+        // 列宽已由 SplitView 在过渡起点离散改到最终值，但 Viewport* 要等这一轮布局才刷新 → 强制刷新。
+        try { Viewer.UpdateLayout(); } catch { }
+
+        bool horiz = IsHorizontalLayout;
+        double vpW1 = Viewer.ViewportWidth, vpH1 = Viewer.ViewportHeight;
+        if (vpW1 <= 0 || vpH1 <= 0) return;
+        double mainOld = horiz ? vpH0 : vpW0;
+        double mainNew = horiz ? vpH1 : vpW1;
+        // 【唯一判据】主轴视口没变就是无关调用，不动。横向布局的主轴是高度、侧边栏只挤宽 ⇒ 恒早退，
+        // 保持"纯挤开"的现状——横向布局的侧边栏行为尚未设计，不在此处替它引入缩放设计。
+        if (mainNew <= 0 || Math.Abs(mainNew - mainOld) <= 0.5) return;
+
+        float z1 = (float)Math.Clamp(z0 * (mainNew / mainOld), MinZoom, MaxZoom);
+
+        // 画布绘制与居中量都按新视口算：SplitView 之后那 0.15s 只是渲染滑动，布局不再变。
+        // （必须先换，下面的 ResolveZoomOffsets 用的是这两个快照。）
+        _vpW = vpW1;
+        _vpH = vpH1;
+
+        // 进行中的缩放手势必须作废：它的帧泵会拿自管的 _zoomAnimCurrent* 覆盖下面播种的锚点状态。
+        // 随之可能被 StopSmoothZoom→CommitViewWithGuard 打开的提交窗口也一并关掉 —— 该窗口的
+        // TryAdvanceCommit 在"缩放已到位"时只推偏移、不推缩放，残留下来会拿"停手那一刻"的旧偏移
+        // 把重锚结果顶掉（ScheduleCommitWatchdog 以 _zoomAnimCommitting 为链头，置 false 即断链）。
+        StopSmoothZoom();
+        _zoomAnimCommitting = false;
+
+        // 锚点 = 主轴前缘(0) × 交叉轴视口中心；锚点的**文档坐标**直接用开关前冻结的两个不变量。
+        // （横向布局已在上面早退，故此处恒是纵向的"左缘 + 竖直中心"。）
+        _zAnimAnchor = new Point(0, vpH1 / 2.0);
+        _zAnimContentX = _hostResizeDocLeftX;
+        _zAnimContentY = _hostResizeDocCenterY;
+        _zoomAnimTargetFactor = z1;
+        ResolveZoomOffsets(z1, out double h1, out double v1);
+
+        // 稳定窗口：改几何 + 提交期间 ViewChanged 回读到的是被旧 extent 夹断的中间值（常为 0），
+        // 到达判定前一律不读 Viewer.*；收尾由 Viewer_ViewChanged 的窗口分支负责，看门狗兜底。
+        _layoutSwitchInFlight = true;
+        _layoutSwitchAnchor = Math.Clamp(CurrentPageIndex, 0, pages.Count - 1);
+        _layoutSwitchStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        StopLayoutSwitchWatchdog();
+        _layoutTargetH = h1;
+        _layoutTargetV = v1;
+        _layoutTargetZoom = z1;
+
+        // 弹簧：用代码里现成的"快"档（右键拖拽缩放那档，≈165ms），与侧边栏 0.15s 滑窗同一量级。
+        // BeginZoomGesture 会用 Viewer.Viewport*（此刻已是新值）再覆写一次 _vpW/_vpH —— 与我上面设的一致。
+        BeginZoomGesture(z0, z1, RightZoomSpringOmega, fromRightDrag: false);
+        _zoomOmega = RightZoomSpringOmega;
+        _isSmoothZooming = true;
+        EnsureFramePump();
+        // 起手先把显示态落到锚点当前帧（z=z₀ 处）：不画的话首个帧泵回调前，画布仍可能拿旧视口的 _vis*。
+        SetVisRect(_liveH, _liveV, z0);
+        SyncLiveView(_liveH, _liveV, z0);
+        InvalidateBoth();
+        NotifyViewState();
+        StartLayoutSwitchWatchdog();
+    }
 
     /// <summary>实际大小（100%）。</summary>
     public new void ActualSize(bool animate = true) => SetZoomPercent(100, animate);
@@ -2146,7 +2303,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     {
         try
         {
-            string hex = (colorHex ?? "#FFFF00").Replace("#", "");
+            string hex = (colorHex ?? "#F2C200").Replace("#", "");
             if (hex.Length == 6) hex = "FF" + hex;
             return Windows.UI.Color.FromArgb(
                 Convert.ToByte(hex.Substring(0, 2), 16),

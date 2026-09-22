@@ -140,7 +140,17 @@ namespace Glance.Services
                 ["SaveToastSuccess"] = "Guardado",
                 ["SaveToastFailed"] = "No se pudo guardar",
                 ["SaveAsToastSuccess"] = "Copia guardada",
-                ["SaveAsToastFailed"] = "No se pudo guardar la copia"
+                ["SaveAsToastFailed"] = "No se pudo guardar la copia",
+                ["SidebarThumbnails"] = "Miniaturas",
+                ["SidebarBookmarks"] = "Marcadores",
+                ["SidebarOutline"] = "Contenido",
+                ["AddBookmark"] = "Agregar marcador",
+                ["BookmarkPagePlaceholder"] = "Página {0}",
+                ["DeleteBookmark"] = "Eliminar marcador",
+                ["RenameBookmark"] = "Renombrar marcador",
+                ["ConfirmRename"] = "Confirmar",
+                ["CancelRename"] = "Cancelar",
+                ["NoOutline"] = "Este documento no tiene contenido."
             },
             ["zh"] = new()
             {
@@ -230,7 +240,17 @@ namespace Glance.Services
                 ["SaveToastSuccess"] = "保存成功",
                 ["SaveToastFailed"] = "保存失败",
                 ["SaveAsToastSuccess"] = "另存为成功",
-                ["SaveAsToastFailed"] = "另存为失败"
+                ["SaveAsToastFailed"] = "另存为失败",
+                ["SidebarThumbnails"] = "缩略图",
+                ["SidebarBookmarks"] = "书签",
+                ["SidebarOutline"] = "大纲",
+                ["AddBookmark"] = "添加书签",
+                ["BookmarkPagePlaceholder"] = "第 {0} 页",
+                ["DeleteBookmark"] = "删除书签",
+                ["RenameBookmark"] = "重命名书签",
+                ["ConfirmRename"] = "确认",
+                ["CancelRename"] = "取消",
+                ["NoOutline"] = "此文档没有大纲。"
             },
             ["en"] = new()
             {
@@ -320,7 +340,17 @@ namespace Glance.Services
                 ["SaveToastSuccess"] = "Saved",
                 ["SaveToastFailed"] = "Save failed",
                 ["SaveAsToastSuccess"] = "Saved a copy",
-                ["SaveAsToastFailed"] = "Save as failed"
+                ["SaveAsToastFailed"] = "Save as failed",
+                ["SidebarThumbnails"] = "Thumbnails",
+                ["SidebarBookmarks"] = "Bookmarks",
+                ["SidebarOutline"] = "Outline",
+                ["AddBookmark"] = "Add bookmark",
+                ["BookmarkPagePlaceholder"] = "Page {0}",
+                ["DeleteBookmark"] = "Delete bookmark",
+                ["RenameBookmark"] = "Rename bookmark",
+                ["ConfirmRename"] = "Confirm",
+                ["CancelRename"] = "Cancel",
+                ["NoOutline"] = "This document has no outline."
             }
         };
 

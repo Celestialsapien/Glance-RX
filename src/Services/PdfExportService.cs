@@ -324,7 +324,7 @@ public class PdfExportService
             }
         }
         catch { }
-        return "#FFFF00";
+        return "#F2C200";
     }
 
     private static double ReadThickness(PdfAnnotation a)
