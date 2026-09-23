@@ -250,14 +250,17 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// <summary>快照时的缩放（重锚的等比基准）。</summary>
     private double _hostResizeZ0;
 
-    /// <summary>快照时的视口尺寸（新旧比例的"旧"端；主轴换算是取 vpW 还是 vpH 由布局方向决定）。</summary>
+    /// <summary>快照时的视口尺寸（新旧比例的"旧"端）。缩放比**恒取 vpW** —— 两种布局都锁左右边线
+    ///（见 <see cref="BeginHostResizeReanchor"/> 的"三条不动边线"）。</summary>
     private double _hostResizeVpW0, _hostResizeVpH0;
 
-    /// <summary>快照时视口【左缘】切到的文档 X —— 主轴前缘，纵向布局下即"左右边线"里的左线。</summary>
+    /// <summary>快照时视口【左缘】切到的文档 X —— 三条不动边线之「左」。</summary>
     private double _hostResizeDocLeftX;
 
-    /// <summary>快照时视口【竖直中心】切到的文档 Y —— 交叉轴中心不动点。</summary>
-    private double _hostResizeDocCenterY;
+    /// <summary>快照时视口【上缘】切到的文档 Y —— 三条不动边线之「上」。
+    /// 原名"竖直中心"（交叉轴中心），09-23 改为上缘：语义由"上下对称展开"改为
+    /// **上边钉住、只让下边露出更多内容**。</summary>
+    private double _hostResizeDocTopY;
 
     /// <summary>
     /// 当前连续布局方向。切换时：重排布局 → 若原本处于"适应"缩放则换算为新主轴的适应值
@@ -1357,8 +1360,9 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// 必须在翻转 IsPaneOpen / 改列宽之前调用：列宽在过渡起点(KeyTime=0)即变，事后读不到旧几何。
     ///
     /// 只冻结两个与缩放无关的量，落定后据此一次性重解，全程不跟帧：
-    ///   · <see cref="_hostResizeDocLeftX"/>   —— 视口**左缘**切到的文档 X（主轴前缘）
-    ///   · <see cref="_hostResizeDocCenterY"/> —— 视口**竖直中心**切到的文档 Y（交叉轴中心）
+    ///   · <see cref="_hostResizeDocLeftX"/> —— 视口**左缘**切到的文档 X
+    ///   · <see cref="_hostResizeDocTopY"/>  —— 视口**上缘**切到的文档 Y
+    /// 正是要钉住的那两条边线本身（第三条"右缘"由缩放比自动跟随，见 BeginHostResizeReanchor）。
     /// 两个量都按"视口坐标 = 居中量 + 文档坐标×缩放 − 滚动偏移"先扣掉居中量（GetCenterOffsets），
     /// 低缩放整页落入视口时同样算得准。
     /// </summary>
@@ -1375,7 +1379,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         _hostResizeVpW0 = vpW0;
         _hostResizeVpH0 = vpH0;
         _hostResizeDocLeftX = (h0 - cx0) / z0;
-        _hostResizeDocCenterY = (v0 - cy0 + vpH0 / 2.0) / z0;
+        _hostResizeDocTopY = (v0 - cy0) / z0;
         _hostResizeCaptureValid = true;
     }
 
@@ -1383,14 +1387,15 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     /// 宿主几何已生效后调用（侧边栏过渡起点之后一帧）：把阅读位置不变量当作**固定锚点**，
     /// 用弹簧把 zoom 平滑推到"主轴视口新旧比例"的目标值（而不是瞬时落定）。
     ///
-    /// 【语义（用户拍板）】纵向布局下，开关侧边栏前后**视口左右边线切到的内容完全一致**：
-    /// 主轴（水平）可见文档区间 = [前缘文档X, 前缘文档X + 主轴视口 ÷ zoom]
-    ///   · 区间长度：zoom 按 vpW 新旧比例等比缩放 ⇒ vpW₁/z₁ = vpW₀/z₀，长度自动不变；
-    ///   · 区间起点：锚点取"主轴前缘 0 × 交叉轴视口中心"，并令**锚点的文档坐标 = 开关前冻结的两个
-    ///     不变量**。由 `ResolveZoomOffsets` 的形式即得
-    ///       h(z) = _zAnimContentX·z + Cx(z) − 0      ⇒ 左缘文档 X ≡ _zAnimContentX（对任意 z 恒成立）
-    ///       v(z) = _zAnimContentY·z + Cy(z) − vpH/2  ⇒ 视口中心文档 Y ≡ _zAnimContentY
-    ///     ⇒ **动画每一帧**左右边线切到的内容都不动，终点与"瞬时公式"逐字等价（同一组不变量、同一处解算）。
+    /// 【语义（用户拍板 · 09-23 实测定案）】两种布局一律 —— **三条边线不动，只有下边内容变化**：
+    ///   · 「左」「右」不动：zoom 恒按 **vpW** 新旧比例缩放 ⇒ vpW₁/z₁ = vpW₀/z₀，可见文档区间长度不变；
+    ///   · 「上」不动：锚点取视口**左缘 × 上缘** = (0,0)，文档坐标直接用开关前冻结的两个不变量：
+    ///       h(z) = _zAnimContentX·z + Cx(z) − 0  ⇒ 左缘文档 X ≡ _zAnimContentX（对任意 z 恒成立）
+    ///       v(z) = _zAnimContentY·z + Cy(z) − 0  ⇒ 上缘文档 Y ≡ _zAnimContentY（对任意 z 恒成立）
+    ///     ⇒ **动画每一帧**这三条边线切到的内容都不动，终点与"瞬时公式"逐字等价。
+    ///   · 「下」是唯一变化的边：下缘文档 Y = 上缘文档 Y + vpH/z，侧边栏不改高（vpH 不变）而 z 变小
+    ///     ⇒ vpH/z 变大 ⇒ 下方露出更多内容。这正是要的效果（原来锚竖直中心，是上下各露一半）。
+    /// ⚠ 缩放比不随布局方向变：横向连续同样锁左右边线（与"适应视口"按 vpH 是两回事，别混）。
     ///
     /// 【为什么这里能再用弹簧，而第 7 轮那版不能】
     /// 旧版的锚点是在【几何已变之后】由 startH 反解的 `_zAnimContentX = (0 − Cx₀ + startH)/z₀`，
@@ -1407,18 +1412,23 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         var pages = _pages;
         if (pages.Count == 0) return;
 
-        double z0 = _hostResizeZ0, vpW0 = _hostResizeVpW0, vpH0 = _hostResizeVpH0;
+        double z0 = _hostResizeZ0, vpW0 = _hostResizeVpW0;
+        // 快照不全（采集时几何还没排好）⇒ 这次重锚不可信，宁可不动。
+        if (z0 <= 0 || vpW0 <= 0) return;
 
         // 列宽已由 SplitView 在过渡起点离散改到最终值，但 Viewport* 要等这一轮布局才刷新 → 强制刷新。
         try { Viewer.UpdateLayout(); } catch { }
 
-        bool horiz = IsHorizontalLayout;
         double vpW1 = Viewer.ViewportWidth, vpH1 = Viewer.ViewportHeight;
         if (vpW1 <= 0 || vpH1 <= 0) return;
-        double mainOld = horiz ? vpH0 : vpW0;
-        double mainNew = horiz ? vpH1 : vpW1;
-        // 【唯一判据】主轴视口没变就是无关调用，不动。横向布局的主轴是高度、侧边栏只挤宽 ⇒ 恒早退，
-        // 保持"纯挤开"的现状——横向布局的侧边栏行为尚未设计，不在此处替它引入缩放设计。
+        // 【唯一判据】缩放比恒按 **vpW**（两种布局都一样）：要钉住的是「左右边线」，而左右边线
+        // 永远由宽度决定，与页面沿哪个方向排布无关（用户 09-23 拍板：纵横都锁左+右+上三条边线）。
+        //   z₁ = z₀ × vpW₁/vpW₀ ⇒ vpW₁/z₁ = vpW₀/z₀，可见文档区间长度自动不变 ⇒ 右缘跟随左缘不动。
+        // ⚠ 别与"适应视口"混：横向连续的 FitToViewportPercent 按【高度】（适应高度）是另一套语义；
+        //   这里横向同样按宽度缩放，改完之后不再因"高不变"而早退。
+        double mainOld = vpW0;
+        double mainNew = vpW1;
+        // 宽度没变就是无关调用，不动。
         if (mainNew <= 0 || Math.Abs(mainNew - mainOld) <= 0.5) return;
 
         float z1 = (float)Math.Clamp(z0 * (mainNew / mainOld), MinZoom, MaxZoom);
@@ -1435,11 +1445,14 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         StopSmoothZoom();
         _zoomAnimCommitting = false;
 
-        // 锚点 = 主轴前缘(0) × 交叉轴视口中心；锚点的**文档坐标**直接用开关前冻结的两个不变量。
-        // （横向布局已在上面早退，故此处恒是纵向的"左缘 + 竖直中心"。）
-        _zAnimAnchor = new Point(0, vpH1 / 2.0);
+        // 锚点 = 视口【左缘 × 上缘】= (0,0)：两条要钉的边线本身就取作锚点，
+        // 文档坐标直接用开关前冻结的两个不变量 ⇒ 全程对任意 z 恒成立。
+        // 「右」不用单独锚：vpW/z 不变，右缘 = 左缘 + vpW/z 自动跟随。
+        // 「下」不锚：下缘 = 上缘 + vpH/z，vpH 不变而 z 变小 ⇒ 下缘下移 ⇒ 只有下方多露出内容。
+        // 两布局共用这一组锚点，无需按方向分支。
+        _zAnimAnchor = new Point(0, 0);
         _zAnimContentX = _hostResizeDocLeftX;
-        _zAnimContentY = _hostResizeDocCenterY;
+        _zAnimContentY = _hostResizeDocTopY;
         _zoomAnimTargetFactor = z1;
         ResolveZoomOffsets(z1, out double h1, out double v1);
 
