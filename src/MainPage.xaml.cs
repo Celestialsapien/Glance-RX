@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Windows.Foundation;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -324,7 +325,11 @@ public sealed partial class MainPage : Page
         {
             if (SidebarDropShadow != null) SidebarDropShadow.Visibility = Visibility.Visible;
             UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
+            AlignRowStars();           // 展开动画结束后用最终几何再对齐一次（见该方法注释）
         };
+        // 面板尺寸变化（Pane 展开动画、窗口缩放）时重算行内星的水平位置；
+        // 排到下一回合执行，确保本次布局已完成、ActualWidth/坐标变换都已有效。
+        ThumbnailSidebarPanel.SizeChanged += (s, e) => DispatcherQueue.TryEnqueue(AlignRowStars);
         // 整个侧边栏隐藏（如回到欢迎页）时，投影一并收起。
         SidebarSplitView.RegisterPropertyChangedCallback(UIElement.VisibilityProperty,
             (s, dp) =>
@@ -405,13 +410,18 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void OnGettingFocusBlockButtons(UIElement sender, GettingFocusEventArgs e)
     {
+        // 根因修复：原实现用 e.Cancel=true 拦截焦点落到 ButtonBase / 程序化聚焦输入框。但 WinUI 在
+        // 焦点移动不可取消的情形（如 FromOutside：Alt-Tab 切回窗口、点击任务栏重新激活、窗口失焦再
+        // 获焦后 OS 还原焦点）下，设置 Cancel 会抛 E_INVALIDARG（"Value does not fall within the
+        // expected range"），表现为「正常使用中放置一会后闪退」。改用 TryCancel()：不可取消时返回
+        // false 而非抛异常，语义等价且安全。
         if (e.NewFocusedElement is ButtonBase)
-            e.Cancel = true;
+            e.TryCancel();
         // 页数输入框：仅允许鼠标点击聚焦（FocusState.Pointer）。Tab 键与「按钮 Defocus 后框架自动
         // 把焦点重定位到本框」这类程序化焦点一律拦截。这样既把 Tab 彻底挡在框外，又保留鼠标点进
         // 去编辑页码的能力（直接设 IsTabStop=false 在本项目会把鼠标点击聚焦也禁掉，导致无法改页数）。
         else if (e.NewFocusedElement == PageNumberInput && e.FocusState != FocusState.Pointer)
-            e.Cancel = true;
+            e.TryCancel();
     }
 
     /// <summary>
@@ -513,7 +523,9 @@ public sealed partial class MainPage : Page
 
     private void PopupButton_GettingFocus(UIElement sender, GettingFocusEventArgs e)
     {
-        if (e.NewFocusedElement == sender) e.Cancel = true;
+        // 改用 TryCancel()：焦点从外部重新进入（FromOutside）等不可取消情形下返回 false 而非抛
+        // E_INVALIDARG，避免「放置一会后闪退」。
+        if (e.NewFocusedElement == sender) e.TryCancel();
     }
 
 
@@ -680,8 +692,9 @@ public sealed partial class MainPage : Page
             if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = Glance.Services.LocalizationService.Get("WelcomeSubtitle");
             if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = Glance.Services.LocalizationService.Get("WelcomeOpenButton");
 
-            // Sidebar
-            if (AddBookmarkButtonText != null) AddBookmarkButtonText.Text = Glance.Services.LocalizationService.Get("AddBookmark");
+            // Sidebar（添加书签按钮无文字，用本地化串补可访问名称）
+            if (AddBookmarkButton != null)
+                AutomationProperties.SetName(AddBookmarkButton, Glance.Services.LocalizationService.Get("AddBookmark"));
             ApplySidebarMode(); // refresh header text after localization strings are ready
         }
         catch { }
@@ -887,6 +900,8 @@ public sealed partial class MainPage : Page
             PageIndex = page,
             RotationDegrees = GpuViewer.RotationDegrees,
             LayoutMode = (int)GpuViewer.LayoutMode,
+            // 侧边栏开关状态随文件记忆：与偏移/缩放同一份记录、同一时机（退出前/切换文档前）落盘。
+            SidebarOpen = SidebarSplitView.IsPaneOpen,
             SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
         // 窗口几何由 MainWindow 填写（只有它持有 AppWindow）：普通状态取 AppWindow.Position/Size，
@@ -1147,7 +1162,7 @@ public sealed partial class MainPage : Page
                 {
                     return await ExportPdfAsync(notify);
                 }
-                if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveToastFailed"), false);
+                if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveToastFailed"), ToastIconKind.Error);
                 return false;
             }
             finally
@@ -1157,7 +1172,7 @@ public sealed partial class MainPage : Page
         }
 
         // 保存成功。关闭窗口路径(notify=false)不提示。
-        if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveToastSuccess"), true);
+        if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveToastSuccess"), ToastIconKind.Success);
         return true;
     }
 
@@ -1283,7 +1298,7 @@ public sealed partial class MainPage : Page
 
             // 3. 成功提示：改用右下角小弹窗（自动消失），不再弹模态对话框（免去点击确定）。
             //    关闭窗口路径(notify=false)不提示（窗口即将关闭）。
-            if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveAsToastSuccess"), true);
+            if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveAsToastSuccess"), ToastIconKind.Success);
             // 原模态对话框会引发焦点态变化导致视口漂移，曾需在对话框后补保视口；现已无对话框，
             // 但保留这两次 RestoreView 作为防御（无害），确保另存为后视口纹丝不动。
             try { GpuViewer.RestoreView(savedView); } catch { }
@@ -1312,7 +1327,7 @@ public sealed partial class MainPage : Page
                 }
             }
             catch { }
-            if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveAsToastFailed"), false);
+            if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveAsToastFailed"), ToastIconKind.Error);
             return false;
         }
         finally
@@ -1667,6 +1682,12 @@ public sealed partial class MainPage : Page
             // Hide welcome screen, show document panel and home button
             WelcomePanel.Visibility = Visibility.Collapsed;
             SidebarSplitView.Visibility = Visibility.Visible;
+            // 侧边栏开关状态随文件记忆（与阅读位置/缩放同一份记录，按 PDF 路径存）。
+            // 必须在引擎初始化【之前】摆好：其后 InitializeAsync/GetPageCountAsync 有多个 await，
+            // 到 LoadAsync 还原视图时 Pane 列宽早已落定，于是还原的偏移/缩放与退出时处于同一视口宽度；
+            // 若挪到 LoadAsync 之后再翻，会先按"收起"的宽度还原、再展开侧边栏触发一次多余的重锚。
+            var savedVs = ViewStateStore.Load(_currentPdfPath);
+            SidebarSplitView.IsPaneOpen = savedVs?.SidebarOpen == true;
             SaveButton.Visibility = Visibility.Visible;
             if (PrintButton != null) PrintButton.Visibility = Visibility.Visible;
             if (SplitViewToggleButton != null) SplitViewToggleButton.Visibility = Visibility.Visible;
@@ -1718,7 +1739,6 @@ public sealed partial class MainPage : Page
             // LoadAnnotationsAsync 的 await → 遮罩淡出后露出"闪一下首页"。传进去后 TryInitialFit
             // 见到 _pendingRestore!=null 直接跳过适应宽度、按还原位置 SyncLiveView+SetVisibleRangeFor
             // +QueueVisiblePages，画布首帧即从记忆位置绘制（遮罩淡出露出的就是目标页，零闪）。
-            var savedVs = ViewStateStore.Load(_currentPdfPath);
             await GpuViewer.LoadAsync(_pdfRenderService, savedVs);
 
             // 复用 GpuViewer 已取的页尺寸填充 _pages 占位 → 缩略图侧栏
@@ -1849,6 +1869,13 @@ public sealed partial class MainPage : Page
 
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
+        // 欢迎页里这个按钮仍可见，但点击必须完全无效：此时 SidebarSplitView 整体 Collapsed，
+        // 翻转 IsPaneOpen 既看不见效果，又会把该值留在字段里 —— 而它在"密码取消后回到欢迎页"
+        // 这类路径上会被 SaveCurrentViewState 连同视图一起写进某个文件的记录（那里 _currentPdfPath
+        // 已切到新路径、GpuViewer 还留着旧文档），导致下次打开该文件时侧边栏开/关错乱。
+        // 正式阅读时 SidebarSplitView 恒为 Visible，故正常开关不受此守卫影响。
+        if (SidebarSplitView == null || SidebarSplitView.Visibility != Visibility.Visible) return;
+
         // 【翻转前】同步冻结"阅读位置不变量"：SplitView 的列宽在过渡起点(KeyTime=0)即变，翻转后读不到旧几何。
         // 这里只取快照、不改视图；随后 PaneOpening/PaneClosing（过渡起点）会排队一次重锚，
         // 由 GpuPageView 用弹簧把 zoom 推到目标值，且全程保持视口左右边线切到的内容不变。
@@ -1879,8 +1906,6 @@ public sealed partial class MainPage : Page
         PageListView.Visibility = _currentSidebarMode == SidebarMode.Thumbnails ? Visibility.Visible : Visibility.Collapsed;
         BookmarkListView.Visibility = _currentSidebarMode == SidebarMode.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
         OutlineListView.Visibility = _currentSidebarMode == SidebarMode.Outline ? Visibility.Visible : Visibility.Collapsed;
-        AddBookmarkButton.Visibility = _currentSidebarMode == SidebarMode.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
-
         SidebarHeaderText.Text = _currentSidebarMode switch
         {
             SidebarMode.Bookmarks => Glance.Services.LocalizationService.Get("SidebarBookmarks"),
@@ -1900,27 +1925,75 @@ public sealed partial class MainPage : Page
 
     // ---------- Bookmarks ----------
 
+    // 侧边栏头部金色五角星按钮：静默把当前页加为书签。
+    // 静默 = 用默认「第 N 页」命名，不切侧边栏模式、不改选中项、不进命名编辑态，不打断阅读；
+    // 需要改名走书签列表里的铅笔按钮。当前页已有书签则不重复添加，直接返回。
     private void AddBookmark_Click(object sender, RoutedEventArgs e)
     {
         if (_totalPages == 0 || _currentPageIndex < 0 || _currentPageIndex >= _totalPages) return;
-        var existing = _bookmarks.FirstOrDefault(b => b.PageIndex == _currentPageIndex);
-        if (existing != null)
-        {
-            existing.IsEditing = true;
-            existing.EditText = existing.DisplayName;
-            BookmarkListView.SelectedItem = existing;
-            return;
-        }
-        var vm = new BookmarkViewModel
+        if (_bookmarks.Any(b => b.PageIndex == _currentPageIndex)) return;
+        _bookmarks.Add(new BookmarkViewModel
         {
             PageIndex = _currentPageIndex,
             DisplayName = string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), _currentPageIndex + 1),
-            IsEditing = true,
-        };
-        vm.EditText = vm.DisplayName;
-        _bookmarks.Add(vm);
-        BookmarkListView.SelectedItem = vm;
+        });
+        SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
+        ShowSaveToast(Glance.Services.LocalizationService.Get("BookmarkAddedToast"), ToastIconKind.Bookmark);
+    }
+
+    // 侧栏缩略图行内那颗星：按下标 Handled，阻止 ListViewItem 进入按下态并捕获指针。
+    // 这是"点击时整行悬浮提示色不消失"的关键：指针一旦被捕获，本行立刻收到 PointerExited，
+    // 悬浮态被清掉，松手后才恢复 —— 表现为提示色闪烁。
+    private void RowStar_PointerPressed(object sender, PointerRoutedEventArgs e) => e.Handled = true;
+
+    // 松手成 Tap 时切换书签；同样标 Handled，避免 ListViewItem 把它当成 ItemClick 而跳页。
+    private void RowStar_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is FrameworkElement star && star.DataContext is PdfPageViewModel pageVm)
+            TogglePageBookmark(pageVm);
+    }
+
+    // 行内星点击语义：在"加书签 / 移出书签"之间切换。
+    // 静默语义与顶部黄星一致（默认「第 N 页」命名、不切模式、不改选中项、不进编辑态）。
+    private void TogglePageBookmark(PdfPageViewModel pageVm)
+    {
+        int idx = pageVm.PageIndex;
+        if (idx < 0 || idx >= _pages.Count) return;
+
+        var existing = _bookmarks.FirstOrDefault(b => b.PageIndex == idx);
+        var kind = ToastIconKind.Bookmark;
+        string msgKey = "BookmarkAddedToast";
+        if (existing != null)
+        {
+            _bookmarks.Remove(existing);
+            kind = ToastIconKind.Remove;
+            msgKey = "BookmarkRemovedToast";
+        }
+        else
+        {
+            _bookmarks.Add(new BookmarkViewModel
+            {
+                PageIndex = idx,
+                DisplayName = string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), idx + 1),
+            });
+        }
+        SyncBookmarkFlags();
+        _ = SaveBookmarksAsync();
+        ShowSaveToast(Glance.Services.LocalizationService.Get(msgKey), kind);
+    }
+
+    // 书签成员关系的唯一真源是 _bookmarks；缩略图行内的星必须与它保持一致，
+    // 否则从书签列表删除、或从顶部黄星添加后，行内星的两态会与实际书签不符。
+    private void SyncBookmarkFlags()
+    {
+        var marked = new HashSet<int>(_bookmarks.Select(b => b.PageIndex));
+        foreach (var p in _pages)
+        {
+            bool on = marked.Contains(p.PageIndex);
+            if (p.IsBookmarked != on) p.IsBookmarked = on;
+        }
     }
 
     private void BookmarkItem_Tapped(object sender, TappedRoutedEventArgs e)
@@ -1958,7 +2031,9 @@ public sealed partial class MainPage : Page
     {
         if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
         _bookmarks.Remove(bm);
+        SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
+        ShowSaveToast(Glance.Services.LocalizationService.Get("BookmarkRemovedToast"), ToastIconKind.Remove);
     }
 
     private void BookmarkEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -2017,6 +2092,7 @@ public sealed partial class MainPage : Page
             }
         }
         catch { /* best-effort load */ }
+        SyncBookmarkFlags();   // 书签载入后回填缩略图行内星的两态
     }
 
     // ---------- Outline ----------
@@ -2147,8 +2223,9 @@ public sealed partial class MainPage : Page
         // 在焦点真正落下前拦截「剥夺焦点流程 / 回车提交期」中重新启用导致的伪焦点还原：
         // 取消这次还原，使输入框真正失焦（_pageInputHasFocus 不被重新置真、工具栏得以正常收起）。
         // 这是 GettingFocus（落下前、可取消）预事件，配合 _pageInputCommitting 覆盖异步还原时序。
+        // 改用 TryCancel()：焦点从外部重新进入等不可取消情形下返回 false 而非抛 E_INVALIDARG。
         if (_defocusingPageInput || _pageInputCommitting)
-            e.Cancel = true;
+            e.TryCancel();
     }
 
     private void PageNumberInput_LosingFocus(object sender, RoutedEventArgs e)
@@ -2278,17 +2355,48 @@ public sealed partial class MainPage : Page
     // 关闭窗口触发的保存由调用方传 notify:false 跳过（窗口即将关闭，无需提示）。
     // 显隐走 Storyboard Opacity 动画：淡入 50ms（保存反馈要快速出现）、淡出 0.15s，
     // 与缩放胶囊同一条 DWM 合成路径。
-    private void ShowSaveToast(string message, bool success)
+    // ⚠ 09-24：为区分连续触发试过「A/B 双槽位交替」两次（排队切换 + 同时交叉），
+    // 用户实测判定不理想（且出现"切换后关不掉"），已【整份回退】为单枚 + 延长存留。
+    // 连续触发目前就是"延长同一个计时器 + 静默换字"，没有区分动画 —— 这是有意为之的基线。
+    // A/B 双槽位的所有代码（ToastSlot / _toastSlots / FadeOutToast / LightToast /
+    // ScheduleToastForceHide）已一并删除，XAML 侧也恢复成单枚，勿复活。
+    // 左下角胶囊的图标档位。原先只有 bool success（✓/✗），加书签反馈需要第三种形态
+    // （与侧边栏顶部黄星同符号 E735、同色 #F2C200），bool 无法表达，故升为枚举。
+    private enum ToastIconKind
+    {
+        Success,   // CheckMark \uE73E，绿
+        Error,     // Error \uE783，红
+        Bookmark,  // StarFilled \uE735，#F2C200（与收藏按钮同符号同色）
+        Remove,    // Delete \uE74D，中性灰（与书签模式垃圾桶按钮同符号；不用红，红色已被 Error 占用）
+    }
+
+    private void ShowSaveToast(string message, ToastIconKind kind)
     {
         if (SaveToastBorder == null || SaveToastText == null || SaveToastIcon == null) return;
 
         SaveToastText.Text = message;
-        // CheckMark=\uE73E（成功）/ Error=\uE783（失败）
-        SaveToastIcon.Glyph = success ? "\uE73E" : "\uE783";
+        // CheckMark=\uE73E（成功）/ Error=\uE783（失败）/ StarFilled=\uE735（书签）/ Delete=\uE74D（移除）
+        SaveToastIcon.Glyph = kind switch
+        {
+            ToastIconKind.Error => "\uE783",
+            ToastIconKind.Bookmark => "\uE735",
+            ToastIconKind.Remove => "\uE74D",
+            _ => "\uE73E",
+        };
         bool dark = this.ActualTheme == ElementTheme.Dark;
-        SaveToastIcon.Foreground = new SolidColorBrush(success
-            ? (dark ? Windows.UI.Color.FromArgb(0xFF, 0x6B, 0xB7, 0x00) : Windows.UI.Color.FromArgb(0xFF, 0x10, 0x7C, 0x10))
-            : (dark ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x6B, 0x6B) : Windows.UI.Color.FromArgb(0xFF, 0xC4, 0x2B, 0x1C)));
+        SaveToastIcon.Foreground = new SolidColorBrush(kind switch
+        {
+            ToastIconKind.Error => dark
+                ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x6B, 0x6B)
+                : Windows.UI.Color.FromArgb(0xFF, 0xC4, 0x2B, 0x1C),
+            ToastIconKind.Bookmark => Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xC2, 0x00),
+            ToastIconKind.Remove => dark
+                ? Windows.UI.Color.FromArgb(0xFF, 0xB8, 0xB8, 0xB8)
+                : Windows.UI.Color.FromArgb(0xFF, 0x76, 0x76, 0x76),
+            _ => dark
+                ? Windows.UI.Color.FromArgb(0xFF, 0x6B, 0xB7, 0x00)
+                : Windows.UI.Color.FromArgb(0xFF, 0x10, 0x7C, 0x10),
+        });
 
         SaveToastShowAnim?.Begin();
         SaveToastBorder.IsHitTestVisible = true;
@@ -2319,7 +2427,6 @@ public sealed partial class MainPage : Page
             SaveToastBorder.IsHitTestVisible = false;
         }
     }
-
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetCursorPos(out POINT lpPoint);
 
@@ -4071,6 +4178,56 @@ public sealed partial class MainPage : Page
             ThumbnailSidebarPanel.Padding = new Thickness(p.Left, top, p.Right, p.Bottom);
     }
 
+    /// <summary>
+    /// 把缩略图行内的书签星水平对齐到侧边栏顶部那颗黄星的圆心（同一竖列）。
+    ///
+    /// 为什么必须"反推"而不能硬编码：顶部黄星按钮是"填满右侧空位"的（宽度 = 剩余空间），
+    /// 其左缘取决于三模式按钮的实测总宽（FontIcon 字体度量）；行内星又落在 ListViewItem
+    /// 默认内容内缩之后，该内缩值同样来自 WinUI 内置模板。两个值都不在本项目代码里，
+    /// 所以直接用坐标变换量真实几何：把"本星圆心"搬到"顶部星圆心"上即可，与任何默认度量解耦。
+    /// 每颗星在自己的 Loaded（即容器实化）时各自对齐一次 → 换文档/虚拟化回收都不需要额外同步；
+    /// 面板尺寸变化（Pane 展开动画、窗口缩放）时再由 AlignRowStars() 全量重算。
+    /// </summary>
+    private void AlignSingleRowStar(FrameworkElement star)
+    {
+        if (star.ActualWidth <= 0) return;
+        if (AddBookmarkButton == null || AddBookmarkButton.ActualWidth <= 0) return;
+
+        double targetCenterX = AddBookmarkButton.TransformToVisual(ThumbnailSidebarPanel)
+            .TransformPoint(new Point(AddBookmarkButton.ActualWidth / 2, 0)).X;
+        double currentCenterX = star.TransformToVisual(ThumbnailSidebarPanel)
+            .TransformPoint(new Point(star.ActualWidth / 2, 0)).X;
+
+        double delta = targetCenterX - currentCenterX;
+        if (Math.Abs(delta) < 0.25) return;
+
+        var m = star.Margin;
+        star.Margin = new Thickness(m.Left + delta, m.Top, m.Right, m.Bottom);
+    }
+
+    // 行内星的 Loaded：排到下一回合再对齐，确保本元素已完成布局（ActualWidth/坐标变换有效）。
+    private void RowStarButton_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement star)
+            star.DispatcherQueue.TryEnqueue(() => AlignSingleRowStar(star));
+    }
+
+    // 面板尺寸变化时对所有已实化的行容器重算一遍（已实化的容器不会重新触发 Loaded）。
+    private void AlignRowStars()
+    {
+        if (AddBookmarkButton == null || AddBookmarkButton.ActualWidth <= 0) return;
+        if (PageListView?.ItemsPanelRoot is not Panel panel) return;
+        foreach (var child in panel.Children)
+        {
+            if (child is ListViewItem item &&
+                item.ContentTemplateRoot is FrameworkElement root &&
+                root.FindName("RowStarButton") is FrameworkElement star)
+            {
+                AlignSingleRowStar(star);
+            }
+        }
+    }
+
     private string GetActiveColorHexWithOpacity()
     {
         string color = _activeColorHex;
@@ -4975,6 +5132,20 @@ public class PdfPageViewModel : INotifyPropertyChanged
     private int _pageIndex;
     private ImageSource? _thumbnailSource = null; // 侧栏缩略图位图(常驻)。旧路径的高清/预览位图字段已随 GPU 化移除。
     private Microsoft.UI.Xaml.Media.Brush? _annotationsBackground = null;
+    private bool _isBookmarked;
+
+    // 侧栏缩略图行内书签星的两态：灰边空心(E734) / 黄实心(E735)。
+    // 由 MainPage.SyncBookmarkFlags() 统一按 _bookmarks 的成员关系刷新，勿在别处单独赋值。
+    public bool IsBookmarked
+    {
+        get => _isBookmarked;
+        set
+        {
+            if (SetProperty(ref _isBookmarked, value)) OnPropertyChanged(nameof(IsNotBookmarked));
+        }
+    }
+
+    public bool IsNotBookmarked => !_isBookmarked;
 
     public Microsoft.UI.Xaml.Media.Brush? AnnotationsBackground
     {

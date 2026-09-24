@@ -6,15 +6,18 @@ namespace Glance.Services;
 
 /// <summary>
 /// 便携版缓存目录管理。
-/// 所有"安全可删"的临时/诊断文件都放进 Glance.exe 同级（程序本体目录）下的 Cache 子目录，
-/// 绝不写 C 盘 AppData（遵循便携版硬约束）。
+/// 所有"安全可删"的临时/诊断文件（缓存、save_error.txt 等）都放进程序本体目录下的
+/// GlanceData\Cache 子目录，绝不写 C 盘 AppData（遵循便携版硬约束）。
 /// 该目录内的任何文件被删除都不会影响软件运行；启动时按"保留天数 + 总大小上限"自动清理，
 /// 防止目录无限增长。
 /// </summary>
 public static class CacheManager
 {
-    /// <summary>缓存子目录名（位于 AppContext.BaseDirectory 下）。</summary>
+    /// <summary>缓存子目录名（位于数据根目录 GlanceData 下）。</summary>
     public const string CacheFolderName = "Cache";
+
+    /// <summary>缓存位于数据根目录 GlanceData 之下（GlanceData\Cache），与设置/记忆/日志同样集中收纳。</summary>
+    public static readonly string CacheRootDirectory = Path.Combine(AppPaths.DataDirectory, CacheFolderName);
 
     /// <summary>缓存文件最长保留天数，超过则删除。</summary>
     private const int MaxFileAgeDays = 7;
@@ -22,9 +25,8 @@ public static class CacheManager
     /// <summary>缓存目录总大小上限（字节）。超过时按最旧优先删除，直到降到此值以下。</summary>
     private const long MaxTotalBytes = 200L * 1024 * 1024; // 200 MB
 
-    /// <summary>缓存目录完整路径（程序本体目录下的 Cache 子目录）。</summary>
-    public static readonly string CacheDirectory = Path.Combine(
-        AppContext.BaseDirectory, CacheFolderName);
+    /// <summary>缓存目录完整路径（数据目录下的 Cache 子目录）。</summary>
+    public static readonly string CacheDirectory = CacheRootDirectory;
 
     /// <summary>确保缓存目录存在，返回其路径。失败静默。</summary>
     public static string EnsureCacheDirectory()

@@ -1,5 +1,7 @@
-// 全局未处理异常兜底：把任何会杀掉进程的异常原样写进 <BaseDirectory>/crash_*.log，
-// 便于复现后定位。背景：本项目曾出现「闪退但 appcrash 归档里没有记录」的现象——
+// 全局未处理异常兜底：把任何会杀掉进程的异常原样写进
+// <BaseDirectory>/GlanceData/Crash/crash_*.log，便于复现后定位。
+// 崩溃日志与用户数据（settings/view-state/bookmarks）分处两个目录，清诊断不会误删数据。
+// 背景：本项目曾出现「闪退但 appcrash 归档里没有记录」的现象——
 // 那是托管异常经 WinUI3 默认 fail-fast 终止进程，WER 不总为这类终止生成 appcrash AV
 // 归档，肉眼/事件查看器都难追。此日志器把异常类型/消息/完整堆栈落盘，使崩溃可复盘。
 //
@@ -63,7 +65,10 @@ internal static class CrashLog
     {
         try
         {
-            string dir = AppContext.BaseDirectory;
+            // 与 native 侧 panic_guard::crash_dir() 相同的落点：
+            // 程序本体目录下 GlanceData/Crash 子目录，不写 exe 同级根目录
+            // （那里是编译产物，日志混在里面既难找也难清），也不和数据文件同处一个目录。
+            string dir = Services.AppPaths.EnsureCrashDirectory();
             Directory.CreateDirectory(dir);
             return dir;
         }

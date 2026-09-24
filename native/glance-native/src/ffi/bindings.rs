@@ -2,7 +2,7 @@
 //
 // ⚠ Every entry point below is wrapped in the `safe_ffi!` macro (defined in
 // `panic_guard.rs`). That macro installs a one-time panic hook (which persists
-// any panic to `<BaseDirectory>/crash_native_*.log`) and catches unwinding
+// any panic to `<BaseDirectory>/GlanceData/crash_native_*.log`) and catches unwinding
 // panics at the FFI boundary, converting them into the function's normal error
 // return instead of letting them unwind across `extern "C"` (which is UB and
 // kills the process before any managed handler can run). See panic_guard.rs for
@@ -754,7 +754,7 @@ mod repro_abort_stress {
     #[test]
     fn repro_concurrent_abort_stress() {
         // Remove any stale AV log from a previous run so presence == this run.
-        let _ = std::fs::remove_file("crash_native_av.log");
+        let _ = std::fs::remove_file(crate::ffi::panic_guard::data_dir().join("crash_native_av.log"));
 
         if !Path::new(FIXTURE).exists() {
             eprintln!("repro: fixture not found at {FIXTURE}; skipping");
@@ -920,7 +920,8 @@ mod repro_abort_stress {
         if let Some(ui) = ui { let _ = ui.join(); }
         mu_engine_destroy(engine);
 
-        if Path::new("crash_native_av.log").exists() {
+        let av_log = crate::ffi::panic_guard::data_dir().join("crash_native_av.log");
+        if Path::new(&av_log).exists() {
             eprintln!("repro: *** C-LEVEL ACCESS VIOLATION OCCURRED (crash_native_av.log present) ***");
         }
         eprintln!("repro: abort_churn={abort_enabled}");

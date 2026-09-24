@@ -402,24 +402,53 @@
                          写死单字体会在 Win10 落豆腐块。改用 DirectWrite 回退链
                          "Segoe Fluent Icons,Segoe MDL2 Assets"（= WinUI 内建 SymbolThemeFontFamily
                          的值）：Win11 全取 Fluent、Win10 全取 MDL2 —— 两平台各自观感统一。 -->
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Stretch" Margin="8,8,8,0" Spacing="4">
-                        <ToggleButton x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
-                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;"/>
-                        </ToggleButton>
-                        <ToggleButton x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
-                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE728;"/>
-                        </ToggleButton>
-                        <ToggleButton x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
-                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE71D;"/>
-                        </ToggleButton>
-                    </StackPanel>
+                    <Grid Grid.Row="0" Margin="8,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="4">
+                            <ToggleButton x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" Padding="8,6" HorizontalContentAlignment="Center">
+                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" Padding="8,6" HorizontalContentAlignment="Center">
+                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE728;"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" Padding="8,6" HorizontalContentAlignment="Center">
+                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE71D;"/>
+                            </ToggleButton>
+                        </StackPanel>
 
-                    <!-- Section header + context action -->
+                        <!-- 添加书签：单独放在模式按钮右侧的长按钮，外观沿用 Button 默认模板
+                             （与 ToggleButton 同一套 ControlFill/ControlStroke/圆角，故与三模式按钮观感一致），
+                             内部不写字，只有一枚金色实心五角星（#F2C200 = 画笔色板黄）。
+                             Padding="8,6" 与模式按钮完全相同 → 高度恒等。
+                             【右沿对齐缩略图可点区域】全部按 XAML 尺寸推导，不依赖截图：
+                               · Pane 内容盒 = OpenPaneLength 220 − 面板右 BorderThickness 1 = 219
+                               · 缩略图 ListView 无左右 Margin → 其容器 ListViewItem 就是"浅灰可点区域"，
+                                 右沿 = 219 − 框架默认项内缩 8 = 211
+                               · 本按钮在同一 219 宽的列内 → 右 Margin 取 8，右沿同样落在 211
+                               · 左 Margin 8（略大于模式按钮间距 4）→ 按 219−138−8 得按钮宽 73
+                             【星形居中奇偶】星形实心横向 21 设备像素（奇数）→ 按钮设备宽也须奇数：
+                             125% 缩放下 73×1.25 = 91.25 → 91 设备像素（奇数）✓，
+                             星形左右各留 35 设备像素，完全对称（此前 69 逻辑宽 = 87 像素时是 33/33）。
+                             若换缩放比后两侧不等，只改左 Margin ±0.8（=1 设备像素）即可纠偏，
+                             右沿对齐不受影响。
+                             ⚠ HorizontalAlignment="Stretch" 必须显式写：Button 默认样式自带
+                             HorizontalAlignment=Left + VerticalAlignment=Center（贴内容不撑满），
+                             不写只会缩在所在列左端、右侧留空。
+                             ⚠ MinWidth="0" 必须保留：Button 默认 MinWidth=120 会撑破 219 宽的侧边栏。 -->
+                        <Button Grid.Column="1" x:Name="AddBookmarkButton" Click="AddBookmark_Click"
+                                Margin="8,0,8,0" Padding="8,6" MinWidth="0"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE735;" Foreground="#F2C200"/>
+                        </Button>
+                    </Grid>
+
+                    <!-- Section header -->
                     <Grid Grid.Row="1" Margin="16,12,16,6">
                         <TextBlock x:Name="SidebarHeaderText" Text="Miniaturas" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" VerticalAlignment="Center"/>
-                        <Button x:Name="AddBookmarkButton" Click="AddBookmark_Click" Visibility="Collapsed" HorizontalAlignment="Right" Padding="0" Background="Transparent" BorderThickness="0">
-                            <TextBlock x:Name="AddBookmarkButtonText" Text="添加书签" FontSize="12" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
-                        </Button>
                     </Grid>
 
                     <!-- Thumbnails -->
@@ -432,12 +461,44 @@
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="local:PdfPageViewModel">
                                 <!-- x:Bind with OneWay is completely virtualization-safe when using observable properties -->
-                                <Grid ColumnDefinitions="Auto, *" Padding="4,4" RowSpacing="4" ColumnSpacing="12" HorizontalAlignment="Stretch">
-                                    <!-- Page preview image container -->
-                                    <Border Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Width="36" Height="48" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" CornerRadius="2" VerticalAlignment="Center">
-                                        <Image Source="{x:Bind ThumbnailSource, Mode=OneWay}" Stretch="Uniform"/>
-                                    </Border>
-                                    <TextBlock Grid.Column="1" Text="{x:Bind PageNumberText, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" FontWeight="Medium"/>
+                                <!-- 外层 Grid 只用来承载"行内书签星"覆盖层：星声明在内容 Grid 之后 →
+                                     天然位于最顶层（后声明者在上），且它自己吃掉指针事件 →
+                                     点它只切书签，不会触发 ListView 的 ItemClick 跳页。
+                                     横坐标不在此写死，由 C# 侧 AlignSingleRowStar() 反推
+                                     （与顶部黄星同圆心，见该方法注释）；此处只管尺寸与纵向居中。 -->
+                                <Grid HorizontalAlignment="Stretch">
+                                    <Grid ColumnDefinitions="Auto, *" Padding="4,4" RowSpacing="4" ColumnSpacing="12" HorizontalAlignment="Stretch">
+                                        <!-- Page preview image container -->
+                                        <Border Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Width="36" Height="48" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" CornerRadius="2" VerticalAlignment="Center">
+                                            <Image Source="{x:Bind ThumbnailSource, Mode=OneWay}" Stretch="Uniform"/>
+                                        </Border>
+                                        <TextBlock Grid.Column="1" Text="{x:Bind PageNumberText, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" FontWeight="Medium"/>
+                                    </Grid>
+                                    <!-- 行内书签星：空心(E734，灰边) ↔ 实心(E735，同顶部黄星 #F2C200)。
+                                         水平位置不写死：由 RowStarButton_Loaded → AlignSingleRowStar() 反推，
+                                         保证与侧边栏顶部那颗黄星同圆心（见该方法注释）。
+                                         ⚠ 这里刻意不用 Button：ButtonBase 按下时会 CapturePointer，
+                                         指针一被捕获，所在缩略图行立刻收到 PointerExited → 整行悬浮提示色
+                                         消失（松手后才恢复，表现为提示色闪烁）。改用不捕获指针的 Grid，
+                                         自行处理指针：PointerPressed 标 Handled 阻止 ListViewItem 进入按下态
+                                         并捕获指针（那会同样打断悬浮态）；Tapped 标 Handled 阻止它据此
+                                         抛出 ItemClick（不跳页）。
+                                         Background="Transparent" 必须有，否则空白处不参与命中测试。 -->
+                                    <Grid x:Name="RowStarButton"
+                                          Loaded="RowStarButton_Loaded"
+                                          PointerPressed="RowStar_PointerPressed"
+                                          Tapped="RowStar_Tapped"
+                                          Width="32" Height="32" Background="Transparent"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center">
+                                        <Grid>
+                                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE734;"
+                                                      Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                                                      Visibility="{x:Bind IsNotBookmarked, Mode=OneWay}"/>
+                                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE735;"
+                                                      Foreground="#F2C200"
+                                                      Visibility="{x:Bind IsBookmarked, Mode=OneWay}"/>
+                                        </Grid>
+                                    </Grid>
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -449,7 +510,21 @@
                             <DataTemplate x:DataType="local:BookmarkViewModel">
                                 <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch" Tapped="BookmarkItem_Tapped">
                                     <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"/>
-                                    <TextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" Padding="4,2" VerticalAlignment="Center" Background="Transparent" BorderThickness="1" KeyDown="BookmarkEditBox_KeyDown" LostFocus="BookmarkEditBox_LostFocus"/>
+                                    <!-- ⚠ 文字"贴左上角"的根因在模板，不在本行的排版参数：
+                                         WinUI3 的 DefaultTextBoxStyle 内容宿主 ScrollViewer(x:Name="ContentElement")
+                                         只绑 Padding/Margin，**不绑 VerticalContentAlignment**（WindowsAppSDK 2.2.1
+                                         的 Microsoft.UI.Xaml/Themes/generic.xaml:23984-23985：BorderElement 只绑
+                                         MinHeight，ScrollViewer 那一行里没有该绑定）⇒ 该属性对 TextBox 无效，
+                                         内容恒贴"内容盒"左上；模板里能"看起来居中"的唯一机制是
+                                         **内容盒被行高刚好填满（余量 0，无处可偏）**——工具栏 PageNumberInput 正是如此：
+                                         行高≈18.67(FontSize 14) + 默认 Padding 10,5,6,6 + 边框 2 ≈ Height 32 → 余量≈0。
+                                         原 Padding="4,2" 的内容盒 = 32−2−4 = 26 DIP，而 12pt 行高只有 16 DIP
+                                         ⇒ 10 DIP 余量全落在文字下方（125% 缩放实测：盒高 32 DIP，文字上留白 7px / 下留白 20px，
+                                         与"贴顶 + Padding.top=2"逐像素吻合）。现改用同一机制：
+                                         MinHeight=0 让盒高贴合 行高16 + 内边距6+6 + 边框1+1 = 30 DIP ⇒ 余量恒为 0
+                                         （随字号/文本缩放自适应）。MinHeight=0 必须写，主题默认 MinHeight=32 会重新撑出余量；
+                                         Padding 保持 4,6（与只读态 TextBlock 左沿对齐，同一 Grid Padding），不要改小。 -->
+                                    <TextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" MinHeight="0" Padding="4,6" VerticalAlignment="Center" Background="Transparent" BorderThickness="1" KeyDown="BookmarkEditBox_KeyDown" LostFocus="BookmarkEditBox_LostFocus"/>
 
                                     <Button Grid.Column="1" Click="BookmarkEdit_Click" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
                                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE70F;" FontSize="12"/>
@@ -676,7 +751,11 @@
                      capsules resolve their Margin against an identical layout frame.
                      Height="42" (pixel-locked) matches the zoom pill AND the pen-options
                      capsule; all three capsules render identical height with the same
-                     DWM composition path (Opacity-driven visibility). -->
+                     DWM composition path (Opacity-driven visibility).
+
+                     ⚠ 09-24 曾加过「A/B 双槽位交替」用来区分连续触发（两次都试过：排队切换 / 同时交叉，
+                     均被用户判定为"不理想 / 关不掉"），现已【整份回退】为单枚 + 延长存留。
+                     若日后重做，务必保留这里的原始单枚结构。 -->
                 <Grid x:Name="BottomSaveToastPill"
                       Grid.Column="0"
                       VerticalAlignment="Bottom" HorizontalAlignment="Left"

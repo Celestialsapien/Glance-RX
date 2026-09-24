@@ -10,9 +10,8 @@ namespace Glance.Services;
 /// </summary>
 public class SettingsService
 {
-    private static readonly string SettingsFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "settings.json");
+    // 数据落在程序本体目录的 GlanceData 子目录（便携版硬约束：不写 C 盘 AppData / 系统 Temp）。
+    private static readonly string SettingsFilePath = AppPaths.SettingsFilePath;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

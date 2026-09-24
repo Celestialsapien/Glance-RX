@@ -25,8 +25,10 @@
 // catches every Rust panic.
 //
 // A panic hook (installed once, idempotently) additionally writes the panic
-// message and a full backtrace to `<BaseDirectory>/crash_native_*.log` so the
-// failure is reproducible and locatable next time instead of vanishing.
+// message and a full backtrace to `<BaseDirectory>/GlanceData/Crash/crash_native_*.log`
+// so the failure is reproducible and locatable next time instead of vanishing.
+// Crash records live in their own subfolder apart from the settings/view-state/bookmark
+// data files, so wiping or grepping diagnostics never touches user data.
 //
 // Note: the engine already recovers from a poisoned Mutex on the render path
 // (`render_lock.lock().unwrap_or_else(|e| e.into_inner())`), so a panic that
@@ -53,14 +55,46 @@ use core::fmt::Write as _;
 
 static INIT_HOOK: Once = Once::new();
 
-/// Directory next to the host executable — mirrors C# `AppContext.BaseDirectory`.
-/// For a cdylib loaded into the .NET process, `current_exe()` is `Glance.exe`,
-/// whose parent is the base directory where the C# `CrashLog` also writes.
-fn base_dir() -> std::path::PathBuf {
+/// Name of Glance's data subfolder — mirrors `Glance.Services.AppPaths.DataFolderName`.
+pub const DATA_DIR_NAME: &str = "GlanceData";
+
+/// Crash records subfolder, nested inside [`DATA_DIR_NAME`] — mirrors
+/// `Glance.Services.AppPaths.CrashFolderName`. Diagnostics are kept separate from the
+/// settings / view-state / bookmark files so the two can be wiped or searched independently.
+pub const CRASH_DIR_NAME: &str = "Crash";
+
+/// Directory holding everything Glance creates at runtime: `<BaseDirectory>/GlanceData`.
+///
+/// The records used to land directly in the executable's own folder, buried in the build
+/// output where they were hard to find and impossible to wipe in one go. One dedicated
+/// folder keeps them together with the C# `CrashLog` records and the managed data files.
+///
+/// For a cdylib loaded into the .NET process, `current_exe()` is `Glance.exe`, whose
+/// parent is the base directory the C# side derives its paths from.
+pub fn data_dir() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::env::temp_dir())
+        .and_then(|p| p.parent().map(|d| d.join(DATA_DIR_NAME)))
+        .unwrap_or_else(|| std::env::temp_dir().join(DATA_DIR_NAME))
+}
+
+/// Create the data folder if missing. Best-effort: a crash recorder must never turn a
+/// missing directory into a panic, and every caller already ignores write failures.
+pub fn ensure_data_dir() {
+    let _ = std::fs::create_dir_all(data_dir());
+}
+
+/// Folder holding every crash record: `<BaseDirectory>/GlanceData/Crash`.
+///
+/// Same best-effort contract as [`ensure_data_dir`]; `create_dir_all` also creates the
+/// parent `GlanceData`, so this doubles as a data-dir ensure.
+pub fn crash_dir() -> std::path::PathBuf {
+    data_dir().join(CRASH_DIR_NAME)
+}
+
+/// Create the crash subfolder if missing, along with its parent data folder.
+pub fn ensure_crash_dir() {
+    let _ = std::fs::create_dir_all(crash_dir());
 }
 
 fn timestamp() -> String {
@@ -72,7 +106,8 @@ fn timestamp() -> String {
 }
 
 fn write_panic_log(msg: &str) {
-    let dir = base_dir();
+    let dir = crash_dir();
+    ensure_crash_dir();
     let ts = timestamp();
     // Per-incident log.
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -159,9 +194,9 @@ pub fn log_panic_occurred() {
 static AV_LOG_PATH: OnceLock<Vec<u16>> = OnceLock::new();
 static AV_RECURSE: AtomicBool = AtomicBool::new(false);
 
-/// Build `<BaseDirectory>/crash_native_av.log` as a NUL-terminated wide string.
+/// Build `<BaseDirectory>/GlanceData/Crash/crash_native_av.log` as a NUL-terminated wide string.
 fn av_log_path() -> Vec<u16> {
-    base_dir()
+    crash_dir()
         .join("crash_native_av.log")
         .as_os_str()
         .encode_wide()
@@ -436,6 +471,8 @@ fn sym_frame(bw: &mut BufWriter<'_>, proc: HANDLE, sym_ok: bool, addr: u64, idx:
 /// Install the vectored exception handler once. The log path is precomputed and
 /// stored outside the handler so the faulting context performs no allocation.
 fn install_av_logger() {
+    // Create the folder here (outside the handler) so the faulting context stays allocation-free.
+    ensure_crash_dir();
     let _ = AV_LOG_PATH.get_or_init(av_log_path);
     unsafe {
         // First = 1 inserts at the front so we always get first-chance logging.
@@ -482,8 +519,8 @@ mod tests {
         });
         assert_eq!(result, 42, "panic must be caught and fallback returned");
 
-        // The panic hook must have persisted the panic to disk next to the exe.
-        let dir = super::base_dir();
+        // The panic hook must have persisted the panic to disk in the crash folder.
+        let dir = super::crash_dir();
         let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
         let mut found_any = false;
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -535,7 +572,7 @@ mod tests {
         };
 
         // Clear any stale log so the asserted content is exactly what we wrote.
-        let dir = super::base_dir();
+        let dir = super::crash_dir();
         let path = dir.join("crash_native_av.log");
         let _ = std::fs::remove_file(&path);
 

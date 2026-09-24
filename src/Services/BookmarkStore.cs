@@ -9,7 +9,7 @@ namespace Glance.Services;
 
 /// <summary>
 /// Persistent store for user-defined bookmarks (per PDF document).
-/// Data is stored as JSON alongside the executable (portable, no AppData/System/C drive).
+/// Data is stored as JSON in the app's GlanceData subfolder (portable, no AppData/System/C drive).
 /// </summary>
 public sealed class BookmarkStore
 {
@@ -20,8 +20,8 @@ public sealed class BookmarkStore
 
     public BookmarkStore()
     {
-        string baseDir = AppContext.BaseDirectory;
-        _filePath = Path.Combine(baseDir, "bookmarks.json");
+        // 数据落在程序本体目录的 GlanceData 子目录（便携版硬约束：不写 C 盘 AppData / 系统 Temp）。
+        _filePath = AppPaths.BookmarksFilePath;
     }
 
     /// <summary>Load bookmarks for the given PDF path. Always returns a mutable list owned by the caller.</summary>

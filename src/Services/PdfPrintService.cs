@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32;
 using Windows.Foundation;
 using Windows.Graphics.Printing;
 using Windows.Graphics.Printing.OptionDetails;
@@ -118,6 +119,13 @@ public sealed class PdfPrintService : IDisposable
         if (!PrintManager.IsSupported())
             return false;
 
+        // 根因修复（打印崩溃）：PrintManager.IsSupported() 仅表示系统支持打印 API，不表示已安装打印机。
+        // 无打印机时点打印仍会触发 PrintTaskRequested，并在 deferral.Complete() 抛 COMException 使进程崩溃。
+        // 故在打开打印 UI 前主动检测已安装打印机；一台都没有则直接返回 false，由 Print_Click 弹出
+        // 「未找到打印机」提示（NoPrinterTitle/NoPrinterContent），根本不进入会崩的路径。
+        if (!HasAnyPrinter())
+            return false;
+
         _dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
 
         _printManager = PrintManagerInterop.GetForWindow(_hwnd);
@@ -162,6 +170,32 @@ public sealed class PdfPrintService : IDisposable
     }
 
     /// <summary>
+    /// 根因修复（打印崩溃）：PrintManager.IsSupported() 不表示已安装打印机。此方法读取后台打印程序的
+    /// 打印机注册表项（HKLM\SYSTEM\CurrentControlSet\Control\Print\Printers），统计已安装打印机数量
+    /// （含虚拟打印机如 Microsoft Print to PDF / OneNote / WPS PDF）。一台都没有则返回 false，使调用方
+    /// 走「未找到打印机」提示分支，避免进入 PrintTaskRequested 后在 deferral.Complete() 抛 COMException 崩溃。
+    ///
+    /// 不用 Windows.Devices.Enumeration.DeviceInformation 枚举：FindAllAsync 默认只返回「当前在位(present)」
+    /// 的设备，而打印机是后台打印程序注册的软件设备，不在 PnP 在位集合里，按安装类 GUID 查询会得到 0
+    /// （曾因此在有打印机的机器上误报「未找到打印机」）。注册表项才是"已安装打印机"的权威来源。
+    ///
+    /// 读取失败（如权限受限）时失败开放，返回 true 仍尝试打开打印 UI，避免误伤正常机器。
+    /// </summary>
+    private static bool HasAnyPrinter()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\Print\Printers");
+            return key != null && key.SubKeyCount > 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Create the PrintDocument and wire its events on the UI thread. Must be
     /// called before the print subsystem requests the source.
     /// </summary>
@@ -179,11 +213,14 @@ public sealed class PdfPrintService : IDisposable
     private void OnPrintTaskRequested(PrintManager sender, PrintTaskRequestedEventArgs args)
     {
         var deferral = args.Request.GetDeferral();
+        // 仅当 PrintTask 真正创建成功才完成 deferral（见 finally 注释）。
+        bool taskCreated = false;
         try
         {
             _printTaskRequested = true;
             string taskTitle = string.IsNullOrWhiteSpace(_documentTitle) ? "Glance" : _documentTitle;
             var task = args.Request.CreatePrintTask(taskTitle, OnPrintTaskSourceRequested);
+            taskCreated = true;
             task.Completed += OnPrintTaskCompleted;
 
             // Initial color mode (read from the system Color option so the first
@@ -256,10 +293,20 @@ public sealed class PdfPrintService : IDisposable
             // the driver automatically; we only surface it in the panel.
             details.DisplayedOptions.Add(StandardPrintTaskOptions.Duplex);
         }
-        catch { }
+        catch
+        {
+            // 仅当任务未创建成功时才把结果置 false（任务已创建则交由 OnPrintTaskCompleted 判定成败，
+            // 避免配置阶段的偶发异常误报失败）。同时也避免调用方 await _tcs.Task 永久挂起。
+            if (!taskCreated)
+                _tcs?.TrySetResult(false);
+        }
         finally
         {
-            deferral.Complete();
+            // 根因修复（打印崩溃）：仅当 PrintTask 创建成功才完成 deferral。无打印机 / 创建失败时
+            // CreatePrintTask 会抛异常（被上方 catch 吞掉），此时不存在可完成的任务；若仍调用
+            // Complete() 会抛 COMException 使进程崩溃。任务已创建则正常完成（即使后续配置抛错也不影响）。
+            if (taskCreated)
+                deferral.Complete();
         }
     }
 
