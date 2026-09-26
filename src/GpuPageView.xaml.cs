@@ -558,6 +558,17 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         Viewer.ChangeView(newX, newY, target, disableAnimation: true);
     }
 
+    /// <summary>以【当前目标缩放】为基准步进（累积语义）：连点 / 连按可精确落到
+    /// base + n×delta，而不是每次都基于尚未落地的中间插值态（那样连点会看起来"没反应"）。
+    /// 返回夹取到 [MinZoomPercent, MaxZoomPercent] 后的最终目标。</summary>
+    public double ZoomStepPercent(double deltaPercent)
+    {
+        double basePercent = _isSmoothZooming ? _zoomAnimTargetFactor * 100.0 : CurrentZoom * 100.0;
+        double target = Math.Clamp(basePercent + deltaPercent, MinZoomPercent, MaxZoomPercent);
+        StartSmoothZoom(target, null);
+        return target;
+    }
+
     /// <summary>
     /// 按给定 偏移/缩放 更新【可见矩形四边】(文档 DIP)与光栅缩放。内部自取 _lock。
     /// 动画/滚轮/拖拽等自管视图的帧循环统一走这里，保证横向布局下水平可见范围同样实时准确

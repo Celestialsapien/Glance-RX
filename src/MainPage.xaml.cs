@@ -16,6 +16,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Markup;
 using Windows.Storage;
 using Windows.Data.Pdf;
 using Windows.Storage.Pickers;
@@ -178,7 +179,19 @@ public sealed partial class MainPage : Page
     private bool _isSyncScrolling = false;
     private double _lastSyncValue = 0;
 
-    private DispatcherTimer? _saveToastTimer;   // 保存结果小弹窗自动消失计时器
+    // 保存/书签提示胶囊：微信式堆叠（见 ShowSaveToast / SaveToastStack）。
+    private sealed class SaveToastItem
+    {
+        public Border Capsule = null!;
+        public TranslateTransform Transform = null!;
+        public DispatcherTimer Timer = null!;
+        public Storyboard? SlideSb;   // 进行中的位移动画，重定位前先停，避免同属性双动画冲突
+        public int Pos;               // 距底边格数：0=最底(最新)，越大越靠上(越旧)
+    }
+    private readonly List<SaveToastItem> _saveToasts = new();
+    private const int SaveToastMax = 5;          // 栈深上限：超出即强制淡出最旧一枚
+    private const double SaveToastSlot = 50;     // 单枚占位 = 高42 + 间隙8
+    private const double SaveToastSlideMs = 160; // 上移/补位滑动时长
     private IntPtr _hWnd;                          // 主窗口句柄（画笔圆环作用域使用）
     private const int IDC_ARROW = 32512;        // 系统箭头（= OCR_NORMAL），用于退出时兜底恢复
     private const uint SPI_SETCURSORS = 0x0057;  // SystemParametersInfo 命令：重载系统光标方案（恢复原生箭头）
@@ -227,6 +240,24 @@ public sealed partial class MainPage : Page
         // 抓不到，设置面板里的 Tab 由 SettingsFlyout_KeyDown（XAML 挂在 Flyout 内容根）单独拦截，
         // 其可聚焦控件另设 IsTabStop=false（见 MainPage.xaml）。
         this.AddHandler(KeyDownEvent, new KeyEventHandler(OnKeyDownSuppressTab), true);
+
+        // 主键盘 = / - ：WinUI XAML 枚举解析不支持 OemPlus/OemMinus 字符串（WMC0055），
+        // 故在此用 Windows.System.VirtualKey 枚举添加，与 XAML 中 Add/Subtract（小键盘 +/-）互补。
+        var zoomInAccel = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
+        {
+            Key = (Windows.System.VirtualKey)0xBB, // 主键盘 =（OemPlus 枚举名在本 SDK 投影中缺失，用键码 0xBB）
+            Modifiers = Windows.System.VirtualKeyModifiers.Control
+        };
+        zoomInAccel.Invoked += ZoomIn_Invoked;
+        this.KeyboardAccelerators.Add(zoomInAccel);
+
+        var zoomOutAccel = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
+        {
+            Key = (Windows.System.VirtualKey)0xBD, // 主键盘 -（OemMinus 枚举名在本 SDK 投影中缺失，用键码 0xBD）
+            Modifiers = Windows.System.VirtualKeyModifiers.Control
+        };
+        zoomOutAccel.Invoked += ZoomOut_Invoked;
+        this.KeyboardAccelerators.Add(zoomOutAccel);
 
         PageListView.ItemsSource = _pages;
         BookmarkListView.ItemsSource = _bookmarks;
@@ -774,6 +805,12 @@ public sealed partial class MainPage : Page
 
     private async void OpenPdf_Click(object sender, RoutedEventArgs e)
     {
+        await OpenPdfAsync();
+    }
+
+    /// <summary>打开 PDF 文件选择器并加载。Ctrl+O 与欢迎页「打开」按钮共用此逻辑。</summary>
+    private async Task OpenPdfAsync()
+    {
         var picker = new FileOpenPicker();
         
         // WinUI 3 desktop apps need to associate the picker with the window handle (HWND)
@@ -812,6 +849,13 @@ public sealed partial class MainPage : Page
                 SidebarSplitView.Visibility = Visibility.Collapsed;
             }
         }
+    }
+
+    /// <summary>Ctrl+O：打开文件（与欢迎页「打开」按钮等效，不限定欢迎页）。</summary>
+    private void Open_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        _ = OpenPdfAsync();
     }
 
     private async void SavePdf_Click(object sender, RoutedEventArgs e)
@@ -1923,6 +1967,19 @@ public sealed partial class MainPage : Page
         }
     }
 
+    // 书签行跳转走【容器级点击】（与 PageListView_ItemClick 同源）：
+    // 命中目标是 ListViewItem 容器，整行任何位置（含空白区）都算，不依赖子元素的背景命中。
+    // 早先挂在行内 Grid 的 Tapped 上，只有点到文字/按钮才冒泡到处理函数，点空白区直接穿透、
+    // 而本列表又没有 IsItemClickEnabled 兜底 ⇒ "点了书签卡在原地"。
+    private void BookmarkListView_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is BookmarkViewModel bm)
+        {
+            if (bm.PageIndex != _currentPageIndex)
+                NavigateToPage(bm.PageIndex);
+        }
+    }
+
     // ---------- Bookmarks ----------
 
     // 侧边栏头部金色五角星按钮：静默把当前页加为书签。
@@ -1932,14 +1989,19 @@ public sealed partial class MainPage : Page
     {
         if (_totalPages == 0 || _currentPageIndex < 0 || _currentPageIndex >= _totalPages) return;
         if (_bookmarks.Any(b => b.PageIndex == _currentPageIndex)) return;
-        _bookmarks.Add(new BookmarkViewModel
-        {
-            PageIndex = _currentPageIndex,
-            DisplayName = string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), _currentPageIndex + 1),
-        });
+        InsertBookmarkSorted(_currentPageIndex,
+            string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), _currentPageIndex + 1));
         SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
         ShowSaveToast(Glance.Services.LocalizationService.Get("BookmarkAddedToast"), ToastIconKind.Bookmark);
+    }
+
+    /// <summary>Ctrl+D：收藏当前页书签（与侧边栏顶部收藏按钮等效，同样弹收藏气泡）。
+    /// 有效性守卫（无文档 / 页索引越界 / 已有书签静默早退）由 AddBookmark_Click 自带。</summary>
+    private void AddBookmark_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        AddBookmark_Click(this, new RoutedEventArgs());
+        args.Handled = true;
     }
 
     // 侧栏缩略图行内那颗星：按下标 Handled，阻止 ListViewItem 进入按下态并捕获指针。
@@ -1973,11 +2035,8 @@ public sealed partial class MainPage : Page
         }
         else
         {
-            _bookmarks.Add(new BookmarkViewModel
-            {
-                PageIndex = idx,
-                DisplayName = string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), idx + 1),
-            });
+            InsertBookmarkSorted(idx,
+                string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), idx + 1));
         }
         SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
@@ -1996,13 +2055,25 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void BookmarkItem_Tapped(object sender, TappedRoutedEventArgs e)
+    // 书签列表恒按 PageIndex 升序维护：新加入的插到它自己的页码位置上，而不是追加到尾部。
+    // 依据：一页最多一个书签（重复守卫在 AddBookmark_Click / TogglePageBookmark）
+    //       ⇒ PageIndex 是全集上的全序，不存在并列，插入位唯一；
+    //       加载路径 LoadBookmarksAsync 同样是 OrderBy(PageIndex)，两处语义必须一致，
+    //       否则出现"刚打开是页码序、加了书签后尾部乱掉"。
+    //       UI 显示顺序 == _bookmarks 顺序（全项目无 CollectionViewSource/SortDescriptor）。
+    // 线性找插入位：书签量级几十个，且天然稳定（新元素夹到首个更大页码之前）。
+    private void InsertBookmarkSorted(int pageIndex, string displayName)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is BookmarkViewModel bm)
+        int at = _bookmarks.Count;
+        for (int i = 0; i < _bookmarks.Count; i++)
         {
-            if (bm.PageIndex != _currentPageIndex)
-                NavigateToPage(bm.PageIndex);
+            if (_bookmarks[i].PageIndex > pageIndex)
+            {
+                at = i;
+                break;
+            }
         }
+        _bookmarks.Insert(at, new BookmarkViewModel { PageIndex = pageIndex, DisplayName = displayName });
     }
 
     private void BookmarkEdit_Click(object sender, RoutedEventArgs e)
@@ -2352,14 +2423,11 @@ public sealed partial class MainPage : Page
 
     // ── 保存/另存为结果小弹窗（左下角，自动消失）──────────────────────────────
     // 保存/另存为成功或失败时弹出一枚角落小弹窗，2s 自动消失、点击即消失。
-    // 关闭窗口触发的保存由调用方传 notify:false 跳过（窗口即将关闭，无需提示）。
-    // 显隐走 Storyboard Opacity 动画：淡入 50ms（保存反馈要快速出现）、淡出 0.15s，
-    // 与缩放胶囊同一条 DWM 合成路径。
-    // ⚠ 09-24：为区分连续触发试过「A/B 双槽位交替」两次（排队切换 + 同时交叉），
-    // 用户实测判定不理想（且出现"切换后关不掉"），已【整份回退】为单枚 + 延长存留。
-    // 连续触发目前就是"延长同一个计时器 + 静默换字"，没有区分动画 —— 这是有意为之的基线。
-    // A/B 双槽位的所有代码（ToastSlot / _toastSlots / FadeOutToast / LightToast /
-    // ScheduleToastForceHide）已一并删除，XAML 侧也恢复成单枚，勿复活。
+    // 保存/书签提示胶囊：微信式堆叠（见 SaveToastStack + ShowSaveToast）。
+    // 每枚胶囊独立计时 2s（自创建起算，故最旧先到期），到时淡出；点击即消；
+    // 栈深上限 SaveToastMax(=5) 触发时强制淡出最旧一枚，防止无限堆积。
+    // 显隐与位移均走显式 Storyboard（不被 SPI_GETCLIENTAREAANIMATION 抑制），
+    // 与缩放胶囊同一条 DWM 合成路径。09-24 的「A/B 双槽位交替」方案已整体回退，本实现不走双槽位。
     // 左下角胶囊的图标档位。原先只有 bool success（✓/✗），加书签反馈需要第三种形态
     // （与侧边栏顶部黄星同符号 E735、同色 #F2C200），bool 无法表达，故升为枚举。
     private enum ToastIconKind
@@ -2372,19 +2440,92 @@ public sealed partial class MainPage : Page
 
     private void ShowSaveToast(string message, ToastIconKind kind)
     {
-        if (SaveToastBorder == null || SaveToastText == null || SaveToastIcon == null) return;
+        var capsule = BuildToastCapsule(message, kind);
+        var tt = new TranslateTransform { Y = SaveToastSlot }; // 入场前先落在标准位置下方一格
+        capsule.RenderTransform = tt;
+        capsule.Opacity = 0;
+        SaveToastStack.Children.Add(capsule);
 
-        SaveToastText.Text = message;
-        // CheckMark=\uE73E（成功）/ Error=\uE783（失败）/ StarFilled=\uE735（书签）/ Delete=\uE74D（移除）
-        SaveToastIcon.Glyph = kind switch
+        var item = new SaveToastItem { Capsule = capsule, Transform = tt, Pos = 0 };
+        capsule.Tapped += (s, e) => DismissToast(item, animate: true);
+
+        // 旧胶囊整体上移一格（Pos+1 → 更靠上）
+        foreach (var existing in _saveToasts)
+        {
+            SlideToastTo(existing, existing.Pos + 1);
+        }
+        _saveToasts.Add(item);
+
+        // 新胶囊入场：淡入(50ms) + 从下方一格滑入标准位置(160ms)
+        var enter = new Storyboard();
+        var op = new DoubleAnimation { From = 0, To = 1, Duration = TimeSpan.FromMilliseconds(50) };
+        Storyboard.SetTarget(op, capsule);
+        Storyboard.SetTargetProperty(op, "Opacity");
+        var tr = new DoubleAnimation
+        {
+            From = SaveToastSlot,
+            To = 0,
+            Duration = TimeSpan.FromMilliseconds(SaveToastSlideMs),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+        Storyboard.SetTarget(tr, tt);
+        Storyboard.SetTargetProperty(tr, "Y");
+        enter.Children.Add(op);
+        enter.Children.Add(tr);
+        enter.Begin();
+
+        // 独立计时：2s 后自动淡出（自创建起算 → 最旧先到期）
+        item.Timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        var captured = item;
+        item.Timer.Tick += (s, e) => DismissToast(captured, animate: true);
+        item.Timer.Start();
+
+        // 栈深超限：强制淡出最旧（最顶）一枚
+        if (_saveToasts.Count > SaveToastMax)
+        {
+            DismissToast(_saveToasts[0], animate: true);
+        }
+    }
+
+    /// <summary>构造一枚与旧单枚胶囊视觉完全一致的提示胶囊（含图标档位 + 主题色）。
+    /// 背景/边框必须用 XamlReader 加载，使 {ThemeResource} 按元素实际主题解析：
+    /// 若用 Application.Current.Resources[key] 只会解析到 App.RequestedTheme 档，
+    /// 当 App 用 Default 跟随系统时取到的永远是 Light 档 → 深色模式下浅底+浅字不可见。</summary>
+    private Border BuildToastCapsule(string message, ToastIconKind kind)
+    {
+        bool dark = this.ActualTheme == ElementTheme.Dark;
+
+        const string xaml = @"
+<Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        x:Name='CapsuleBorder'
+        Background='{ThemeResource FlyoutPresenterBackground}'
+        BorderBrush='{ThemeResource CardStrokeColorDefaultBrush}'
+        BorderThickness='1'
+        CornerRadius='20' Padding='0,4,0,4' Height='42'
+        VerticalAlignment='Bottom' HorizontalAlignment='Left'>
+    <Grid x:Name='CapsuleInner' ColumnDefinitions='40,*' Height='32'>
+        <FontIcon x:Name='CapsuleIcon' FontFamily='Segoe Fluent Icons,Segoe MDL2 Assets' FontSize='18'
+                  HorizontalAlignment='Center' VerticalAlignment='Center' Margin='0,-1,0,-1'/>
+        <TextBlock x:Name='CapsuleText' FontSize='16' Grid.Column='1'
+                   HorizontalAlignment='Left' VerticalAlignment='Center' Margin='2,-1,28,-1'/>
+    </Grid>
+</Border>";
+
+        var capsule = (Border)XamlReader.Load(xaml);
+        // 不依赖 FindName（XamlReader 的 namescope 在 WinUI3 下不可靠），直接按树遍历取子元素。
+        var grid = (Grid)capsule.Child!;
+        var icon = (FontIcon)grid.Children[0]!;
+        var text = (TextBlock)grid.Children[1]!;
+
+        icon.Glyph = kind switch
         {
             ToastIconKind.Error => "\uE783",
             ToastIconKind.Bookmark => "\uE735",
             ToastIconKind.Remove => "\uE74D",
             _ => "\uE73E",
         };
-        bool dark = this.ActualTheme == ElementTheme.Dark;
-        SaveToastIcon.Foreground = new SolidColorBrush(kind switch
+        icon.Foreground = new SolidColorBrush(kind switch
         {
             ToastIconKind.Error => dark
                 ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x6B, 0x6B)
@@ -2398,35 +2539,62 @@ public sealed partial class MainPage : Page
                 : Windows.UI.Color.FromArgb(0xFF, 0x10, 0x7C, 0x10),
         });
 
-        SaveToastShowAnim?.Begin();
-        SaveToastBorder.IsHitTestVisible = true;
+        text.Text = message;
 
-        if (_saveToastTimer == null)
-        {
-            _saveToastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            _saveToastTimer.Tick += (s, e) =>
-            {
-                _saveToastTimer.Stop();
-                if (SaveToastBorder != null)
-                {
-                    SaveToastHideAnim?.Begin();
-                    SaveToastBorder.IsHitTestVisible = false;
-                }
-            };
-        }
-        _saveToastTimer.Stop();
-        _saveToastTimer.Start();
+        ElevationShadow.SetIsEnabled(capsule, true);
+        ElevationShadow.SetElevation(capsule, 18);
+        return capsule;
     }
 
-    private void SaveToastBorder_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+    /// <summary>将胶囊平滑移动到目标格位（Pos），重定位前先停掉进行中的同属性位移动画。</summary>
+    private void SlideToastTo(SaveToastItem item, int newPos)
     {
-        _saveToastTimer?.Stop();
-        if (SaveToastBorder != null)
+        item.Pos = newPos;
+        var to = -newPos * SaveToastSlot;
+        item.SlideSb?.Stop();
+        var sb = new Storyboard();
+        var da = new DoubleAnimation
         {
-            SaveToastHideAnim?.Begin();
-            SaveToastBorder.IsHitTestVisible = false;
+            From = item.Transform.Y,
+            To = to,
+            Duration = TimeSpan.FromMilliseconds(SaveToastSlideMs),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+        Storyboard.SetTarget(da, item.Transform);
+        Storyboard.SetTargetProperty(da, "Y");
+        sb.Children.Add(da);
+        item.SlideSb = sb;
+        sb.Begin();
+    }
+
+    /// <summary>移除一枚胶囊：停计时器 → 其余胶囊下移补位 → 淡出后从视觉树摘除。</summary>
+    private void DismissToast(SaveToastItem item, bool animate)
+    {
+        item.Timer.Stop();
+        if (!_saveToasts.Remove(item)) return;
+
+        // 位于被移除者【上方】的更旧项（Pos 更大）需下移一格补位
+        foreach (var other in _saveToasts)
+        {
+            if (other.Pos > item.Pos) SlideToastTo(other, other.Pos - 1);
+        }
+
+        if (animate)
+        {
+            var fade = new Storyboard();
+            var op = new DoubleAnimation { From = 1, To = 0, Duration = TimeSpan.FromMilliseconds(150) };
+            Storyboard.SetTarget(op, item.Capsule);
+            Storyboard.SetTargetProperty(op, "Opacity");
+            fade.Children.Add(op);
+            fade.Completed += (s, e) => { SaveToastStack.Children.Remove(item.Capsule); };
+            fade.Begin();
+        }
+        else
+        {
+            SaveToastStack.Children.Remove(item.Capsule);
         }
     }
+
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetCursorPos(out POINT lpPoint);
 
@@ -2521,7 +2689,7 @@ public sealed partial class MainPage : Page
             return;
         }
         // 用实时缩放(Viewer.ZoomFactor)作基准，避免动画期间 _currentZoomPercent 滞后导致连点只缩放一次。
-        ApplyZoomPercent(GpuViewer.ZoomPercent - ZoomButtonStep);
+        ZoomStepOut();
     }
 
     private void ZoomIn_Click(object sender, RoutedEventArgs e)
@@ -2531,7 +2699,44 @@ public sealed partial class MainPage : Page
             ZoomPresetFlyout.Hide();
             return;
         }
-        ApplyZoomPercent(GpuViewer.ZoomPercent + ZoomButtonStep);
+        ZoomStepIn();
+    }
+
+    /// <summary>缩小一步（与缩放胶囊 - 按钮等效）：以实时缩放(Viewer.ZoomPercent)为基准步进，
+    /// 经 SetZoomPercent 内部 Math.Clamp 自动夹到 [MinZoomPercent, MaxZoomPercent]。</summary>
+    private void ZoomStepOut()
+    {
+        if (GpuViewer == null || _totalPages <= 0) return;
+        GpuViewer.ZoomStepPercent(-ZoomButtonStep);
+    }
+
+    /// <summary>放大一步（与缩放胶囊 + 按钮等效）。</summary>
+    private void ZoomStepIn()
+    {
+        if (GpuViewer == null || _totalPages <= 0) return;
+        GpuViewer.ZoomStepPercent(ZoomButtonStep);
+    }
+
+    /// <summary>Ctrl+= / Ctrl+小键盘+：放大一步（等效 + 按钮）。</summary>
+    private void ZoomIn_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        ZoomStepIn();
+        args.Handled = true;
+    }
+
+    /// <summary>Ctrl+- / Ctrl+小键盘-：缩小一步（等效 - 按钮）。</summary>
+    private void ZoomOut_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        ZoomStepOut();
+        args.Handled = true;
+    }
+
+    /// <summary>Ctrl+0（主键盘 / 小键盘）：文件原始大小 = 100%。超限时由 clamp 自动取边界。</summary>
+    private void ZoomReset_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (GpuViewer != null && _totalPages > 0)
+            ApplyZoomPercent(100);
+        args.Handled = true;
     }
 
     private void ZoomPreset_Click(object sender, RoutedEventArgs e)

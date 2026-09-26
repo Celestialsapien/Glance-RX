@@ -122,6 +122,13 @@
         <KeyboardAccelerator Key="Y" Modifiers="Control" Invoked="Redo_Invoked"/>
         <KeyboardAccelerator Key="S" Modifiers="Control" Invoked="Save_Invoked"/>
         <KeyboardAccelerator Key="P" Modifiers="Control" Invoked="Print_Invoked"/>
+        <KeyboardAccelerator Key="O" Modifiers="Control" Invoked="Open_Invoked"/>
+        <KeyboardAccelerator Key="D" Modifiers="Control" Invoked="AddBookmark_Invoked"/>
+        <!-- 缩放：Ctrl+= / Ctrl+- 与缩放胶囊 +/- 按钮等效；Ctrl+0 = 文件原始大小(100%)。主键盘与小键盘双绑定。 -->
+        <KeyboardAccelerator Key="Add" Modifiers="Control" Invoked="ZoomIn_Invoked"/>
+        <KeyboardAccelerator Key="Subtract" Modifiers="Control" Invoked="ZoomOut_Invoked"/>
+        <KeyboardAccelerator Key="Number0" Modifiers="Control" Invoked="ZoomReset_Invoked"/>
+        <KeyboardAccelerator Key="NumberPad0" Modifiers="Control" Invoked="ZoomReset_Invoked"/>
         <!-- 阅读区键盘导航（与焦点无关，走输入管理器全局分发） -->
         <KeyboardAccelerator Key="Up" Invoked="Nav_Invoked"/>
         <KeyboardAccelerator Key="Down" Invoked="Nav_Invoked"/>
@@ -505,10 +512,24 @@
                     </ListView>
 
                     <!-- Bookmarks -->
-                    <ListView Grid.Row="2" x:Name="BookmarkListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False">
+                    <!-- ⚠ 点击必须走【容器级】IsItemClickEnabled/ItemClick，与缩略图(PageListView)、
+                         大纲(OutlineListView) 完全同源；这里早先改成"行内 Grid 挂 Tapped"是错的：
+                         ① 行 Grid 没有 Background（本文件那个行内星注释里记录过的规则：
+                            无背景则空白处【不参与命中测试】）→ 点在行的空白区（左右 4px / 上下 6px
+                            padding、以及文字与按钮之间的空档）根本命中不到这一层；
+                         ② 命中空白区的指针会穿透到 ListViewItem，而本列表是三个列表里
+                            唯一没有 IsItemClickEnabled 的 → 容器也没有兜底 ⇒ 点了毫无反应 = "卡在原地"。
+                         容器级点击的关键点：ListViewItem 容器自身就是命中目标，与子元素的背景无关
+                         （缩略图/大纲行模板同样是无背景 Grid，但它们能点，正是因为走的是这一条路）。 -->
+                    <ListView Grid.Row="2" x:Name="BookmarkListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False"
+                              IsItemClickEnabled="True" ItemClick="BookmarkListView_ItemClick">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="local:BookmarkViewModel">
-                                <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch" Tapped="BookmarkItem_Tapped">
+                                <!-- ⚠ 这里【不再】挂 Tapped：跳转改由 ListView 容器级 ItemClick
+                                     (BookmarkListView_ItemClick) 承担，见上方 ListView 的注释。
+                                     若两处都留，一次点击会先冒泡到本 Grid 的 Tapped、再被容器转成
+                                     ItemClick，导航做两遍（幂等但多余）。 -->
+                                <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch">
                                     <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"/>
                                     <!-- ⚠ 文字"贴左上角"的根因在模板，不在本行的排版参数：
                                          WinUI3 的 DefaultTextBoxStyle 内容宿主 ScrollViewer(x:Name="ContentElement")
@@ -746,52 +767,18 @@
                     </Border>
                 </Grid>
 
-                <!-- Floating bottom-left save toast pill: shares the same parent
-                     (ViewerContainerGrid) with the bottom-right zoom pill so both
-                     capsules resolve their Margin against an identical layout frame.
-                     Height="42" (pixel-locked) matches the zoom pill AND the pen-options
-                     capsule; all three capsules render identical height with the same
-                     DWM composition path (Opacity-driven visibility).
-
-                     ⚠ 09-24 曾加过「A/B 双槽位交替」用来区分连续触发（两次都试过：排队切换 / 同时交叉，
-                     均被用户判定为"不理想 / 关不掉"），现已【整份回退】为单枚 + 延长存留。
-                     若日后重做，务必保留这里的原始单枚结构。 -->
-                <Grid x:Name="BottomSaveToastPill"
+                <!-- 保存/书签提示胶囊栈（微信式堆叠）：
+                     • 新动作在「标准位置」（左下角底边，Margin 12,10）生成新胶囊，旧胶囊整体上移一格；
+                     • 每枚胶囊各自独立计时 2s（从自身创建起算 → 最旧先到期），到时淡出；点击即消；
+                     • 栈深上限 SaveToastMax(=5) 触发时强制淡出最顶（最旧）一枚，防止无限堆积。
+                     定位完全由每枚胶囊的 TranslateTransform.Y(= -Pos×SaveToastSlot) 控制；
+                     容器是单格 Grid，不因新增子项而自动重排，故所有位移都能平滑 Storyboard 动画。
+                     注：09-24 的「A/B 双槽位交替」方案已整体回退，本实现不走双槽位。 -->
+                <Grid x:Name="SaveToastStack"
                       Grid.Column="0"
                       VerticalAlignment="Bottom" HorizontalAlignment="Left"
                       Margin="12,10"
-                      Canvas.ZIndex="2000">
-                    <Grid.Resources>
-                        <Storyboard x:Name="SaveToastShowAnim">
-                            <!-- 淡入 50ms：保存反馈要"出现得快"，比缩放胶囊(0.15s)更干脆 -->
-                            <DoubleAnimation Storyboard.TargetName="SaveToastBorder" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.05"/>
-                        </Storyboard>
-                        <Storyboard x:Name="SaveToastHideAnim">
-                            <DoubleAnimation Storyboard.TargetName="SaveToastBorder" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
-                        </Storyboard>
-                    </Grid.Resources>
-                    <Border x:Name="SaveToastBorder"
-                            Background="{ThemeResource FlyoutPresenterBackground}"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1"
-                            CornerRadius="20" Padding="0,4,0,4" Height="42"
-                            Opacity="0" IsHitTestVisible="False"
-                            local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18"
-                            Tapped="SaveToastBorder_Tapped">
-                        <!-- 内部 Grid 高度 = 42 - 2border - 4pad - 4pad = 32px，与缩放胶囊按钮高度完全一致。
-                             左列宽=40 = 2×圆角，图标居中 → 中心落在左半圆圆心(x=20)。
-                             文字 Margin(2,-1,28,-1)：
-                               • left=2  紧贴图标（左列40 - Glyph≈16 有剩余空间，2px gap 视觉正确）
-                               • right=28 文字右缘到边框 28px（8px body gap + 20px 右半圆留白，避免右半边太空）
-                               • top=-1, bottom=-1  中文字符行框偏高，轻微上移 1px 视觉纠偏 -->
-                        <Grid ColumnDefinitions="40,*" Height="32">
-                            <FontIcon x:Name="SaveToastIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE73E;" FontSize="18"
-                                      HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,-1"/>
-                            <TextBlock x:Name="SaveToastText" Text="已保存" FontSize="16"
-                                       Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="2,-1,28,-1"/>
-                        </Grid>
-                    </Border>
-                </Grid>
+                      Canvas.ZIndex="2000"/>
             </Grid>
         </SplitView>
 
