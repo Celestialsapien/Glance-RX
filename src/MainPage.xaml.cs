@@ -567,6 +567,9 @@ public sealed partial class MainPage : Page
         InitializeLocalization();
         UpdateTopToolbarMargin();
 
+        // 阅读模式按钮：接管原生视觉状态机（详见 Services/ToggleButtonVisualOverride.cs 注释）。
+        ToggleButtonVisualOverride.Attach(ReadModeButton);
+
         // 侧边栏滚动 → 补渲染滚入视口的缩略图（缓存窗口项滚入视口不触发 ContainerContentChanging）。
         AttachSidebarScrollRefill();
 
