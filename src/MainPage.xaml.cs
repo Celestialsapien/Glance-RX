@@ -356,11 +356,7 @@ public sealed partial class MainPage : Page
         {
             if (SidebarDropShadow != null) SidebarDropShadow.Visibility = Visibility.Visible;
             UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
-            AlignRowStars();           // 展开动画结束后用最终几何再对齐一次（见该方法注释）
         };
-        // 面板尺寸变化（Pane 展开动画、窗口缩放）时重算行内星的水平位置；
-        // 排到下一回合执行，确保本次布局已完成、ActualWidth/坐标变换都已有效。
-        ThumbnailSidebarPanel.SizeChanged += (s, e) => DispatcherQueue.TryEnqueue(AlignRowStars);
         // 整个侧边栏隐藏（如回到欢迎页）时，投影一并收起。
         SidebarSplitView.RegisterPropertyChangedCallback(UIElement.VisibilityProperty,
             (s, dp) =>
@@ -567,8 +563,18 @@ public sealed partial class MainPage : Page
         InitializeLocalization();
         UpdateTopToolbarMargin();
 
-        // 阅读模式按钮：接管原生视觉状态机（详见 Services/ToggleButtonVisualOverride.cs 注释）。
+        // 接管原生视觉状态机（详见 Services/ToggleButtonVisualOverride.cs 注释）：
+        // · 顶部工具栏「阅读模式」按钮
+        // · 侧边栏「缩略图 / 书签 / 大纲」三模式切换键 —— 互斥，共用 SidebarMode_Click + Tag，
+        //   切换由 ApplySidebarMode() 程序化改 IsChecked，接管器会把每次变化瞬间写成颜色
+        // · 顶部工具栏「拆分视图（打开/关闭右侧对比视图）」开关 SplitViewToggleButton
+        //   （默认 Visibility=Collapsed，加载 PDF 后设为可见；IsChecked 由 SplitViewToggle_Click /
+        //   CloseSecondPdf_Click 程序化变更，接管器订阅 IsCheckedProperty 回调，勾选态即 Obsidian 紫）
         ToggleButtonVisualOverride.Attach(ReadModeButton);
+        ToggleButtonVisualOverride.Attach(ModeThumbnailsButton);
+        ToggleButtonVisualOverride.Attach(ModeBookmarksButton);
+        ToggleButtonVisualOverride.Attach(ModeOutlineButton);
+        ToggleButtonVisualOverride.Attach(SplitViewToggleButton);
 
         // 侧边栏滚动 → 补渲染滚入视口的缩略图（缓存窗口项滚入视口不触发 ContainerContentChanging）。
         AttachSidebarScrollRefill();
@@ -4386,55 +4392,6 @@ public sealed partial class MainPage : Page
             ThumbnailSidebarPanel.Padding = new Thickness(p.Left, top, p.Right, p.Bottom);
     }
 
-    /// <summary>
-    /// 把缩略图行内的书签星水平对齐到侧边栏顶部那颗黄星的圆心（同一竖列）。
-    ///
-    /// 为什么必须"反推"而不能硬编码：顶部黄星按钮是"填满右侧空位"的（宽度 = 剩余空间），
-    /// 其左缘取决于三模式按钮的实测总宽（FontIcon 字体度量）；行内星又落在 ListViewItem
-    /// 默认内容内缩之后，该内缩值同样来自 WinUI 内置模板。两个值都不在本项目代码里，
-    /// 所以直接用坐标变换量真实几何：把"本星圆心"搬到"顶部星圆心"上即可，与任何默认度量解耦。
-    /// 每颗星在自己的 Loaded（即容器实化）时各自对齐一次 → 换文档/虚拟化回收都不需要额外同步；
-    /// 面板尺寸变化（Pane 展开动画、窗口缩放）时再由 AlignRowStars() 全量重算。
-    /// </summary>
-    private void AlignSingleRowStar(FrameworkElement star)
-    {
-        if (star.ActualWidth <= 0) return;
-        if (AddBookmarkButton == null || AddBookmarkButton.ActualWidth <= 0) return;
-
-        double targetCenterX = AddBookmarkButton.TransformToVisual(ThumbnailSidebarPanel)
-            .TransformPoint(new Point(AddBookmarkButton.ActualWidth / 2, 0)).X;
-        double currentCenterX = star.TransformToVisual(ThumbnailSidebarPanel)
-            .TransformPoint(new Point(star.ActualWidth / 2, 0)).X;
-
-        double delta = targetCenterX - currentCenterX;
-        if (Math.Abs(delta) < 0.25) return;
-
-        var m = star.Margin;
-        star.Margin = new Thickness(m.Left + delta, m.Top, m.Right, m.Bottom);
-    }
-
-    // 行内星的 Loaded：排到下一回合再对齐，确保本元素已完成布局（ActualWidth/坐标变换有效）。
-    private void RowStarButton_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement star)
-            star.DispatcherQueue.TryEnqueue(() => AlignSingleRowStar(star));
-    }
-
-    // 面板尺寸变化时对所有已实化的行容器重算一遍（已实化的容器不会重新触发 Loaded）。
-    private void AlignRowStars()
-    {
-        if (AddBookmarkButton == null || AddBookmarkButton.ActualWidth <= 0) return;
-        if (PageListView?.ItemsPanelRoot is not Panel panel) return;
-        foreach (var child in panel.Children)
-        {
-            if (child is ListViewItem item &&
-                item.ContentTemplateRoot is FrameworkElement root &&
-                root.FindName("RowStarButton") is FrameworkElement star)
-            {
-                AlignSingleRowStar(star);
-            }
-        }
-    }
 
     private string GetActiveColorHexWithOpacity()
     {

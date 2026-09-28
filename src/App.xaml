@@ -10,6 +10,275 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <!-- Other merged dictionaries here -->
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- 【Glance 色板】强调色 = Obsidian 紫；未选中底 = 跟随主题的半透明 ControlFill。
+
+                 ⚠ 覆盖层级（踩过坑，别改回去）：
+                     generic.xaml:548 是
+                        <StaticResource x:Key="ToggleButtonBackgroundChecked"
+                                        ResourceKey="AccentFillColorDefaultBrush" />
+                     这是【静态别名】，在 generic.xaml 自己的字典里就解析完了 —— 在下面重定义
+                     AccentFillColorDefaultBrush 渗不进 ToggleButton 的检查态。
+                     ⇒ 能换色的层级只有 ToggleButtonBackgroundChecked* / ToggleButtonBackground*，
+                       不是 AccentFillColor*。
+
+                 ⚠ 主题字典必须把接管器用到的【每一个键】都定义齐（09-27 第三轮教训）：
+                     ToggleButtonVisualOverride.Resource() 查不到时会退回顶层字典，而顶层里躺着
+                     generic 提升上来的【Light 档】值 ⇒ 深色模式下没定义的键全部拿到浅色值：
+                       Foreground 没定义 ⇒ 深色下图标是黑线（实测笔画 #060606）；
+                       ForegroundChecked 没定义 ⇒ 深色下亮紫底配白字（对比只有 ~3:1）。
+                     ⇒ 下面两个主题字典的键集合必须一一对应，新增档位时两边一起加。
+
+                 【未选中底为什么用半透明（09-27 第三轮，第二版 #393939 被否）】
+                     工具栏是半透明亚克力，会透出底下 PDF 的颜色 ⇒ 背景逐像素在变；
+                     普通 Button 的底 = ControlFillColor*（白 + alpha），跟着亚克力一起变；
+                     我们贴一块不透明 #393939 就永远是"贴片"，怎么调都和旁边对不上。
+                     ⇒ 深色未选中三档直接引用 generic 深色的 ControlFillColor{Default,Secondary,Tertiary}
+                       （#0FFFFFFF / #15FFFFFF / #08FFFFFF），与普通 Button 完全同源。
+                     浅色工具栏目前不透明（#FDFDFD 实测），纯白三档用户已验收，保持不动。
+
+                 【主题字典的键】WinUI 顶层 ThemeDictionaries 只有 Default / Light / HighContrast，
+                   没有 "Dark"（暗色值在 Default 里）。这里同样只写 Default + Light。 -->
+
+            <ResourceDictionary.ThemeDictionaries>
+
+                <!-- ══ 深色（WinUI 的 "Default" 档，不是 "Dark"）══ -->
+                <ResourceDictionary x:Key="Default">
+                    <Color x:Key="GlanceAccent">#A882FF</Color>
+
+                    <!-- 欢迎页"打开文件"按钮专用画刷（第 12 轮）。
+                         ⚠ 第 11 轮在主题字典覆盖 generic 的 AccentButtonBackground* 键【无效】：按钮仍是系统蓝。
+                           根因 = XamlControlsResources 内部的 {ThemeResource AccentButtonBackground*} 只在 generic
+                           自己的字典链解析，不回查 App 主题字典（与 AccentFillColor* 渗不进同族陷阱）。
+                         ⇒ 正解 = App 自有 Style（GlanceAccentButtonStyle，见 ThemeDictionaries 之后）+ 模板，
+                           模板动画只引用下面三支画刷。App 引 generic 的键方向正常（工具栏三档半透白即证据）。 -->
+                    <SolidColorBrush x:Key="GlanceAccentBrush" Color="{ThemeResource GlanceAccent}" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+
+                    <!-- 未选中：generic 深色档同源的三档半透明白，跟亚克力一起走（第 8 轮透明化已回退） -->
+                    <SolidColorBrush x:Key="ToggleButtonBackground"
+                                     Color="{ThemeResource ControlFillColorDefault}" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver"
+                                     Color="{ThemeResource ControlFillColorSecondary}" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
+                                     Color="{ThemeResource ControlFillColorTertiary}" />
+
+                    <!-- 未选中前景：TextFillColorPrimary 深色 = #FFFFFF（黑线问题的修复点） -->
+                    <SolidColorBrush x:Key="ToggleButtonForeground"
+                                     Color="{ThemeResource TextFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundPointerOver"
+                                     Color="{ThemeResource TextFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundPressed"
+                                     Color="{ThemeResource TextFillColorSecondary}" />
+
+                    <!-- 未选中边框：深色档。原生 9%/7% 白渐变在暗底上偏白（用户 09-28 反馈"边框偏白，要再黑一点"），
+                         改回 subdued 的均匀细描边 4~7% 白（第 6 轮"深色还好"档位），比原生更黑、不再发亮。
+                         浅色档仍照抄原生（带翻转）。 -->
+                    <SolidColorBrush x:Key="ToggleButtonBorderBrush" Color="#0AFFFFFF" />
+                    <SolidColorBrush x:Key="ToggleButtonBorderBrushPointerOver" Color="#0EFFFFFF" />
+                    <SolidColorBrush x:Key="ToggleButtonBorderBrushPressed" Color="#12FFFFFF" />
+
+                    <!-- 已选中前景：TextOnAccentFillColorPrimary 深色 = #000000，黑字压亮紫 7.3:1
+                         （之前漏定义，深色拿到 Light 档的白字，对比掉到 ~3:1） -->
+                    <SolidColorBrush x:Key="ToggleButtonForegroundChecked"
+                                     Color="{ThemeResource TextOnAccentFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver"
+                                     Color="{ThemeResource TextOnAccentFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed"
+                                     Color="{ThemeResource TextOnAccentFillColorSecondary}" />
+
+                    <!-- 已选中边框：照抄原生 AccentControlElevationBorderBrush(generic:2158，深色档无翻转)。
+                         顶 OnAccentSecondary / 底 OnAccentDefault，与原生强调按钮一致。Pressed 透明。 -->
+                    <LinearGradientBrush x:Key="ToggleButtonBorderBrushChecked" MappingMode="Absolute" StartPoint="0,0" EndPoint="0,3">
+                        <LinearGradientBrush.GradientStops>
+                            <GradientStop Offset="0.33" Color="{ThemeResource ControlStrokeColorOnAccentSecondary}" />
+                            <GradientStop Offset="1.0" Color="{ThemeResource ControlStrokeColorOnAccentDefault}" />
+                        </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                    <LinearGradientBrush x:Key="ToggleButtonBorderBrushCheckedPointerOver" MappingMode="Absolute" StartPoint="0,0" EndPoint="0,3">
+                        <LinearGradientBrush.GradientStops>
+                            <GradientStop Offset="0.33" Color="{ThemeResource ControlStrokeColorOnAccentSecondary}" />
+                            <GradientStop Offset="1.0" Color="{ThemeResource ControlStrokeColorOnAccentDefault}" />
+                        </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="#00FFFFFF" />
+
+                    <!-- 已选中：Obsidian 紫。0.9 / 0.8 两档沿用 generic 的 AccentFill* 梯度 -->
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked"
+                                     Color="{ThemeResource GlanceAccent}" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver"
+                                     Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed"
+                                     Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+                </ResourceDictionary>
+
+                <!-- ══ 浅色 ══ -->
+                <ResourceDictionary x:Key="Light">
+                    <Color x:Key="GlanceAccent">#7852EE</Color>
+
+                    <!-- 欢迎页按钮专用画刷（与深色档同层级、同梯度；说明见深色档注释） -->
+                    <SolidColorBrush x:Key="GlanceAccentBrush" Color="{ThemeResource GlanceAccent}" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+
+                    <!-- 浅色中性底标定（09-27 截图实测）：侧栏面板 #F3F3F3 / 工具栏 #FDFDFD。
+                         纯白对齐同屏普通 Button，用户已验收；悬停/按下向灰压一/两档。 -->
+                    <Color x:Key="GlanceFillNeutral">#FFFFFF</Color>
+                    <Color x:Key="GlanceFillNeutralHover">#F6F6F6</Color>
+                    <Color x:Key="GlanceFillNeutralPressed">#ECECEC</Color>
+
+                    <SolidColorBrush x:Key="ToggleButtonBackground"
+                                     Color="{ThemeResource GlanceFillNeutral}" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver"
+                                     Color="{ThemeResource GlanceFillNeutralHover}" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
+                                     Color="{ThemeResource GlanceFillNeutralPressed}" />
+
+                    <!-- 前景/边框与深色字典同一段 markup —— ThemeResource 会按主题各自解析 -->
+                    <SolidColorBrush x:Key="ToggleButtonForeground"
+                                     Color="{ThemeResource TextFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundPointerOver"
+                                     Color="{ThemeResource TextFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundPressed"
+                                     Color="{ThemeResource TextFillColorSecondary}" />
+
+                    <!-- 未选中边框：照抄原生 ControlElevationBorderBrush(generic:7747，浅色档带 ScaleY=-1 翻转)
+                         ⇒ 顶 6% 黑 / 底 16% 黑，底部更重营造立体感（用户观察正确），且比统一 6% 更可见。 -->
+                    <LinearGradientBrush x:Key="ToggleButtonBorderBrush" MappingMode="Absolute" StartPoint="0,0" EndPoint="0,3">
+                        <LinearGradientBrush.RelativeTransform>
+                            <ScaleTransform ScaleY="-1" CenterY="0.5" />
+                        </LinearGradientBrush.RelativeTransform>
+                        <LinearGradientBrush.GradientStops>
+                            <GradientStop Offset="0.33" Color="{ThemeResource ControlStrokeColorSecondary}" />
+                            <GradientStop Offset="1.0" Color="{ThemeResource ControlStrokeColorDefault}" />
+                        </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                    <LinearGradientBrush x:Key="ToggleButtonBorderBrushPointerOver" MappingMode="Absolute" StartPoint="0,0" EndPoint="0,3">
+                        <LinearGradientBrush.RelativeTransform>
+                            <ScaleTransform ScaleY="-1" CenterY="0.5" />
+                        </LinearGradientBrush.RelativeTransform>
+                        <LinearGradientBrush.GradientStops>
+                            <GradientStop Offset="0.33" Color="{ThemeResource ControlStrokeColorSecondary}" />
+                            <GradientStop Offset="1.0" Color="{ThemeResource ControlStrokeColorDefault}" />
+                        </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="ToggleButtonBorderBrushPressed"
+                                     Color="{ThemeResource ControlStrokeColorDefault}" />
+
+                    <SolidColorBrush x:Key="ToggleButtonForegroundChecked"
+                                     Color="{ThemeResource TextOnAccentFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver"
+                                     Color="{ThemeResource TextOnAccentFillColorPrimary}" />
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed"
+                                     Color="{ThemeResource TextOnAccentFillColorSecondary}" />
+
+                    <!-- 已选中边框：照抄原生 AccentControlElevationBorderBrush(generic:2158 浅色档，带翻转)
+                         ⇒ 底 OnAccentSecondary(浅色 40% 黑) 更重、顶 OnAccentDefault(8% 白)，与原生强调按钮一致。 -->
+                    <LinearGradientBrush x:Key="ToggleButtonBorderBrushChecked" MappingMode="Absolute" StartPoint="0,0" EndPoint="0,3">
+                        <LinearGradientBrush.RelativeTransform>
+                            <ScaleTransform ScaleY="-1" CenterY="0.5" />
+                        </LinearGradientBrush.RelativeTransform>
+                        <LinearGradientBrush.GradientStops>
+                            <GradientStop Offset="0.33" Color="{ThemeResource ControlStrokeColorOnAccentSecondary}" />
+                            <GradientStop Offset="1.0" Color="{ThemeResource ControlStrokeColorOnAccentDefault}" />
+                        </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                    <LinearGradientBrush x:Key="ToggleButtonBorderBrushCheckedPointerOver" MappingMode="Absolute" StartPoint="0,0" EndPoint="0,3">
+                        <LinearGradientBrush.RelativeTransform>
+                            <ScaleTransform ScaleY="-1" CenterY="0.5" />
+                        </LinearGradientBrush.RelativeTransform>
+                        <LinearGradientBrush.GradientStops>
+                            <GradientStop Offset="0.33" Color="{ThemeResource ControlStrokeColorOnAccentSecondary}" />
+                            <GradientStop Offset="1.0" Color="{ThemeResource ControlStrokeColorOnAccentDefault}" />
+                        </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="#00FFFFFF" />
+
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked"
+                                     Color="{ThemeResource GlanceAccent}" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver"
+                                     Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed"
+                                     Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+                </ResourceDictionary>
+
+            </ResourceDictionary.ThemeDictionaries>
+
+            <!-- 欢迎页"打开文件"按钮专用强调样式（第 12 轮）。
+                 覆盖 generic 的 AccentButtonBackground* 主题键无效（XamlControlsResources 内部 ThemeResource
+                 不回查 App 主题字典，实测仍是系统蓝）⇒ 自有 Style + 模板，动画只引用上面两字典里的
+                 GlanceAccentBrush{,PointerOver,Pressed}；文字/边框引用 generic 的 TextOnAccent* /
+                 AccentControlElevationBorderBrush（App 引 generic 方向正常），立体边与工具栏 ToggleButton
+                 已选中态同源。模板骨架照抄 generic:8896-8956（AccentButtonStyle），仅换键。 -->
+            <Style x:Key="GlanceAccentButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+                <Setter Property="Foreground" Value="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                <Setter Property="Background" Value="{ThemeResource GlanceAccentBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource AccentControlElevationBorderBrush}" />
+                <Setter Property="CornerRadius" Value="{ThemeResource ControlCornerRadius}" />
+                <Setter Property="BackgroundSizing" Value="OuterBorderEdge" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <ContentPresenter x:Name="ContentPresenter" Background="{TemplateBinding Background}" BackgroundSizing="{TemplateBinding BackgroundSizing}" Foreground="{TemplateBinding Foreground}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" ContentTransitions="{TemplateBinding ContentTransitions}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" AutomationProperties.AccessibilityView="Raw">
+                                <ContentPresenter.BackgroundTransition>
+                                    <BrushTransition Duration="0:0:0.083" />
+                                </ContentPresenter.BackgroundTransition>
+
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="CommonStates">
+                                        <VisualState x:Name="Normal" />
+
+                                        <VisualState x:Name="PointerOver">
+                                            <Storyboard>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource GlanceAccentBrushPointerOver}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentControlElevationBorderBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                            </Storyboard>
+                                        </VisualState>
+
+                                        <VisualState x:Name="Pressed">
+                                            <Storyboard>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource GlanceAccentBrushPressed}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ControlFillColorTransparentBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource TextOnAccentFillColorSecondaryBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                            </Storyboard>
+                                        </VisualState>
+
+                                        <VisualState x:Name="Disabled">
+                                            <Storyboard>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDisabledBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ControlFillColorTransparentBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource TextOnAccentFillColorDisabledBrush}" />
+                                                </ObjectAnimationUsingKeyFrames>
+                                            </Storyboard>
+                                        </VisualState>
+
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                            </ContentPresenter>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
             <!-- Other app resources here -->
         </ResourceDictionary>
     </Application.Resources>

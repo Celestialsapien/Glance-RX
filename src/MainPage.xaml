@@ -12,14 +12,17 @@
     KeyboardAcceleratorPlacementMode="Hidden">
 
     <Page.Resources>
-        <!-- 阅读模式按钮专用样式：外观与 DefaultToggleButtonStyle（generic.xaml:27811-28013）完全逐行等价，
-             唯一的区别是【不带 VisualStateGroups / BackgroundTransition】——
+        <!-- 【共用】ToggleButton 视觉状态机接管样式 —— 已用于：顶部工具栏「阅读模式」按钮、
+             侧边栏「缩略图 / 书签 / 大纲」三模式切换键（共 4 颗）。
+             外观与 DefaultToggleButtonStyle（generic.xaml:27811-28013）完全逐行等价 ——
+             那 12 个 setter 与模板正文都逐字抄自基类（含 HorizontalAlignment=Left / VerticalAlignment=Center，
+             见 generic.xaml:27818-27819），唯一的区别是【不带 VisualStateGroups / BackgroundTransition】：
              原生 CommonStates 那套 Storyboard 直接不存在了，谁也抢不走模板根的四个视觉属性，
              颜色改由 Services/ToggleButtonVisualOverride.cs 独占写入（取值与状态表同源）。
              这里刻意【不用 BasedOn】而是把基类的 setter 逐条抄进来：派生样式能否覆盖基类 Template
              属于未记载行为，自包含样式没有这个假设，外观也不依赖基类任何一个 setter 还在不在。
              改这里前先对着 generic.xaml:27812-27825 核对一遍。 -->
-        <Style x:Key="ReadModeButtonStyle" TargetType="ToggleButton">
+        <Style x:Key="ToggleButtonNoStateMachineStyle" TargetType="ToggleButton">
             <Setter Property="Background" Value="{ThemeResource ToggleButtonBackground}" />
             <Setter Property="BackgroundSizing" Value="InnerBorderEdge" />
             <Setter Property="Foreground" Value="{ThemeResource ToggleButtonForeground}" />
@@ -244,7 +247,7 @@
                     <AppBarSeparator Margin="4,0"/>
 
                                         <!-- Annotation Mode Toggles -->
-                    <ToggleButton x:Name="ReadModeButton" IsChecked="True" Click="ReadMode_Click" Padding="10,6" Style="{StaticResource ReadModeButtonStyle}">
+                    <ToggleButton x:Name="ReadModeButton" IsChecked="True" Click="ReadMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                         <SymbolIcon Symbol="Read"/>
                     </ToggleButton>
                     <ToggleButton x:Name="PenModeButton" Click="PenMode_Click" Padding="10,6">
@@ -265,8 +268,8 @@
                         <FontIcon x:Name="LayoutToggleIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE8AB;"/>
                     </Button>
 
-                    <!-- Split View Button -->
-                    <ToggleButton x:Name="SplitViewToggleButton" Click="SplitViewToggle_Click" Padding="8,6" Visibility="Collapsed">
+                    <!-- Split View Button（打开/关闭右侧对比视图的开关；默认 Collapsed，加载 PDF 后 MainPage.xaml.cs:1746 设为可见） -->
+                    <ToggleButton x:Name="SplitViewToggleButton" Click="SplitViewToggle_Click" Padding="8,6" Visibility="Collapsed" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                         <SymbolIcon Symbol="TwoPage"/>
                     </ToggleButton>
 
@@ -414,7 +417,9 @@
                 <TextBlock Text="Glance" FontSize="28" FontWeight="Bold"/>
                 <TextBlock x:Name="WelcomeSubtitleText" Text="Abre un documento para comenzar." FontSize="14" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
                 
-                <Button Click="OpenPdf_Click" Margin="0,16,0,0" Style="{ThemeResource AccentButtonStyle}" Padding="16,8">
+                <!-- 配色走 App.xaml 的 GlanceAccentButtonStyle（Obsidian 紫）；覆盖 generic 的
+                     AccentButton* 主题键无效（见 App.xaml 第 12 轮注释），故不再用 AccentButtonStyle -->
+                <Button Click="OpenPdf_Click" Margin="0,16,0,0" Style="{ThemeResource GlanceAccentButtonStyle}" Padding="16,8">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <SymbolIcon Symbol="OpenFile"/>
                         <TextBlock x:Name="WelcomeOpenButtonText" Text="Abrir Documento PDF" FontWeight="SemiBold"/>
@@ -454,13 +459,18 @@
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="4">
-                            <ToggleButton x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" Padding="8,6" HorizontalContentAlignment="Center">
+                            <!-- 三颗模式键共用同一套状态机接管样式（ToggleButtonNoStateMachineStyle）：
+                                 互斥切换由 ApplySidebarMode() 程序化改 IsChecked，接管器会把每一次
+                                 (checked, pressed, 坐标几何 hover) 变化瞬间写成颜色，不再被原生
+                                 Storyboard 拖成 83ms 渐变。各自的 Padding / HorizontalContentAlignment
+                                 是元素本地值，优先级高于样式 setter，模板有 TemplateBinding 接得住。 -->
+                            <ToggleButton x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" Padding="8,6" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                                 <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;"/>
                             </ToggleButton>
-                            <ToggleButton x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" Padding="8,6" HorizontalContentAlignment="Center">
+                            <ToggleButton x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" Padding="8,6" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                                 <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE728;"/>
                             </ToggleButton>
-                            <ToggleButton x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" Padding="8,6" HorizontalContentAlignment="Center">
+                            <ToggleButton x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" Padding="8,6" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                                 <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE71D;"/>
                             </ToggleButton>
                         </StackPanel>
@@ -510,8 +520,8 @@
                                 <!-- 外层 Grid 只用来承载"行内书签星"覆盖层：星声明在内容 Grid 之后 →
                                      天然位于最顶层（后声明者在上），且它自己吃掉指针事件 →
                                      点它只切书签，不会触发 ListView 的 ItemClick 跳页。
-                                     横坐标不在此写死，由 C# 侧 AlignSingleRowStar() 反推
-                                     （与顶部黄星同圆心，见该方法注释）；此处只管尺寸与纵向居中。 -->
+                                     横坐标在此写死（HorizontalAlignment=Right，见下方星注释的几何推导），
+                                     此处只管尺寸与纵向居中。 -->
                                 <Grid HorizontalAlignment="Stretch">
                                     <Grid ColumnDefinitions="Auto, *" Padding="4,4" RowSpacing="4" ColumnSpacing="12" HorizontalAlignment="Stretch">
                                         <!-- Page preview image container -->
@@ -521,8 +531,14 @@
                                         <TextBlock Grid.Column="1" Text="{x:Bind PageNumberText, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" FontWeight="Medium"/>
                                     </Grid>
                                     <!-- 行内书签星：空心(E734，灰边) ↔ 实心(E735，同顶部黄星 #F2C200)。
-                                         水平位置不写死：由 RowStarButton_Loaded → AlignSingleRowStar() 反推，
-                                         保证与侧边栏顶部那颗黄星同圆心（见该方法注释）。
+                                         水平位置写死：HorizontalAlignment=Right 直接贴 ListViewItem
+                                         内容区右缘 —— 内容区右缘 ≈ 219 − 框架默认项内缩 8 = 211，
+                                         与顶部黄星按钮右缘（面板 219 − 右 Margin 8 = 211）同一坐标，
+                                         见上方 AddBookmarkButton 注释的几何推导。
+                                         ⚠ 历史教训（2026-09-28）：曾用 C# 运行时测量对齐星心
+                                         （TransformToVisual 反推 + DispatcherQueue 自排队重试），
+                                         侧栏未布局时重试无限自排队 ⇒ 打开侧边栏直接卡死，已整体回退。
+                                         此后不再对这颗星做任何运行时几何计算。
                                          ⚠ 这里刻意不用 Button：ButtonBase 按下时会 CapturePointer，
                                          指针一被捕获，所在缩略图行立刻收到 PointerExited → 整行悬浮提示色
                                          消失（松手后才恢复，表现为提示色闪烁）。改用不捕获指针的 Grid，
@@ -531,11 +547,10 @@
                                          抛出 ItemClick（不跳页）。
                                          Background="Transparent" 必须有，否则空白处不参与命中测试。 -->
                                     <Grid x:Name="RowStarButton"
-                                          Loaded="RowStarButton_Loaded"
                                           PointerPressed="RowStar_PointerPressed"
                                           Tapped="RowStar_Tapped"
                                           Width="32" Height="32" Background="Transparent"
-                                          HorizontalAlignment="Left" VerticalAlignment="Center">
+                                          HorizontalAlignment="Right" VerticalAlignment="Center">
                                         <Grid>
                                             <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE734;"
                                                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"

@@ -20,7 +20,7 @@ namespace Glance.Services;
 /// <para>前面几版都试图跟 Storyboard 抢（先 Clear 状态组、再写本地属性 + GoToState），实测<b>都没用</b>：
 /// 状态组 Clear 不掉；Storyboard 动画值优先级高于本地值；<c>GoToState</c> 的签名只收
 /// <see cref="Control"/>，而模板根是 ContentPresenter，根本够不着。
-/// 于是本版不再跟它抢，直接改模板（见 MainPage.xaml 的 ReadModeButtonStyle）：
+/// 于是本版不再跟它抢，直接改模板（见 MainPage.xaml 的 ToggleButtonNoStateMachineStyle）：
 /// <b>复刻同一个 ContentPresenter 模板，但去掉 VisualStateGroups 与 BackgroundTransition</b>
 /// ⇒ 原生 CommonStates 那套 Storyboard 根本不存在，颜色只有本类一个来源，写什么就是什么。</para>
 ///
@@ -36,10 +36,11 @@ namespace Glance.Services;
 ///
 /// <para><b>三个取值坑（改这里必看）</b>：</para>
 /// <list type="bullet">
-/// <item><c>ToggleButtonBackground*</c> 只定义在 <c>Application.Resources.ThemeDictionaries</c> 里，
-/// 顶层字典取不到 ⇒ 必须查主题字典。</item>
-/// <item>顶层 ThemeDictionaries <b>没有 "Dark" 键</b>（暗色值在 "Default" 里）
-/// ⇒ 按主题名取不到时必须退回 Default，否则写进去的是 null。</item>
+/// <item><c>ToggleButtonBackground*</c> 只定义在 <c>Application.Resources.ThemeDictionaries</c> 里。
+/// 顶层字典<b>也能取到同名键</b>（generic 提升上来的），但那份不随主题切换、值还是旧的
+/// ⇒ 取值顺序必须是「主题字典 → Default → 顶层兜底」，反了就永远拿不到配色。</item>
+/// <item>主题字典<b>没有 "Dark" 键</b>（暗色值在 "Default" 里）
+/// ⇒ <c>ActualTheme.Dark</c> 必须先映射成 "Default"，否则匹配不上。</item>
 /// <item>Light 与 Dark 的状态表取值完全不同 ⇒ 颜色绝不能硬编码，只能按「档位名 → 资源后缀」同源映射。</item>
 /// </list>
 ///
@@ -157,29 +158,52 @@ internal static class ToggleButtonVisualOverride
         }
 
         /// <summary>
-        /// 取主题资源：先顶层字典，再主题字典，最后退回 Default（Dark 档在顶层没有 "Dark" 键）。
-        /// 取不到返回 null —— 写 null 等于清掉本地值，会回落到模板的 TemplateBinding，不会留透明块。
+        /// 取主题资源：<b>主题字典优先，顶层字典降级为兜底</b>。取不到返回 null ——
+        /// 写 null 等于清掉本地值，会回落到模板的 TemplateBinding，不会留透明块。
         /// </summary>
+        /// <remarks>
+        /// 【为什么必须反过来查（2026-09-27 实测，勿改回旧顺序）】
+        /// 旧实现是「先顶层字典，再主题字典」。但顶层 <c>Application.Resources</c> 里<b>已经有一份
+        /// 框架从 generic.xaml 提升上来的同名键</b>（<c>XamlControlsResources</c> 合并时带进来的）。
+        /// 实测探针（Dark 主题、ReadModeButton）：
+        ///     themeDictKeys                        = Default,Light   ← 我们写的两个字典都在
+        ///     ToggleButtonBackgroundChecked        -> APP-ROOT | #FF0067C0  （generic 强调蓝）
+        ///     ToggleButtonBackground               -> APP-ROOT | #B3FFFFFF  （generic Light 档的白）
+        /// 顶层那份先命中 ⇒ 主题字典里的 Obsidian 紫<b>永远轮不到</b> ⇒
+        /// 改了 App.xaml 画面纹丝不动。这就是「配色没生效」的真因，与字典遮挡是两回事。
+        /// 而且顶层那份还不随主题切换（Dark 下返回的是 Light 档的值），拿它当默认值本身就是错的。
+        /// </remarks>
         private object? Resource(string key)
         {
             var resources = Application.Current?.Resources;
             if (resources == null) return null;
 
-            if (resources.TryGetValue(key, out var direct)) return direct;
-
-            if (LookupThemeDict(resources, _button.ActualTheme.ToString()) is ResourceDictionary themeDict
+            // ① 当前主题对应的主题字典（Dark 会被映射到 WinUI 的 "Default" 键）
+            if (LookupThemeDict(resources, ThemeDictKey(_button.ActualTheme)) is ResourceDictionary themeDict
                 && themeDict.TryGetValue(key, out var themed))
             {
                 return themed;
             }
 
+            // ② 退回 Default 档（WinUI 的顶层主题字典没有 "Dark" 键，暗色值就在 Default 里）
             if (LookupThemeDict(resources, "Default") is ResourceDictionary fallback
                 && fallback.TryGetValue(key, out var defaulted))
             {
                 return defaulted;
             }
 
+            // ③ 最后才考虑顶层字典，纯粹是为了「主题字典里压根没定义」时不写 null
+            if (resources.TryGetValue(key, out var direct)) return direct;
+
             return null;
+        }
+
+        /// <summary>把 <see cref="ElementTheme"/> 映射成 WinUI 主题字典的键名。</summary>
+        private static string ThemeDictKey(ElementTheme theme)
+        {
+            // WinUI 的顶层 ThemeDictionaries 只有 Default / HighContrast / Light，没有 "Dark"：
+            // 暗色值在 Default 里 ⇒ ActualTheme.Dark 必须映射成 "Default"，否则永远匹配不上。
+            return theme == ElementTheme.Dark ? "Default" : theme.ToString();
         }
 
         /// <summary>按主题名取出主题字典；取不到返回 null。</summary>
