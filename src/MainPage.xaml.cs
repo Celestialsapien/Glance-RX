@@ -132,6 +132,11 @@ public sealed partial class MainPage : Page
     // and foreground are overridden to follow the currently selected pen color.
     private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _penHighlightBrush =
         new(Microsoft.UI.Colors.Yellow);
+    // 悬停/按下态底色 = 画笔色向白色提亮，制造点击反馈（否则三态同色、点击无反馈）。
+    private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _penHighlightBrushHover =
+        new(Microsoft.UI.Colors.Yellow);
+    private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _penHighlightBrushPressed =
+        new(Microsoft.UI.Colors.Yellow);
     private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _penForegroundBrush =
         new(Microsoft.UI.Colors.Black);
 
@@ -583,6 +588,17 @@ public sealed partial class MainPage : Page
         ToggleButtonVisualOverride.Attach(ModeBookmarksButton);
         ToggleButtonVisualOverride.Attach(ModeOutlineButton);
         ToggleButtonVisualOverride.Attach(SplitViewToggleButton);
+        ToggleButtonVisualOverride.Attach(PenModeButton, key => key switch
+        {
+            "ToggleButtonBackgroundChecked" => _penHighlightBrush,
+            "ToggleButtonBackgroundCheckedPointerOver" => _penHighlightBrushHover,
+            "ToggleButtonBackgroundCheckedPressed" => _penHighlightBrushPressed,
+            // 符号前景必须随画笔色反相（BT.601 亮度），否则深色画笔（如黑色）下符号与底同色不可见。
+            "ToggleButtonForegroundChecked" => _penForegroundBrush,
+            "ToggleButtonForegroundCheckedPointerOver" => _penForegroundBrush,
+            "ToggleButtonForegroundCheckedPressed" => _penForegroundBrush,
+            _ => null,
+        });
 
         // 侧边栏滚动 → 补渲染滚入视口的缩略图（缓存窗口项滚入视口不触发 ContainerContentChanging）。
         AttachSidebarScrollRefill();
@@ -626,20 +642,18 @@ public sealed partial class MainPage : Page
                 PositionPenOptionsPopup();
         };
 
-        // Make the Pen mode button's highlight follow the currently selected pen color.
-        // Override the ToggleButton's checked-state theme brushes at the element level so the
-        // default accent (blue) is replaced by _penHighlightBrush (updated live in ApplyPenHighlight).
+        // Pen mode 按钮的勾选态：底色 + 符号前景都跟随实时画笔色，交给 ToggleButtonVisualOverride 的
+        // 单按钮覆写委托处理（见上面 Attach 调用）。背景三态分键，且**与阅读模式按钮同一机制**：
+        //   Checked          → _penHighlightBrush        （= 当前画笔色，Opacity 1.0）
+        //   CheckedPointerOver → _penHighlightBrushHover  （同色，Opacity 0.9，悬停反馈）
+        //   CheckedPressed     → _penHighlightBrushPressed（同色，Opacity 0.8，按下反馈）
+        // 即三态同一颜色、只差不透明度梯度（App.xaml 对 Obsidian 紫就是这么定义的），
+        // 悬停/按下时颜色变透、透出工具栏而"浅一档"——与阅读模式按钮点击光效逐档一致。
+        // 前景 3 键 → _penForegroundBrush（按画笔色 BT.601 亮度算黑/白，保证符号在任意画笔色下可见）。
+        // 边框仍走主题 OnAccent 渐变立体边。ApplyPenHighlight() 按所选画笔实时算这几支画刷的颜色，
+        // 画笔色变化时引用传播即时生效。
         if (PenModeButton != null)
         {
-            PenModeButton.Resources["ToggleButtonBackgroundChecked"] = _penHighlightBrush;
-            PenModeButton.Resources["ToggleButtonBackgroundCheckedPointerOver"] = _penHighlightBrush;
-            PenModeButton.Resources["ToggleButtonBackgroundCheckedPressed"] = _penHighlightBrush;
-            PenModeButton.Resources["ToggleButtonBorderBrushChecked"] = _penHighlightBrush;
-            PenModeButton.Resources["ToggleButtonBorderBrushCheckedPointerOver"] = _penHighlightBrush;
-            PenModeButton.Resources["ToggleButtonBorderBrushCheckedPressed"] = _penHighlightBrush;
-            PenModeButton.Resources["ToggleButtonForegroundChecked"] = _penForegroundBrush;
-            PenModeButton.Resources["ToggleButtonForegroundCheckedPointerOver"] = _penForegroundBrush;
-            PenModeButton.Resources["ToggleButtonForegroundCheckedPressed"] = _penForegroundBrush;
             ApplyPenHighlight();
         }
 
@@ -4430,7 +4444,20 @@ public sealed partial class MainPage : Page
         byte g = Convert.ToByte(clean.Substring(2, 2), 16);
         byte b = Convert.ToByte(clean.Substring(4, 2), 16);
 
-        _penHighlightBrush.Color = Windows.UI.Color.FromArgb(255, r, g, b);
+        // 三态背景 = 同一画笔色，但按主题对 ReadModeButton 的档差施加不透明度梯度：
+        //   Checked            → Opacity 1.0
+        //   CheckedPointerOver → Opacity 0.9
+        //   CheckedPressed     → Opacity 0.8
+        // 主题 (App.xaml) 对 Obsidian 紫正是这么做的（ToggleButtonBackgroundChecked* 三键同源、只差 Opacity），
+        // 故画笔按钮点击反馈与阅读模式按钮逐档一致：悬停/按下时颜色变透、透出工具栏而"浅一档"。
+        // （此前用"向白提亮 25%/45%"是错机制，与主题不对齐，故观感不符。）
+        Windows.UI.Color pen = Windows.UI.Color.FromArgb(255, r, g, b);
+        _penHighlightBrush.Color = pen;
+        _penHighlightBrush.Opacity = 1.0;
+        _penHighlightBrushHover.Color = pen;
+        _penHighlightBrushHover.Opacity = 0.9;
+        _penHighlightBrushPressed.Color = pen;
+        _penHighlightBrushPressed.Opacity = 0.8;
 
         // Perceived luminance (ITU-R BT.601) to pick a readable icon color.
         double luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;

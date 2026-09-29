@@ -250,7 +250,7 @@
                     <ToggleButton x:Name="ReadModeButton" IsChecked="True" Click="ReadMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                         <SymbolIcon Symbol="Read"/>
                     </ToggleButton>
-                    <ToggleButton x:Name="PenModeButton" Click="PenMode_Click" Padding="10,6">
+                    <ToggleButton x:Name="PenModeButton" Click="PenMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
                         <SymbolIcon Symbol="Edit"/>
                     </ToggleButton>
 

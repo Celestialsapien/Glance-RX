@@ -55,9 +55,19 @@ internal static class ToggleButtonVisualOverride
         new Link(button).Attach();
     }
 
+    /// <summary>接管指定按钮的视觉输出，并用 <paramref name="colorOverride"/> 对该按钮单独覆写视觉键。
+    /// 只有传了委托的按钮才走覆写分支，其余按钮 <paramref name="colorOverride"/> 为 null 会短路、行为零变化。</summary>
+    /// <param name="colorOverride">按资源键返回覆写值；返回 null 表示「不覆写、回落主题」。仅对需要独立配色的按钮（如画笔色）使用。</param>
+    public static void Attach(ToggleButton button, Func<string, object?>? colorOverride)
+    {
+        if (button == null) return;
+        new Link(button, colorOverride).Attach();
+    }
+
     private sealed class Link
     {
         private readonly ToggleButton _button;
+        private readonly Func<string, object?>? _colorOverride;
         private ContentPresenter? _root;
 
         private bool _hover;
@@ -66,7 +76,11 @@ internal static class ToggleButtonVisualOverride
         private bool _lastHover;
         private bool _dirty;
 
-        internal Link(ToggleButton button) => _button = button;
+        internal Link(ToggleButton button, Func<string, object?>? colorOverride = null)
+        {
+            _button = button;
+            _colorOverride = colorOverride;
+        }
 
         internal void Attach()
         {
@@ -175,6 +189,11 @@ internal static class ToggleButtonVisualOverride
         /// </remarks>
         private object? Resource(string key)
         {
+            // ① 单按钮局部覆写（如画笔模式按钮的实时画笔色）：只有传了委托的按钮才走这一支；
+            //    其余按钮 _colorOverride == null ⇒ 短路、行为与之前逐字节一致。
+            if (_colorOverride != null && _colorOverride(key) is object overridden)
+                return overridden;
+
             var resources = Application.Current?.Resources;
             if (resources == null) return null;
 
