@@ -64,6 +64,21 @@ internal static class ToggleButtonVisualOverride
         new Link(button, colorOverride).Attach();
     }
 
+    // 所有已接管的 Link 实例，供主题切换时同步强制重绘（见 RefreshAll）。
+    // 接管器原本只在 ActualThemeChanged（异步、下一帧才触发）里重绘；主题切换瞬间按钮仍留着旧主题画刷，
+    // 浅→深时旧画刷是白底 ⇒ 闪一下白。故在主题被「同步设值」的那一刻调用 RefreshAll() 立即重绘，消除该帧。
+    private static readonly List<Link> _instances = new();
+
+    /// <summary>强制所有已接管按钮按当前主题立即重绘。应在主题被同步设值的时刻调用
+    /// （如 MainPage 主题下拉），消除 ActualThemeChanged 异步传播造成的「旧白底闪一帧」。</summary>
+    public static void RefreshAll()
+    {
+        foreach (var link in _instances)
+        {
+            link.ForceRefresh();
+        }
+    }
+
     private sealed class Link
     {
         private readonly ToggleButton _button;
@@ -106,6 +121,22 @@ internal static class ToggleButtonVisualOverride
             _button.PointerExited += (s, e) => Track(e);
             _button.PointerPressed += (s, e) => Track(e);
 
+            Sync();
+
+            // ⑤ 注册到全局实例表，供主题切换时 RefreshAll() 同步重绘（见类级注释）。
+            _instances.Add(this);
+            _button.Unloaded += OnUnloaded;
+        }
+
+        private void OnUnloaded(object sender, RoutedEventArgs e)
+        {
+            _instances.Remove(this);
+        }
+
+        /// <summary>置脏并立即重绘（供外部 RefreshAll 调用）。</summary>
+        internal void ForceRefresh()
+        {
+            _dirty = true;
             Sync();
         }
 
@@ -197,8 +228,12 @@ internal static class ToggleButtonVisualOverride
             var resources = Application.Current?.Resources;
             if (resources == null) return null;
 
-            // ① 当前主题对应的主题字典（Dark 会被映射到 WinUI 的 "Default" 键）
-            if (LookupThemeDict(resources, ThemeDictKey(_button.ActualTheme)) is ResourceDictionary themeDict
+            // ① 当前主题对应的主题字典（Dark 映射到 WinUI 的 "Default" 键）。
+            //    ⚠ 用确定性主题源 ResolvedThemeDictKey()（沿视觉树取 MainPage 等显式 RequestedTheme），
+            //    绝不用 _button.ActualTheme —— 它在 RequestedTheme 设置后要经布局通道异步传播，
+            //    主题切换瞬间仍停在旧主题 ⇒ 读到旧字典、浅色下涂白底，在深色模式里闪一下白。
+            //    与 GpuPageView.UpdateThemeColors 同因（见其 2452-2476 注释）。
+            if (LookupThemeDict(resources, ResolvedThemeDictKey()) is ResourceDictionary themeDict
                 && themeDict.TryGetValue(key, out var themed))
             {
                 return themed;
@@ -217,12 +252,35 @@ internal static class ToggleButtonVisualOverride
             return null;
         }
 
-        /// <summary>把 <see cref="ElementTheme"/> 映射成 WinUI 主题字典的键名。</summary>
-        private static string ThemeDictKey(ElementTheme theme)
+        /// <summary>
+        /// 确定性主题源：把"当前应是深色还是浅色"映射成 WinUI 主题字典的键名（Default=暗 / Light=浅）。
+        /// 从 <c>_button</c> 沿视觉树向上找第一个显式设置 <see cref="FrameworkElement.RequestedTheme"/>
+        /// 为 Dark/Light 的祖先（本 app 主题正是同步写到 MainPage 上的那个值），
+        /// 用它判定深浅；全链都是 Default(跟随系统) 才回落 <c>Application.Current.RequestedTheme</c>（系统主题）。
+        /// 绝不用 <c>_button.ActualTheme</c> —— 它在 RequestedTheme 设置后要经布局通道异步传播，
+        /// 主题切换瞬间仍停在旧主题 ⇒ Resource() 读到旧字典、浅色下涂白底，在深色模式里闪一下白。
+        /// 与 GpuPageView.UpdateThemeColors 同因（见其 2452-2476 注释），但本实现不依赖 MainWindow.IsDarkTheme
+        /// （WindowRoot 是 Grid、主题实际写在 MainPage 上，IsDarkTheme 对显式深/浅选择会回落系统主题而失准）。
+        /// </summary>
+        private string ResolvedThemeDictKey()
         {
-            // WinUI 的顶层 ThemeDictionaries 只有 Default / HighContrast / Light，没有 "Dark"：
-            // 暗色值在 Default 里 ⇒ ActualTheme.Dark 必须映射成 "Default"，否则永远匹配不上。
-            return theme == ElementTheme.Dark ? "Default" : theme.ToString();
+            try
+            {
+                FrameworkElement? e = _button;
+                while (e != null)
+                {
+                    if (e.RequestedTheme == ElementTheme.Dark) return "Default";
+                    if (e.RequestedTheme == ElementTheme.Light) return "Light";
+                    e = VisualTreeHelper.GetParent(e) as FrameworkElement;
+                }
+                // 全 Default（跟随系统）：用系统主题判定
+                return Application.Current?.RequestedTheme == ApplicationTheme.Dark ? "Default" : "Light";
+            }
+            catch
+            {
+                // 最坏回落 ActualTheme（可能仍带旧竞态，但不崩）
+                return _button.ActualTheme == ElementTheme.Dark ? "Default" : "Light";
+            }
         }
 
         /// <summary>按主题名取出主题字典；取不到返回 null。</summary>

@@ -786,6 +786,7 @@ public sealed partial class MainPage : Page
                 if (mainWindow?.Content is FrameworkElement rootElement)
                 {
                     rootElement.RequestedTheme = theme;
+                    Glance.Services.ToggleButtonVisualOverride.RefreshAll();
                 }
 
                 // Update title bar and window background colors to match the theme
@@ -816,6 +817,7 @@ public sealed partial class MainPage : Page
                 if (mainWindow?.Content is FrameworkElement rootElement)
                 {
                     rootElement.RequestedTheme = theme;
+                    Glance.Services.ToggleButtonVisualOverride.RefreshAll();
                 }
 
                 // Update title bar and window background colors to match the theme
