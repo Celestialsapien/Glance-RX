@@ -136,10 +136,16 @@ public sealed partial class MainPage : Page
         new(Microsoft.UI.Colors.Black);
 
     // 颜色按钮不再有任何包围环，仅用「圆点大小」区分状态：
-    // 未选中 = 原大小；悬浮/选中 = 1.72×。
-    // ScaleTransform 共享实例，多个按钮引用同一对象，不参与布局（无位移跳动）。
-    private readonly Microsoft.UI.Xaml.Media.ScaleTransform _colorSwatchScale = new()
-    { ScaleX = 1.72, ScaleY = 1.72 };
+    // 未选中 = 16；悬浮/选中 = 16 × 1.6 = 25.6。
+    // （原设计是 RenderTransform 1.72×，改成矢量重绘后同样尺寸视觉偏大，按用户反馈调小到 1.6×。）
+    // 圆点就是按钮自身的 Background + CornerRadius，放大靠改【布局尺寸】而非 RenderTransform：
+    // 框架按最终尺寸重新绘制（矢量级锐利），不再把已光栅化的 16px 圆点拉伸而发糊。
+    private const double ColorSwatchBaseSize = 16.0;
+    private const double ColorSwatchEnlargedSize = 16.0 * 1.6;
+    private const double ColorSwatchBaseRadius = ColorSwatchBaseSize / 2.0;
+    private const double ColorSwatchEnlargedRadius = ColorSwatchEnlargedSize / 2.0;
+    // 四边负 Margin：(放大尺寸 − 基础尺寸) / 2，把多出来的尺寸从布局里抵消掉
+    private const double ColorSwatchEnlargedInset = (ColorSwatchEnlargedSize - ColorSwatchBaseSize) / 2.0;
     private Button? _selectedColorButton; // 当前选中的颜色按钮（悬浮恢复时判断用）
 
     // Currently selected pen thickness (replaces the old ThicknessSlider).
@@ -225,6 +231,8 @@ public sealed partial class MainPage : Page
         AttachDefocusToPopupButtons();
         // 颜色按钮悬浮预览：环=按钮自身色+放大一圈（Popup 内元素需单独挂事件）。
         AttachColorSwatchHover();
+        // 粗细预设按钮的悬浮/按下底色：构造期一次性指向共享灰刷（详见方法注释）。
+        InstallThicknessPresetHoverBrushes();
 
         // 全局键盘聚焦拦截：禁止任何焦点落到 ButtonBase（用户要求按钮只由鼠标单击触发，
         // 无 Tab+Enter 触发路径，点后焦点也不残留→Enter/Space 不重触发）。不限 FocusState：
@@ -4455,47 +4463,76 @@ public sealed partial class MainPage : Page
     /// 选中/悬浮/按下的背景完全由按钮控件的 Background 属性（DP）承载，
     /// 与左侧颜色按钮直接改 BorderBrush 同一个模式：改 DP 属性会立即重绘，
     /// 不存在"重开才生效"的问题。内部 highlight Border 永远透明，不再参与着色。
+    /// 悬浮/按下档位由构造期的 <see cref="InstallThicknessPresetHoverBrushes"/> 一次性写入，
+    /// 这里绝不再碰 element.Resources（见该方法注释）。
     /// </summary>
     private void HighlightThicknessPreset(Button? selected)
     {
         if (ThicknessPresetPanel == null) return;
-        var uniformBg = _thicknessPresetSelectedBrush;
         foreach (var child in ThicknessPresetPanel.Children)
         {
             if (child is Button b)
             {
                 // 常态：选中按钮 = 深灰，未选中 = 透明（直接赋 DP，点击立即生效）
-                b.Background = (b == selected) ? uniformBg : _thicknessPresetTransparentBrush;
-                // 悬浮/按下也统一用同一个深灰，杜绝状态切换配色变化；
-                // 选中按钮在这些状态下颜色保持不变（无任何变换）。
-                b.Resources["ButtonBackgroundPointerOver"] = uniformBg;
-                b.Resources["ButtonBackgroundPressed"] = uniformBg;
+                b.Background = (b == selected) ? _thicknessPresetSelectedBrush : _thicknessPresetTransparentBrush;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 构造期【一次性】把粗细预设按钮的悬浮/按下底色指向共享灰刷
+    /// <see cref="_thicknessPresetSelectedBrush"/>（选中/悬浮/按下同色，杜绝状态切换变色）。
+    /// </summary>
+    /// <remarks>
+    /// <b>为什么必须只写一次（2026-09-29 崩溃修复，勿改回循环内写）</b>：
+    /// 原先这两行写在 <see cref="HighlightThicknessPreset"/> 循环里，每次主题切换/选中都会重写。
+    /// 构造期首次写入尚可，但 <c>ActualThemeChanged</c> 回调链
+    /// （RefreshPenOptionThemeHighlights → SelectThicknessPreset / SyncColorSwatchHighlight）
+    /// 再次写同一个键时，WinRT <c>IMap.Insert</c> 抛 COMException，被 WinUI 3 fail-fast 直接终止进程
+    /// （崩溃日志 stack：ResourceDictionary.set_Item → RefreshColorSwatchState）。
+    /// 主题切换只需改共享刷自身的 Color —— 字典里存的是同一个对象引用，颜色自动跟随，无需重写字典。
+    /// </remarks>
+    private void InstallThicknessPresetHoverBrushes()
+    {
+        if (ThicknessPresetPanel == null) return;
+        foreach (var child in ThicknessPresetPanel.Children)
+        {
+            if (child is Button b)
+            {
+                b.Resources["ButtonBackgroundPointerOver"] = _thicknessPresetSelectedBrush;
+                b.Resources["ButtonBackgroundPressed"] = _thicknessPresetSelectedBrush;
             }
         }
     }
 
     /// <summary>
     /// 把单一颜色按钮刷新为「选中/未选中」对应的视觉：
-    ///  - 选中：1.36×；未选中：原大小
-    ///  - 无任何包围环：BorderBrush 恒透明，并同步覆盖 PointerOver/Pressed
-    ///    模板资源为透明，防止悬浮/按下时模板用主题白环覆盖出框。
+    ///  - 选中：圆点放大到 16 × 1.72；未选中：原大小
+    ///  - 无任何包围环：边框恒透明（悬浮/按下的边框与底色档在 XAML 解析期逐按钮声明）。
     /// </summary>
     private void RefreshColorSwatchState(Button b)
     {
         bool isSel = (b == _selectedColorButton);
-        var transparent = _thicknessPresetTransparentBrush;
-        b.BorderBrush = transparent;
-        b.Resources["ButtonBorderBrushPointerOver"] = transparent;
-        b.Resources["ButtonBorderBrushPressed"] = transparent;
-        if (isSel)
-        {
-            b.RenderTransform = _colorSwatchScale;
-            b.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
-        }
-        else
-        {
-            b.RenderTransform = null;
-        }
+        SetColorSwatchSize(b, isSel);
+    }
+
+    /// <summary>
+    /// 放大/还原圆点：改布局宽高 + CornerRadius + 四边负 Margin，而不是 RenderTransform。
+    /// </summary>
+    /// <remarks>
+    /// <b>为什么不用 RenderTransform</b>：它只是把已光栅化的 16px 圆点整体拉伸放大，
+    /// 边缘被重采样后发糊（用户反馈的"选中放大后更模糊"根因）。改布局尺寸则让框架按
+    /// 最终尺寸重新绘制，边缘始终是矢量级抗锯齿。
+    /// <b>为什么加负 Margin</b>：增大的尺寸若直接参与布局，会把相邻圆点挤开、圆心位移。
+    /// 四边各抵消 (25.6−16)/2 = 4.8 后，布局槽位仍是 16×16，圆点间距与圆心位置逐像素不变，
+    /// 圆点相对自身中心向四周均匀溢出（StackPanel 不裁剪子元素，与原 RenderTransform 表现一致）。
+    /// </remarks>
+    private void SetColorSwatchSize(Button b, bool enlarged)
+    {
+        b.Width = b.Height = enlarged ? ColorSwatchEnlargedSize : ColorSwatchBaseSize;
+        b.CornerRadius = new CornerRadius(enlarged ? ColorSwatchEnlargedRadius : ColorSwatchBaseRadius);
+        double inset = enlarged ? ColorSwatchEnlargedInset : 0.0;
+        b.Margin = new Thickness(-inset);
     }
 
     /// <summary>
@@ -4512,20 +4549,12 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// 悬浮预览：放大到 1.72×（无环）；离开后由 PointerExited 恢复为
-    /// 选中（1.72×）或未选中（原大小）。
+    /// 悬浮预览：圆点放大到 16 × 1.72；离开后由 PointerExited 恢复为
+    /// 选中（同放大）或未选中（原大小）。
     /// </summary>
     private void ColorSwatch_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is Button b)
-        {
-            var transparent = _thicknessPresetTransparentBrush;
-            b.BorderBrush = transparent;
-            b.Resources["ButtonBorderBrushPointerOver"] = transparent;
-            b.Resources["ButtonBorderBrushPressed"] = transparent;
-            b.RenderTransform = _colorSwatchScale;
-            b.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
-        }
+        if (sender is Button b) SetColorSwatchSize(b, true);
     }
 
     private void ColorSwatch_PointerExited(object sender, PointerRoutedEventArgs e)
@@ -4534,10 +4563,9 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// 给颜色按钮逐个挂悬浮/离开事件（悬浮预览用），并一次性覆盖
-    /// PointerOver/Pressed 模板资源：
-    ///  - Background（悬浮/按下背景）= 按钮自身色：模板不会把圆点压暗
-    ///  - BorderBrush（悬浮/按下边框）= 透明：无任何包围环
+    /// 给颜色按钮逐个挂悬浮/离开事件（悬浮预览用）。
+    /// 悬浮/按下的底色与边框透明档已在 XAML 解析期写进每个按钮自己的 Resources，
+    /// 这里不做任何 element.Resources 写入（运行时写入是 2026-09-29 闪退的根因）。
     /// </summary>
     private void AttachColorSwatchHover()
     {
@@ -4546,12 +4574,6 @@ public sealed partial class MainPage : Page
         {
             if (child is Button b)
             {
-                if (b.Background is SolidColorBrush swatch)
-                {
-                    var swatchBrush = new SolidColorBrush(swatch.Color);
-                    b.Resources["ButtonBackgroundPointerOver"] = swatchBrush;
-                    b.Resources["ButtonBackgroundPressed"] = swatchBrush;
-                }
                 b.PointerEntered += ColorSwatch_PointerEntered;
                 b.PointerExited += ColorSwatch_PointerExited;
             }

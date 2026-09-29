@@ -345,10 +345,27 @@
                     PointerEntered="PenOptionsCapsule_PointerEntered"
                     PointerExited="PenOptionsCapsule_PointerExited">
                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                    <!-- Color dot selector (16x16 circles, centered in 28px slot).
-                         TranslateTransform Y=-1 compensates for WinUI template's
-                         visual offset: the colored circle with 2px border appears
-                         1px lower than its geometric center due to DWM anti-aliasing. -->
+                    <!-- ══════════ 颜色选择器：7 个圆形按钮（按钮本体即圆点）══════════
+
+                         圆点 = 按钮自身的 Background + CornerRadius（16×16 配 CornerRadius=8 时，
+                         四段 1/4 圆弧共用圆心，正好是正圆）。由框架按【最终尺寸】直接绘制，边缘是
+                         矢量级抗锯齿 —— 不再用 RenderTransform 放大（那只是把已光栅化的 16px 圆点
+                         拉伸，边缘发糊，即用户反馈的模糊根因）。
+
+                         放大（悬浮/选中）同样不用 RenderTransform，而是改【布局尺寸】：
+                           Width/Height 16 → 25.6、CornerRadius 8 → 12.8、Margin 0 → -4.8（四边）。
+                         负 Margin 恰好抵消增大的尺寸 ⇒ 布局槽位仍为 16×16，相邻圆点间距与圆心位置
+                           逐像素不变，放大的圆点相对自身中心向四周均匀溢出（StackPanel 不裁剪子元素，
+                           与原 RenderTransform 的表现一致）。
+
+                         TranslateTransform Y=-1 沿用原光学补偿：2px 透明描边的圆点因 DWM 抗锯齿
+                           看起来比几何中心低 1px。
+
+                         ⚠ 悬浮/按下的底色必须是圆点自身色：WinUI 模板的 PointerOver/Pressed 状态会把
+                           ContentPresenter.Background 换成主题底色、把 BorderBrush 换成主题描边，
+                           从而盖掉圆点/勾出边框。这四个键必须【逐按钮】声明（每颗圆点底色不同，无法
+                           共用一份字典），且只在解析期写一次 —— 运行时写 element.Resources 会在主题
+                           切换回调里抛 COMException，进程直接闪退（2026-09-29 崩溃）。 -->
                     <StackPanel x:Name="ColorSelectorPanel" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                         <StackPanel.RenderTransform>
                             <TranslateTransform Y="-1"/>
@@ -356,13 +373,62 @@
                         <!-- 画笔色板：高饱和、清晰可分的一组记号笔色（详见 2026-09-22 日志）。
                              不再强行统一明度——按色相自然分布明度以拉开绿/青/蓝、红/品红之间的区分；
                              饱和度保持 66–90% 的一致性家族。黄为金黄（白纸上对比有限是其物理属性），黑作中性锚点不动。 -->
-                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#F2C200" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#F2C200" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#2FA84F" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2FA84F" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#16B1C4" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#16B1C4" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#E84FA6" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E84FA6" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#E5393B" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E5393B" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#2E6FE0" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2E6FE0" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
-                        <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="Transparent" Padding="0"/>
+                        <Button x:Name="ColorYellowButton" Click="Color_Click" Tag="#F2C200" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#F2C200" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#F2C200"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#F2C200"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="ColorGreenButton" Click="Color_Click" Tag="#2FA84F" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2FA84F" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#2FA84F"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2FA84F"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="ColorCyanButton" Click="Color_Click" Tag="#16B1C4" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#16B1C4" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#16B1C4"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#16B1C4"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="ColorMagentaButton" Click="Color_Click" Tag="#E84FA6" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E84FA6" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#E84FA6"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#E84FA6"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="ColorRedButton" Click="Color_Click" Tag="#E5393B" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E5393B" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#E5393B"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#E5393B"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="ColorBlueButton" Click="Color_Click" Tag="#2E6FE0" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2E6FE0" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#2E6FE0"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2E6FE0"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="ColorBlackButton" Click="Color_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Black"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Black"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
                     </StackPanel>
 
                     <!-- Vertical separator hairline -->
