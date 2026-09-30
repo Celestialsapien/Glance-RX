@@ -600,6 +600,24 @@ public sealed partial class MainPage : Page
             _ => null,
         });
 
+        // 接管普通功能按钮（非选中态）的视觉输出 —— 仅推广点击光效、不改颜色，与 ToggleButton 同源。
+        // 干掉原生状态机 + 坐标几何 hover，消除「松手后底色跳一档」的闪烁。
+        // 范围：仅标准外观按钮；颜色胶囊 / 线宽胶囊 / 透明 pill / 浮层 / 书签模板内按钮 不在此列。
+        ButtonVisualOverride.Attach(ToggleSidebarButton);
+        ButtonVisualOverride.Attach(PrevPageButton);
+        ButtonVisualOverride.Attach(NextPageButton);
+        ButtonVisualOverride.Attach(RotateButton);
+        ButtonVisualOverride.Attach(LayoutToggleButton);
+        ButtonVisualOverride.Attach(SaveButton);
+        ButtonVisualOverride.Attach(PrintButton);
+        ButtonVisualOverride.Attach(SettingsButton);
+        ButtonVisualOverride.Attach(AddBookmarkButton);
+
+        // 对比视图开/关 PDF 的两颗 pill：改用 ButtonVisualOverride（整颗变色，与功能按钮同逻辑）。
+        // 09-30 用户否决透明描边变体（丑 + 点击无反馈），改走功能按钮同源逻辑。
+        ButtonVisualOverride.Attach(OpenSecondPdfButton);
+        ButtonVisualOverride.Attach(CloseSecondPdfButton);
+
         // 侧边栏滚动 → 补渲染滚入视口的缩略图（缓存窗口项滚入视口不触发 ContainerContentChanging）。
         AttachSidebarScrollRefill();
 
@@ -787,6 +805,7 @@ public sealed partial class MainPage : Page
                 {
                     rootElement.RequestedTheme = theme;
                     Glance.Services.ToggleButtonVisualOverride.RefreshAll();
+                    Glance.Services.ButtonVisualOverride.RefreshAll();
                 }
 
                 // Update title bar and window background colors to match the theme
@@ -818,6 +837,7 @@ public sealed partial class MainPage : Page
                 {
                     rootElement.RequestedTheme = theme;
                     Glance.Services.ToggleButtonVisualOverride.RefreshAll();
+                    Glance.Services.ButtonVisualOverride.RefreshAll();
                 }
 
                 // Update title bar and window background colors to match the theme
