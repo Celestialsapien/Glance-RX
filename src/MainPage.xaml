@@ -1775,26 +1775,30 @@
                         <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
 
                             <Button x:Name="ZoomOutButton" Click="ZoomOut_Click" Width="32" Height="32" CornerRadius="16"
-
+                                    UseLayoutRounding="True"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
                                     Background="Transparent" BorderThickness="0"
 
                                    >
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE738;" FontSize="16"/>
+                                <Path x:Name="ZoomOutGlyph" Width="32" Height="32" Data="M8,16 L24,16"
+                                      Stroke="{Binding ElementName=ZoomOutButton, Path=Foreground}" StrokeThickness="2"
+                                      Stretch="None" StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"/>
 
                             </Button>
 
                             <Button x:Name="ZoomInButton" Click="ZoomIn_Click" Width="32" Height="32" CornerRadius="16"
-
+                                    UseLayoutRounding="True"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
                                     Background="Transparent" BorderThickness="0"
 
                                    >
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE710;" FontSize="16"/>
+                                <Path x:Name="ZoomInGlyph" Width="32" Height="32" Data="M16,8 L16,24 M8,16 L24,16"
+                                      Stroke="{Binding ElementName=ZoomInButton, Path=Foreground}" StrokeThickness="2"
+                                      Stretch="None" StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"/>
 
                             </Button>
 
@@ -1845,14 +1849,17 @@
                             </Button>
 
                             <Button x:Name="FitWidthButton" Click="FitWidth_Click" Width="32" Height="32" CornerRadius="16"
-
+                                    UseLayoutRounding="True"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
                                     Background="Transparent" BorderThickness="0"
 
                                    >
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE9A6;" FontSize="18"/>
+                                <Path x:Name="FitWidthGlyph" Width="32" Height="32"
+                                      Data="M8,12 L8,8 L12,8 M24,12 L24,8 L20,8 M8,20 L8,24 L12,24 M24,20 L24,24 L20,24"
+                                      Stroke="{Binding ElementName=FitWidthButton, Path=Foreground}" StrokeThickness="2"
+                                      Stretch="None" StrokeStartLineCap="Flat" StrokeEndLineCap="Flat" StrokeLineJoin="Miter"/>
 
                             </Button>
 

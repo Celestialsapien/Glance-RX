@@ -585,6 +585,9 @@ public sealed partial class MainPage : Page
         double t = 2.0 / scale;
         if (OpenSecondPdfGlyph != null) OpenSecondPdfGlyph.StrokeThickness = t;
         if (CloseSecondPdfGlyph != null) CloseSecondPdfGlyph.StrokeThickness = t;
+        if (ZoomOutGlyph != null) ZoomOutGlyph.StrokeThickness = t;
+        if (ZoomInGlyph != null) ZoomInGlyph.StrokeThickness = t;
+        if (FitWidthGlyph != null) FitWidthGlyph.StrokeThickness = t;
     }
 
     private async void MainPage_Loaded(object sender, RoutedEventArgs e)
