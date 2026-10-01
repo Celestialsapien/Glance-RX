@@ -1689,7 +1689,7 @@
 
                                 BorderThickness="1"
 
-                                CornerRadius="18"
+                                CornerRadius="20"
 
                                 Opacity="0"
 
@@ -1697,7 +1697,7 @@
 
                             <Button x:Name="CloseSecondPdfButton" Click="CloseSecondPdf_Click" Style="{StaticResource ButtonNoStateMachineStyle}"
 
-                                    Width="36" Height="36" CornerRadius="18" Padding="0"
+                                    Width="40" Height="40" CornerRadius="20" Padding="0" UseLayoutRounding="True"
 
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
@@ -1705,7 +1705,12 @@
 
                                    >
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE711;" FontSize="14"/>
+                                <Path x:Name="CloseSecondPdfGlyph" Width="32" Height="32"
+                                      Data="M10,10 L22,22 M10,22 L22,10"
+                                      Stroke="{Binding ElementName=CloseSecondPdfButton, Path=Foreground}"
+                                      StrokeThickness="2"
+                                      Stretch="None"
+                                      StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"/>
 
                             </Button>
 

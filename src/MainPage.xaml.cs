@@ -580,10 +580,11 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void ApplyGlyphStrokeThickness()
     {
-        if (OpenSecondPdfGlyph == null) return;
         double scale = this.XamlRoot?.RasterizationScale ?? 1.0;
         if (!(scale > 0)) scale = 1.0;
-        OpenSecondPdfGlyph.StrokeThickness = 2.0 / scale;
+        double t = 2.0 / scale;
+        if (OpenSecondPdfGlyph != null) OpenSecondPdfGlyph.StrokeThickness = t;
+        if (CloseSecondPdfGlyph != null) CloseSecondPdfGlyph.StrokeThickness = t;
     }
 
     private async void MainPage_Loaded(object sender, RoutedEventArgs e)
