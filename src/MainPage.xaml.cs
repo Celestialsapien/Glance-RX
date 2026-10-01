@@ -224,6 +224,7 @@ public sealed partial class MainPage : Page
     private int _ringSuppressCount;     // 临时抑制圆环的引用计数（如关闭窗口"保存更改"对话框、Ctrl+S 另存为对话框期间，整个窗口恢复原生鼠标）。支持嵌套。
     private Microsoft.UI.Xaml.DispatcherTimer? _ringScopeTimer; // 周期性检测指针是否在窗口内，作用域开/关圆环
     private DispatcherTimer? _zoomPillHideTimer; // 缩放胶囊隐藏兜底：Flyout(快速缩放菜单)关闭瞬间的输入上下文切换会吞掉胶囊的 PointerExited，导致胶囊"悬停卡住"不隐藏；低频轮询核对实时光标位置兜底淡出
+    private bool _glyphStrokeScaleHooked;        // OpenSecondPdfGlyph 的描边是否已挂钩 RasterizationScale 变化（Loaded 后只挂一次）
 
     public MainPage()
     {
@@ -569,12 +570,37 @@ public sealed partial class MainPage : Page
     }
 
 
+    /// <summary>
+    /// 对比视图「打开第二份 PDF」圆形按钮的手绘符号，固定为「恒定 2 物理像素」描边：
+    /// 描边 DIP = 2 / RasterizationScale，保证任意缩放下设备描边宽恒为 2（偶）像素。
+    /// 该按钮与画布尺寸都取 8 的倍数 DIP ⇒ 设备宽恒为偶 ⇒ 中心落整设备像素；
+    /// 描边设备宽恒 2（偶）⇒ 描边两边 = 中心 ± 1 = 整数
+    /// ⇒ 100/125/150/175% 四档均硬边、不变浅、完美居中。
+    /// （判据与推导见 .workbuddy/memory/2026-10-01.md「奇偶必须配对」。）
+    /// </summary>
+    private void ApplyGlyphStrokeThickness()
+    {
+        if (OpenSecondPdfGlyph == null) return;
+        double scale = this.XamlRoot?.RasterizationScale ?? 1.0;
+        if (!(scale > 0)) scale = 1.0;
+        OpenSecondPdfGlyph.StrokeThickness = 2.0 / scale;
+    }
+
     private async void MainPage_Loaded(object sender, RoutedEventArgs e)
     {
         SubscribeToWindowStateChanges();
         InitializeSettings();
         InitializeLocalization();
         UpdateTopToolbarMargin();
+
+        // 圆形按钮手绘符号的「恒定 2 物理像素」描边：Loaded 后先应用一次，再挂 RasterizationScale 变化
+        // （窗口跨不同 DPI 显示器时 XamlRoot.Changed 会触发；SizeChanged 亦兜底，二者幂等）。
+        ApplyGlyphStrokeThickness();
+        if (!_glyphStrokeScaleHooked && this.XamlRoot != null)
+        {
+            _glyphStrokeScaleHooked = true;
+            this.XamlRoot.Changed += (s, args) => ApplyGlyphStrokeThickness();
+        }
 
         // 接管原生视觉状态机（详见 Services/ToggleButtonVisualOverride.cs 注释）：
         // · 顶部工具栏「阅读模式」按钮
@@ -656,6 +682,7 @@ public sealed partial class MainPage : Page
         this.SizeChanged += (s, args) =>
         {
             UpdateTopToolbarMargin();
+            ApplyGlyphStrokeThickness();
             if (PenOptionsPopup != null && PenOptionsPopup.IsOpen)
                 PositionPenOptionsPopup();
         };

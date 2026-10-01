@@ -1622,7 +1622,7 @@
 
                                 BorderThickness="1"
 
-                                CornerRadius="18"
+                                CornerRadius="20"
 
                                 Opacity="1"
 
@@ -1630,7 +1630,7 @@
 
                             <Button x:Name="OpenSecondPdfButton" Click="OpenSecondPdf_Click" Style="{StaticResource ButtonNoStateMachineStyle}"
 
-                                    Width="36" Height="36" CornerRadius="18" Padding="0"
+                                    Width="40" Height="40" CornerRadius="20" Padding="0" UseLayoutRounding="True"
 
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
@@ -1638,7 +1638,12 @@
 
                                    >
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE710;" FontSize="16"/>
+                                <Path x:Name="OpenSecondPdfGlyph" Width="32" Height="32"
+                                      Data="M16,8 L16,24 M8,16 L24,16"
+                                      Stroke="{Binding ElementName=OpenSecondPdfButton, Path=Foreground}"
+                                      StrokeThickness="2"
+                                      Stretch="None"
+                                      StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"/>
 
                             </Button>
 
