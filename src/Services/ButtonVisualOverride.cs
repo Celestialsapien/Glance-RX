@@ -51,10 +51,11 @@ internal static class ButtonVisualOverride
 {
     /// <summary>接管指定按钮的视觉输出。应在控件模板已应用之后调用（例如 Page.Loaded）。</summary>
     /// <param name="transparentAtRest">true = 静止必须保持透明的按钮（目前只有缩放预设浮层 8 颗）：
-    /// 静止（既非悬停也非按下）时<b>不写任何值</b>，让模板根回落 TemplateBinding（即按钮自己的
-    /// <c>Transparent</c> 底与主题前景）⇒ <b>静止外观与未接管时逐像素一致</b>；只有 hover / pressed
-    /// 两档才写已验收的 <c>ToggleButton*PointerOver</c> / <c>ToggleButton*Pressed</c>（整颗变色，
-    /// 与功能按钮同源）。09-30 已否决这类按钮的「描边变体」（丑 + 点击无反馈），故不走描边。</param>
+    /// 静止（既非悬停也非按下）时底色 / 边框写 null（= 无画刷、不涂任何底），前景写静止档前景刷
+    /// （<c>ToggleButtonForeground</c>）；只有 hover / pressed 两档才写已验收的
+    /// <c>ToggleButton*PointerOver</c> / <c>ToggleButton*Pressed</c>（整颗变色，与功能按钮同源）。
+    /// ⚠ 前景绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（10-02 实测浮层静止全不可见）。
+    /// 09-30 已否决这类按钮的「描边变体」（丑 + 点击无反馈），故不走描边。</param>
     public static void Attach(Button button, bool transparentAtRest = false)
     {
         if (button == null) return;
@@ -179,13 +180,13 @@ internal static class ButtonVisualOverride
 
             if (_transparentAtRest && suffix.Length == 0)
             {
-                // 透明 pill 的静止档：一律写 null = 清掉本地值 ⇒ ContentPresenter 回落 TemplateBinding
-                // （按钮自己的 Transparent 底 / 主题前景 / 模板边框），静止外观与未接管时**逐像素一致**。
-                // 不写任何键是为了避免 App.xaml 的 ToggleButtonBackground（不透明中性底）在静止态就把
-                // 透明 pill 涂成实色块 —— 那会直接破坏胶囊设计。
+                // 透明 pill 的静止档：底色 / 边框必须留空，否则 App.xaml 的 ToggleButtonBackground
+                // （不透明中性底）会在静止态就把透明 pill 涂成实色块 —— 直接破坏胶囊设计。
+                // ⚠ Foreground 绝不能写 null：null 是「本地值 = 无画刷」而非「清值回退 TemplateBinding」，
+                //   文字会整段消失（10-02 实测：缩放预设浮层静止完全不可见、hover 才显形）。必须写回静止档前景刷。
                 _root.Background = null;
-                _root.Foreground = null;
                 _root.BorderBrush = null;
+                _root.Foreground = Resource("ToggleButtonForeground") as Brush;
                 return;
             }
 
