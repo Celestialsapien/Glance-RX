@@ -4895,22 +4895,73 @@ public sealed partial class MainPage : Page
     {
         if (_zoomPresetOverrideAttached || ZoomPresetPanel == null) return;
 
+        int count = ZoomPresetPanel.Children.Count;
         int attached = 0;
-        foreach (var child in ZoomPresetPanel.Children)
+        // 每项四角统一倒圆角，与展开菜单外缘圆角完全同心：
+        // 菜单 CornerRadius=8，悬浮背景内缩 BorderThickness(1)+Padding(4)=5 ⇒ 8-5=3 即同心半径。
+        // 用户确认凹缝可接受（同时仅一颗悬浮，看不到），故不做首末项区分（10-02 精修）。
+        var itemRadius = new CornerRadius(3);
+        for (int i = 0; i < count; i++)
         {
-            if (child is Button presetItem)
+            if (ZoomPresetPanel.Children[i] is Button presetItem)
             {
                 // 与缩放胶囊同源：静止保持透明（浮层项本身是透明底），hover / pressed 才上色。
                 ButtonVisualOverride.Attach(presetItem, transparentAtRest: true);
+                // ContentPresenter 已 CornerRadius=TemplateBinding，设 Button.CornerRadius 即让悬浮背景被裁圆。
+                presetItem.CornerRadius = itemRadius;
                 attached++;
             }
         }
+
+        if (attached > 0)
+        {
+            // 菜单面板「独占 hover」：由面板自身的 PointerMoved 实时算指针落在哪颗内，
+            // 只让那颗亮、其余全灭。锚在面板（这片区域唯一稳定收到指针事件的元素）而非各颗的
+            // PointerExited —— 后者在 popup/flyout 输入上下文切换时常被 WinUI 吞掉（旧项残留亮着的根因）。
+            // handledEventsToo=true：ButtonBase 可能把 PointerMoved 标记 Handled，否则冒泡不到面板。
+            ZoomPresetPanel.AddHandler(PointerMovedEvent, new PointerEventHandler(ZoomPresetPanel_PointerMoved), true);
+            // 指针离开整片菜单 ⇒ 全灭（用相对坐标核对确已离开，排除「从面板背景移到子项」的假退出）。
+            ZoomPresetPanel.AddHandler(PointerExitedEvent, new PointerEventHandler(ZoomPresetPanel_PointerExited), true);
+        }
         _zoomPresetOverrideAttached = attached > 0;
+    }
+
+    // 菜单面板驱动预设项独占 hover：指针落在哪颗内、就只让那颗亮；落在凹缝 / 菜单外则全灭。
+    // 用相对坐标 e.GetCurrentPoint(item) 判定 —— 同一可视树内、无跨树坐标系问题（不碰 TransformToVisual(null)）。
+    private void ZoomPresetPanel_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        Button? hovered = null;
+        int n = ZoomPresetPanel.Children.Count;
+        for (int i = 0; i < n; i++)
+        {
+            if (ZoomPresetPanel.Children[i] is Button b)
+            {
+                var p = e.GetCurrentPoint(b).Position;
+                if (p.X >= 0 && p.Y >= 0 && p.X < b.ActualWidth && p.Y < b.ActualHeight)
+                {
+                    hovered = b;
+                    break;
+                }
+            }
+        }
+        ButtonVisualOverride.SetFlyoutHover(hovered);
+    }
+
+    // ⚠ UWP/WinUI 里从面板背景移到子项也会触发面板的 PointerExited，故先用相对坐标核对指针确实已在面板外，
+    // 避免「指针还在菜单里却被清掉」。
+    private void ZoomPresetPanel_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        var p = e.GetCurrentPoint(ZoomPresetPanel).Position;
+        if (p.X >= 0 && p.Y >= 0 && p.X < ZoomPresetPanel.ActualWidth && p.Y < ZoomPresetPanel.ActualHeight)
+            return;
+        ButtonVisualOverride.ClearFlyoutHoverStates();
     }
 
     private void ZoomPresetFlyout_Opening(object sender, object e)
     {
         AttachZoomPresetOverrides();      // 兜底：Loaded 时若 Flyout 内容尚未就绪，这里补一次
+        // 每次展开都从「无任何项悬停」开始：清掉上次残留（不依赖 Loaded 时机的兜底，成本为零）。
+        ButtonVisualOverride.ClearFlyoutHoverStates();
 
         BottomPillHideAnim?.Stop();   // 取消在途淡出，避免它与下面的淡入抢同一 Opacity 属性
         BottomPillShowAnim?.Begin();  // 重新淡入：菜单展开期间胶囊必可见
