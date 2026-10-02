@@ -202,24 +202,58 @@
 
 
 
-        <!-- 透明感知描边变体被否决（09-30）：透明 pill 改用 ButtonNoStateMachineStyle + ButtonVisualOverride，与功能按钮同逻辑（整颗变色）。 -->
+        <!-- 缩放预设浮层 8 颗：同机制，但【逐条抄 ZoomFlyoutItemStyle 的全部 setter】再换无状态机模板。
 
-        <Style x:Key="ZoomFlyoutItemStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+             ⚠ 任何 NoStateMachineStyle 都必须「基样式 setter + Template 全抄，仅删状态机」——
 
+               只抄 Template 会丢 Padding / CornerRadius / Foreground 而让外观变形（09-29 实测踩过）。 -->
+        <Style x:Key="ZoomFlyoutItemNoStateMachineStyle" TargetType="Button">
             <Setter Property="IsTabStop" Value="False"/>
-
             <Setter Property="Padding" Value="16,8"/>
-
             <Setter Property="HorizontalContentAlignment" Value="Center"/>
-
             <Setter Property="Background" Value="Transparent"/>
-
             <Setter Property="BorderThickness" Value="0"/>
-
             <Setter Property="CornerRadius" Value="0"/>
-
             <Setter Property="Foreground" Value="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
+            <Setter Property="Template">
 
+                <Setter.Value>
+
+                    <ControlTemplate TargetType="Button">
+
+                        <ContentPresenter x:Name="ContentPresenter"
+
+                                          Background="{TemplateBinding Background}"
+
+                                          Foreground="{TemplateBinding Foreground}"
+
+                                          BackgroundSizing="{TemplateBinding BackgroundSizing}"
+
+                                          BorderBrush="{TemplateBinding BorderBrush}"
+
+                                          BorderThickness="{TemplateBinding BorderThickness}"
+
+                                          Content="{TemplateBinding Content}"
+
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+
+                                          ContentTransitions="{TemplateBinding ContentTransitions}"
+
+                                          CornerRadius="{TemplateBinding CornerRadius}"
+
+                                          Padding="{TemplateBinding Padding}"
+
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+
+                                          AutomationProperties.AccessibilityView="Raw"/>
+
+                    </ControlTemplate>
+
+                </Setter.Value>
+
+            </Setter>
         </Style>
 
         <Style x:Key="ZoomFlyoutPresenterStyle" TargetType="FlyoutPresenter">
@@ -1774,7 +1808,7 @@
 
                         <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
 
-                            <Button x:Name="ZoomOutButton" Click="ZoomOut_Click" Width="32" Height="32" CornerRadius="16"
+                            <Button x:Name="ZoomOutButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="ZoomOut_Click" Width="32" Height="32" CornerRadius="16"
                                     UseLayoutRounding="True"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
@@ -1788,7 +1822,7 @@
 
                             </Button>
 
-                            <Button x:Name="ZoomInButton" Click="ZoomIn_Click" Width="32" Height="32" CornerRadius="16"
+                            <Button x:Name="ZoomInButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="ZoomIn_Click" Width="32" Height="32" CornerRadius="16"
                                     UseLayoutRounding="True"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
@@ -1802,7 +1836,7 @@
 
                             </Button>
 
-                            <Button x:Name="ZoomValueButton" Padding="8,4" MinWidth="56" Height="28" CornerRadius="14"
+                            <Button x:Name="ZoomValueButton" Style="{StaticResource ButtonNoStateMachineStyle}" Padding="8,4" MinWidth="56" Height="32" CornerRadius="16"
 
                                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 
@@ -1812,11 +1846,11 @@
 
                                 <TextBlock x:Name="ZoomValueText" Text="100%" TextAlignment="Center"
 
-                                           VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold"
+                                           VerticalAlignment="Center"
 
-                                           Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                                           Foreground="{Binding ElementName=ZoomValueButton, Path=Foreground}"
 
-                                           Margin="0,-1,0,0"/>
+                                           Margin="3,-2,0,0"/>
 
                                 <Button.Flyout>
 
@@ -1824,21 +1858,21 @@
 
                                         <StackPanel x:Name="ZoomPresetPanel" Spacing="0">
 
-                                            <Button Content="10%" Click="ZoomPreset_Click" Tag="10" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="10%" Click="ZoomPreset_Click" Tag="10" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="25%" Click="ZoomPreset_Click" Tag="25" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="25%" Click="ZoomPreset_Click" Tag="25" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="50%" Click="ZoomPreset_Click" Tag="50" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="50%" Click="ZoomPreset_Click" Tag="50" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="75%" Click="ZoomPreset_Click" Tag="75" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="75%" Click="ZoomPreset_Click" Tag="75" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="100%" Click="ZoomPreset_Click" Tag="100" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="100%" Click="ZoomPreset_Click" Tag="100" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="125%" Click="ZoomPreset_Click" Tag="125" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="125%" Click="ZoomPreset_Click" Tag="125" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="150%" Click="ZoomPreset_Click" Tag="150" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="150%" Click="ZoomPreset_Click" Tag="150" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
-                                            <Button Content="200%" Click="ZoomPreset_Click" Tag="200" Style="{StaticResource ZoomFlyoutItemStyle}"/>
+                                            <Button Content="200%" Click="ZoomPreset_Click" Tag="200" Style="{StaticResource ZoomFlyoutItemNoStateMachineStyle}"/>
 
                                         </StackPanel>
 
@@ -1848,7 +1882,7 @@
 
                             </Button>
 
-                            <Button x:Name="FitWidthButton" Click="FitWidth_Click" Width="32" Height="32" CornerRadius="16"
+                            <Button x:Name="FitWidthButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="FitWidth_Click" Width="32" Height="32" CornerRadius="16"
                                     UseLayoutRounding="True"
                                     Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 

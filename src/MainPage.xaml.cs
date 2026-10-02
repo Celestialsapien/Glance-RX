@@ -225,6 +225,7 @@ public sealed partial class MainPage : Page
     private Microsoft.UI.Xaml.DispatcherTimer? _ringScopeTimer; // 周期性检测指针是否在窗口内，作用域开/关圆环
     private DispatcherTimer? _zoomPillHideTimer; // 缩放胶囊隐藏兜底：Flyout(快速缩放菜单)关闭瞬间的输入上下文切换会吞掉胶囊的 PointerExited，导致胶囊"悬停卡住"不隐藏；低频轮询核对实时光标位置兜底淡出
     private bool _glyphStrokeScaleHooked;        // OpenSecondPdfGlyph 的描边是否已挂钩 RasterizationScale 变化（Loaded 后只挂一次）
+    private bool _zoomPresetOverrideAttached;    // 缩放预设浮层 8 颗是否已接管（Flyout 内容首次打开才进可视树，Loaded / Opening 两处兜底各试一次）
 
     public MainPage()
     {
@@ -647,6 +648,16 @@ public sealed partial class MainPage : Page
         // 09-30 用户否决透明描边变体（丑 + 点击无反馈），改走功能按钮同源逻辑。
         ButtonVisualOverride.Attach(OpenSecondPdfButton);
         ButtonVisualOverride.Attach(CloseSecondPdfButton);
+
+        // 缩放胶囊 4 颗（ZoomOut / ZoomIn / ZoomValue / FitWidth）：与对比视图两颗【完全同一路线】——
+        // 同样套 ButtonNoStateMachineStyle、同样静止就带中性底、hover / pressed 整颗变色（10-02 用户拍板）。
+        ButtonVisualOverride.Attach(ZoomOutButton);
+        ButtonVisualOverride.Attach(ZoomInButton);
+        ButtonVisualOverride.Attach(ZoomValueButton);
+        ButtonVisualOverride.Attach(FitWidthButton);
+
+        // 缩放预设浮层 8 颗：无 x:Name，按容器遍历接管（见 AttachZoomPresetOverrides）。
+        AttachZoomPresetOverrides();
 
         // 侧边栏滚动 → 补渲染滚入视口的缩略图（缓存窗口项滚入视口不触发 ContainerContentChanging）。
         AttachSidebarScrollRefill();
@@ -4875,8 +4886,32 @@ public sealed partial class MainPage : Page
     /// 注：胶囊显隐只动画 Opacity（MainPage.xaml:523-528），Opacity=0 时仍 IsHitTestVisible，
     /// 故不可见的 ZoomValueButton 仍可点击——这正是竞态能被触发的前提，此处用 Opening 补上不变量。
     /// </summary>
+    // 缩放预设浮层里的 8 颗倍率按钮：没有 x:Name，按容器遍历接管。
+    // ⚠ Flyout 内容活在主可视树之外：InitializeComponent 时 ZoomPresetPanel.Children 一般已可用，
+    //   但模板要等首次打开才应用 ⇒ 接管器自身挂了 Loaded，打开时会自动完成首次重绘。
+    //   故 MainPage_Loaded 与 Flyout.Opening 各试一次，用 _zoomPresetOverrideAttached 守卫
+    //   （以"至少接管到一颗"为成功判据，避免重复 Attach 造成事件重复注册）。
+    private void AttachZoomPresetOverrides()
+    {
+        if (_zoomPresetOverrideAttached || ZoomPresetPanel == null) return;
+
+        int attached = 0;
+        foreach (var child in ZoomPresetPanel.Children)
+        {
+            if (child is Button presetItem)
+            {
+                // 与缩放胶囊同源：静止保持透明（浮层项本身是透明底），hover / pressed 才上色。
+                ButtonVisualOverride.Attach(presetItem, transparentAtRest: true);
+                attached++;
+            }
+        }
+        _zoomPresetOverrideAttached = attached > 0;
+    }
+
     private void ZoomPresetFlyout_Opening(object sender, object e)
     {
+        AttachZoomPresetOverrides();      // 兜底：Loaded 时若 Flyout 内容尚未就绪，这里补一次
+
         BottomPillHideAnim?.Stop();   // 取消在途淡出，避免它与下面的淡入抢同一 Opacity 属性
         BottomPillShowAnim?.Begin();  // 重新淡入：菜单展开期间胶囊必可见
     }

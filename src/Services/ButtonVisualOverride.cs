@@ -40,16 +40,25 @@ namespace Glance.Services;
 /// <para><b>不碰的东西</b>：模板、边框线宽、圆角、Padding、字体、布局、焦点 visuals 一律不动。</para>
 ///
     /// <para><b>适用范围</b>：标准外观功能按钮 + 对比视图开/关 PDF 的两颗 pill（09-30 用户否决透明描边变体，
-    /// 改走「整颗变色」同源逻辑）。仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、缩放胶囊（透明 pill，待用户决定）、
-    /// 浮层按钮（缩放预设）、以及书签模板内按钮（DataTemplate 无法 x:Name 引用）—— 接管会破坏其设计或取不到字段。</para>
+    /// 改走「整颗变色」同源逻辑）。<b>10-02 补齐</b>：缩放胶囊 4 颗与缩放预设浮层 8 颗以
+    /// 缩放胶囊 4 颗 10-02 已与对比视图两颗统一（静止同样带中性底，用户拍板）；
+    /// <b>仅缩放预设浮层 8 颗</b>用 <c>transparentAtRest: true</c> —— 静止档写 null 保持透明、
+    /// 只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
+    /// 仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、欢迎页 OpenPdfButton、书签模板内按钮
+    /// （DataTemplate 无法 x:Name 引用）—— 这三类用户已确认现状满意，接管会破坏其设计或取不到字段。</para>
 /// </remarks>
 internal static class ButtonVisualOverride
 {
     /// <summary>接管指定按钮的视觉输出。应在控件模板已应用之后调用（例如 Page.Loaded）。</summary>
-    public static void Attach(Button button)
+    /// <param name="transparentAtRest">true = 静止必须保持透明的按钮（目前只有缩放预设浮层 8 颗）：
+    /// 静止（既非悬停也非按下）时<b>不写任何值</b>，让模板根回落 TemplateBinding（即按钮自己的
+    /// <c>Transparent</c> 底与主题前景）⇒ <b>静止外观与未接管时逐像素一致</b>；只有 hover / pressed
+    /// 两档才写已验收的 <c>ToggleButton*PointerOver</c> / <c>ToggleButton*Pressed</c>（整颗变色，
+    /// 与功能按钮同源）。09-30 已否决这类按钮的「描边变体」（丑 + 点击无反馈），故不走描边。</param>
+    public static void Attach(Button button, bool transparentAtRest = false)
     {
         if (button == null) return;
-        new Link(button).Attach();
+        new Link(button, transparentAtRest).Attach();
     }
 
     // 所有已接管的 Link 实例，供主题切换时同步强制重绘（见 RefreshAll）。
@@ -70,6 +79,7 @@ internal static class ButtonVisualOverride
     private sealed class Link
     {
         private readonly Button _button;
+        private readonly bool _transparentAtRest;
         private ContentPresenter? _root;
 
         private bool _hover;
@@ -77,9 +87,10 @@ internal static class ButtonVisualOverride
         private bool _lastHover;
         private bool _dirty;
 
-        internal Link(Button button)
+        internal Link(Button button, bool transparentAtRest)
         {
             _button = button;
+            _transparentAtRest = transparentAtRest;
         }
 
         internal void Attach()
@@ -165,6 +176,18 @@ internal static class ButtonVisualOverride
             //   绝不用 Button*（顶层 generic 提升实例，深浅错乱，见类注释）；也绝不带 Checked 后缀
             //   （那是 Obsidian 紫强调档，功能按钮没有选中态）。
             string suffix = pressed ? "Pressed" : _hover ? "PointerOver" : string.Empty;
+
+            if (_transparentAtRest && suffix.Length == 0)
+            {
+                // 透明 pill 的静止档：一律写 null = 清掉本地值 ⇒ ContentPresenter 回落 TemplateBinding
+                // （按钮自己的 Transparent 底 / 主题前景 / 模板边框），静止外观与未接管时**逐像素一致**。
+                // 不写任何键是为了避免 App.xaml 的 ToggleButtonBackground（不透明中性底）在静止态就把
+                // 透明 pill 涂成实色块 —— 那会直接破坏胶囊设计。
+                _root.Background = null;
+                _root.Foreground = null;
+                _root.BorderBrush = null;
+                return;
+            }
 
             _root.Background = Resource("ToggleButtonBackground" + suffix) as Brush;
             _root.Foreground = Resource("ToggleButtonForeground" + suffix) as Brush;
