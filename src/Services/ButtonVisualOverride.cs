@@ -46,22 +46,26 @@ namespace Glance.Services;
 ///
 /// <para><b>不碰的东西</b>：模板、边框线宽、圆角、Padding、字体、布局、焦点 visuals 一律不动。</para>
 ///
-    /// <para><b>适用范围</b>：标准外观功能按钮 + 对比视图开/关 PDF 的两颗 pill（09-30 用户否决透明描边变体，
-    /// 改走「整颗变色」同源逻辑）。<b>10-02 补齐</b>：缩放胶囊 4 颗与缩放预设浮层 8 颗以
-    /// 缩放胶囊 4 颗 10-02 已与对比视图两颗统一（静止同样带中性底，用户拍板）；
-    /// <b>仅缩放预设浮层 8 颗</b>用 <c>transparentAtRest: true</c> —— 静止档写 null 保持透明、
-    /// 只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
-    /// 仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、欢迎页 OpenPdfButton、书签模板内按钮
-    /// （DataTemplate 无法 x:Name 引用）—— 这三类用户已确认现状满意，接管会破坏其设计或取不到字段。</para>
+/// <para><b>适用范围</b>：标准外观功能按钮 + 对比视图开/关 PDF 的两颗 pill（09-30 用户否决透明描边变体，
+/// 改走「整颗变色」同源逻辑）。<b>10-02 补齐</b>缩放胶囊 4 颗与缩放预设浮层 8 颗：
+/// 缩放胶囊 4 颗已与对比视图两颗统一（静止同样带中性底，用户拍板）；
+/// <b>仅缩放预设浮层 8 颗</b>用 <c>transparentAtRest: true</c> —— 静止档底色写缓存的 <c>TransparentBrush</c>
+/// （不可见但仍可命中；<b>绝不是 null</b> —— null 背景的 ContentPresenter 整片不参与命中测试，
+/// 只有文字能被点中，10-02 实测），只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
+/// 仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、欢迎页 OpenPdfButton、书签模板内按钮
+/// （DataTemplate 无法 x:Name 引用）—— 这三类用户已确认现状满意，接管会破坏其设计或取不到字段。</para>
 /// </remarks>
 internal static class ButtonVisualOverride
 {
     /// <summary>接管指定按钮的视觉输出。应在控件模板已应用之后调用（例如 Page.Loaded）。</summary>
     /// <param name="transparentAtRest">true = 静止必须保持透明的按钮（目前只有缩放预设浮层 8 颗）：
-    /// 静止（既非悬停也非按下）时底色 / 边框写 null（= 无画刷、不涂任何底），前景写静止档前景刷
-    /// （<c>ToggleButtonForeground</c>）；只有 hover / pressed 两档才写已验收的
+    /// 静止（既非悬停也非按下）时底色写缓存的 <c>TransparentBrush</c>、边框写 null，
+    /// 前景写静止档前景刷（<c>ToggleButtonForeground</c>）；只有 hover / pressed 两档才写已验收的
     /// <c>ToggleButton*PointerOver</c> / <c>ToggleButton*Pressed</c>（整颗变色，与功能按钮同源）。
-    /// ⚠ 前景绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（10-02 实测浮层静止全不可见）。
+    /// ⚠ 底色绝不能写 null：null 背景的 ContentPresenter 整片不参与命中测试，只有文字能被命中
+    ///   ⇒ hover / click 只在文字附近生效、扫过文字后才整片可点（10-02 实测）。
+    ///   <c>TransparentBrush</c> 不可见但可命中，才是这里的正确写法。
+    /// ⚠ 前景也绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（10-02 实测浮层静止全不可见）。
     /// 09-30 已否决这类按钮的「描边变体」（丑 + 点击无反馈），故不走描边。</param>
     public static void Attach(Button button, bool transparentAtRest = false)
     {

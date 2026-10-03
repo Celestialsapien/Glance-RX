@@ -111,9 +111,14 @@ internal static class ToggleButtonVisualOverride
 
             // ③ 主题切换 / 反复挂载都可能让控件模板被重新应用（模板根换成新实例），
             //    并置 _dirty 强制重算 —— 否则 (checked, pressed, hover) 一个都没变时会被下面的早退挡掉，
-            //    资源里的主题色换了也白换。Unloaded 不挂：重挂时 Loaded 自然会重算一次。
+            //    资源里的主题色换了也白换。
+            //    ⚠ Loaded 必须重新登记到 _instances（见 EnsureRegistered 注释）：下面 ⑤ 挂了 Unloaded，
+            //    一旦该控件活在某个 Popup/Flyout 里，关闭时内容被卸载就会把本 Link 摘出实例表；
+            //    Attach 又受业务守卫不会重跑 ⇒ 若 Loaded 不补回去，RefreshAll() 会永久漏掉这一项
+            //    ⇒ 主题切换时它仍持旧主题画刷、该闪的白照闪。姊妹类 ButtonVisualOverride 已在
+            //    10-03 实证踩过（缩放预设浮层的悬浮色残留），此处同步堵上。
             _button.ActualThemeChanged += (s, e) => { _dirty = true; Sync(); };
-            _button.Loaded += (s, e) => { _dirty = true; Sync(); };
+            _button.Loaded += (s, e) => { EnsureRegistered(); _dirty = true; Sync(); };
 
             // ④ 指针落点只用来维护「鼠标到底在不在按钮上」，绝不采信 IsPointerOver / PointerExited
             _button.PointerEntered += (s, e) => Track(e);
@@ -131,6 +136,22 @@ internal static class ToggleButtonVisualOverride
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
             _instances.Remove(this);
+        }
+
+        /// <summary>
+        /// 保证本 Link 仍在全局实例表 <see cref="_instances"/> 里（幂等）。
+        /// ⚠ Unloaded 会把本 Link 摘出实例表（控件被移出可视树，例如所在 Popup/Flyout 关闭）；
+        /// 重新载入时 Attach 通常不会再跑，只有 Loaded 回调会跑 ⇒ 必须在此补回，
+        /// 否则 <see cref="RefreshAll"/> 会永久漏掉这一项（主题切换不再更新它）。
+        /// 与姊妹类 <c>ButtonVisualOverride.Link.EnsureRegistered</c> 同一处缺陷、同一套修法。
+        /// </summary>
+        private void EnsureRegistered()
+        {
+            for (int i = 0; i < _instances.Count; i++)
+            {
+                if (ReferenceEquals(_instances[i], this)) return;
+            }
+            _instances.Add(this);
         }
 
         /// <summary>置脏并立即重绘（供外部 RefreshAll 调用）。</summary>
@@ -239,14 +260,14 @@ internal static class ToggleButtonVisualOverride
                 return themed;
             }
 
-            // ② 退回 Default 档（WinUI 的顶层主题字典没有 "Dark" 键，暗色值就在 Default 里）
+            // ③ 退回 Default 档（WinUI 的顶层主题字典没有 "Dark" 键，暗色值就在 Default 里）
             if (LookupThemeDict(resources, "Default") is ResourceDictionary fallback
                 && fallback.TryGetValue(key, out var defaulted))
             {
                 return defaulted;
             }
 
-            // ③ 最后才考虑顶层字典，纯粹是为了「主题字典里压根没定义」时不写 null
+            // ④ 最后才考虑顶层字典，纯粹是为了「主题字典里压根没定义」时不写 null
             if (resources.TryGetValue(key, out var direct)) return direct;
 
             return null;
