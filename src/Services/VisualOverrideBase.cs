@@ -21,6 +21,12 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
     // 静态字段随 closed-generic 各持一份：ButtonVisualOverride 与 ToggleButtonVisualOverride 互不影响（与重构前等价）。
     protected static readonly List<BaseLink> _instances = new();
 
+    // 弹模态对话框（文件选择器等）期间置 true：抑制所有按钮的 hover 更新（强制静止）。
+    // 弹窗打开瞬间常有游离 PointerMoved/Entered 把按钮 hover 重新置 true、且弹窗期间整页几何驱动不触发
+    // ⇒ 按钮停在悬浮态、关闭后随鼠标移动才回落（"凭空变色"）。置 true 时立即把所有已接管按钮清回静止；
+    // 置 false 后由下一次真实指针移动按几何恢复。详见 ButtonVisualOverride / MainPage 的 OpenPdfAsync。
+    protected static bool _hoverSuppressed;
+
     /// <summary>强制所有已接管按钮按当前主题立即重绘。应在主题被同步设值的时刻调用
     /// （如 MainPage 主题下拉），消除 ActualThemeChanged 异步传播造成的「旧白底闪一帧」。</summary>
     public static void RefreshAll()
@@ -44,6 +50,19 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             // 活在另一棵 Xaml 树的（popup/flyout 内容）：跨树坐标不可靠，由所在容器的处理器驱动
             if (link.ExcludeFromPageHoverDrive) continue;
             link.SetHoverFromPointer(e);
+        }
+    }
+
+    /// <summary>弹模态对话框期间调用：抑制全部已接管按钮的 hover 更新（强制静止）。
+    /// 仅应在「点击按钮即弹模态对话框、鼠标随对话框离开按钮」的路径里 <c>true → await → false</c> 包裹，
+    /// 如打开/保存文件选择器。置 true 时立即把所有已接管按钮清回静止；置 false 后由下一次真实
+    /// 指针移动按几何恢复 hover / 静止，杜绝「凭空变色」。</summary>
+    public static void SetHoverSuppressed(bool suppressed)
+    {
+        _hoverSuppressed = suppressed;
+        if (suppressed)
+        {
+            foreach (var link in _instances) link.SetHover(false);
         }
     }
 
@@ -135,6 +154,8 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         /// <c>BaseLink</c> 的派生类，protected 成员对包含类不可访问（CS0122，实测）。</para></summary>
         internal void SetHoverFromPointer(PointerRoutedEventArgs e)
         {
+            // 弹模态对话框期间直接按静止处理（见 SetHoverSuppressed），不读几何。
+            if (_hoverSuppressed) { SetHover(false); return; }
             var pos = e.GetCurrentPoint(_button).Position;
             bool inside = pos.X >= 0 && pos.Y >= 0
                        && pos.X < _button.ActualWidth && pos.Y < _button.ActualHeight;
@@ -154,6 +175,9 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         /// 同样只在真变化时才置脏重绘。</summary>
         internal void SetHover(bool hover)
         {
+            // 弹模态对话框期间抑制 hover（详见 SetHoverSuppressed）：任何 hover 请求都按静止处理，
+            // 否则弹窗打开瞬间的游离 PointerMoved/Entered 会把按钮卡在悬浮态、且弹窗期间整页几何驱动不触发。
+            if (_hoverSuppressed) hover = false;
             if (_hover == hover) return;
             _hover = hover;
             _dirty = true;

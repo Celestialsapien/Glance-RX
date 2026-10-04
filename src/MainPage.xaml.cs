@@ -645,6 +645,11 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(SettingsButton);
         ButtonVisualOverride.Attach(AddBookmarkButton);
 
+        // 欢迎页「打开 PDF」按钮（10-05）：并入几何驱动 + accent 紫配色，去掉原生 VSM flicker。
+        // 弹文件选择器后鼠标大概率不在按钮上/不在同一层级 ⇒ 由整页 PageRoot_PointerMoved 几何判定回静止；
+        // 关闭后按鼠标位置正常恢复 hover / 静止。详见 ButtonVisualOverride.Apply 的 _accent 分支。
+        ButtonVisualOverride.Attach(OpenPdfButton, accent: true);
+
         // 对比视图开/关 PDF 的两颗 pill：改用 ButtonVisualOverride（整颗变色，与功能按钮同逻辑）。
         // 09-30 用户否决透明描边变体（丑 + 点击无反馈），改走功能按钮同源逻辑。
         ButtonVisualOverride.Attach(OpenSecondPdfButton);
@@ -930,30 +935,37 @@ public sealed partial class MainPage : Page
     private async Task OpenPdfAsync()
     {
         var picker = new FileOpenPicker();
-        
+
         // WinUI 3 desktop apps need to associate the picker with the window handle (HWND)
         var app = Application.Current as App;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(app?.MainWindow);
         WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-        
+
         picker.ViewMode = PickerViewMode.List;
         picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
         picker.FileTypeFilter.Add(".pdf");
 
-        StorageFile file = await picker.PickSingleFileAsync();
-        if (file != null)
+        // 弹模态文件选择器期间抑制所有按钮的 hover 更新（强制静止）：弹窗打开瞬间会有游离的
+        // PointerMoved/Entered 把按钮 hover 重新置 true、且弹窗期间整页几何驱动不触发 ⇒ 按钮停在
+        // 悬浮态、关闭后随鼠标移动才回落（"凭空变色" flicker）。置 true 立即清回静止；选择器关闭后
+        // （无论是否选了文件）置 false，由下一次真实指针移动按几何恢复 hover / 静止。
+        ButtonVisualOverride.SetHoverSuppressed(true);
+        try
         {
-            UpdateWindowTitle(file.Name);
-            try
+            StorageFile file = await picker.PickSingleFileAsync();
+            if (file != null)
             {
-                await LoadPdfAsync(file.Path);
-            }
-            catch (Exception ex)
-            {
-                // Show error dialog
-                var errorDialog = new ContentDialog
+                UpdateWindowTitle(file.Name);
+                try
                 {
-                    Title = Glance.Services.LocalizationService.Get("Error"),
+                    await LoadPdfAsync(file.Path);
+                }
+                catch (Exception ex)
+                {
+                    // Show error dialog
+                    var errorDialog = new ContentDialog
+                    {
+                        Title = Glance.Services.LocalizationService.Get("Error"),
                     Content = string.Format(Glance.Services.LocalizationService.Get("PdfLoadErrorContent"), ex.Message),
                     CloseButtonText = Glance.Services.LocalizationService.Get("Ok"),
                     XamlRoot = this.XamlRoot,
@@ -966,6 +978,12 @@ public sealed partial class MainPage : Page
                 WelcomePanel.Visibility = Visibility.Visible;
                 SidebarSplitView.Visibility = Visibility.Collapsed;
             }
+        }
+        }
+        finally
+        {
+            // 选择器已关闭（无论是否选了文件），解除 hover 抑制；下一次真实指针移动按几何恢复。
+            ButtonVisualOverride.SetHoverSuppressed(false);
         }
     }
 

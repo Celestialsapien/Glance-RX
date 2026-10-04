@@ -1098,11 +1098,20 @@
 
                 
 
-                <!-- 配色走 App.xaml 的 GlanceAccentButtonStyle（Obsidian 紫）；覆盖 generic 的
+                <!-- 配色走 App.xaml 的 GlanceAccentButtonStyle（Obsidian 紫，10-05 已改为无状态机模板）；
+                     覆盖 generic 的 AccentButton* 主题键无效（见 App.xaml 第 12 轮注释）。视觉 hover/pressed
+                     由 MainPage.xaml.cs 的 ButtonVisualOverride.Attach(OpenPdfButton, accent: true) 几何驱动，
+                     消除点击弹文件选择器时的 VSM flicker。
 
-                     AccentButton* 主题键无效（见 App.xaml 第 12 轮注释），故不再用 AccentButtonStyle -->
+                     ⚠ 文字相对图标"下坠 ~1px"的根因（10-04 像素取证 @125% DPI，仅作记录，已回调）：
+                     CJK 行盒的 ascent 余量 > descent ⇒ 文字【墨迹视觉重心】落在其行盒中心下方 δ≈0.8 DIP，
+                     而 SymbolIcon 字形居中 ⇒ 目测文字比图标低（实测 text_center−icon_center = +1.0px）。
+                     ⚠ 此处【不能】靠 VerticalContentAlignment 修：按钮高度由内容撑开 + generic 未设该属性
+                     ⇒ 不产生布局效果。10-04 曾用 RenderTransform Y=-1 做光学补偿，但 F5 后主观不顺眼、
+                     用户判定原状（无补偿）的"微妙平衡"更优 ⇒ 已撤销补偿，恢复原始无 VerticalAlignment / 无
+                     RenderTransform 的状态。此根因注释保留以便后续若重做字体/行盒时参考。 -->
 
-                <Button Click="OpenPdf_Click" Margin="0,16,0,0" Style="{ThemeResource GlanceAccentButtonStyle}" Padding="16,8">
+                <Button x:Name="OpenPdfButton" Click="OpenPdf_Click" Margin="0,16,0,0" Style="{ThemeResource GlanceAccentButtonStyle}" Padding="16,8">
 
                     <StackPanel Orientation="Horizontal" Spacing="8">
 

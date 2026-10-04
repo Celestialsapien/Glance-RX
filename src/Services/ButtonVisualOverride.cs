@@ -51,11 +51,13 @@ namespace Glance.Services;
 /// 胶囊是亚克力（透 PDF），静止档要与胶囊<b>完全一致、看不到圆边界</b>（用户定案）；
 /// 于是 <c>transparentAtRest</c> 覆盖两类：<b>缩放预设浮层 8 颗</b>（菜单项语义：静止不该有独立底色）
 /// 与 <b>缩放胶囊 4 颗</b>（并入亚克力胶囊）。二者 hover 的事件来源不同，由 <c>inPopupTree</c> 区分。
-/// 透明静止档 —— 静止档底色写缓存的 <c>TransparentBrush</c>
-/// （不可见但仍可命中；<b>绝不是 null</b> —— null 背景的 ContentPresenter 整片不参与命中测试，
-/// 只有文字能被点中，10-02 实测），只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
-/// 仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、欢迎页 OpenPdfButton、书签模板内按钮
-/// （DataTemplate 无法 x:Name 引用）—— 这三类用户已确认现状满意，接管会破坏其设计或取不到字段。</para>
+    /// 透明静止档 —— 静止档底色写缓存的 <c>TransparentBrush</c>
+    /// （不可见但仍可命中；<b>绝不是 null</b> —— null 背景的 ContentPresenter 整片不参与命中测试，
+    /// 只有文字能被点中，10-02 实测），只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
+    /// 仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、书签模板内按钮
+    /// （DataTemplate 无法 x:Name 引用）—— 这两类用户已确认现状满意，接管会破坏其设计或取不到字段。
+    /// ⚠ 欢迎页 OpenPdfButton 自 10-05 起已纳入 <c>accent</c> 模式接管（见 <see cref="Apply"/> 的 <c>_accent</c>
+    /// 分支 + App.xaml 的 <c>GlanceAccentButtonStyle</c> 已去 VSM），不再是排除项。</para>
 /// </remarks>
 internal class ButtonVisualOverride : VisualOverrideBase<Button>
 {
@@ -77,10 +79,10 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     /// 改由它所在容器的 PointerMoved 驱动。
     /// ⚠ 与「静止档是否透明」<b>正交，不要混用</b>：缩放胶囊 4 颗静止档同样是透明的，但它在<b>主可视树</b>
     /// ⇒ 必须传 <b>false</b>，否则整页驱动跳过它、悬浮色残留立刻回归。</param>
-    public static void Attach(Button button, bool transparentAtRest = false, bool inPopupTree = false)
+    public static void Attach(Button button, bool transparentAtRest = false, bool inPopupTree = false, bool accent = false)
     {
         if (button == null) return;
-        new Link(button, transparentAtRest, inPopupTree).Attach();
+        new Link(button, transparentAtRest, inPopupTree, accent).Attach();
     }
 
     // 透明刷：静止档拿它（而非 null）填 ContentPresenter.Background。
@@ -95,13 +97,11 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     /// 即缩放预设浮层 8 颗），<b>不清缩放胶囊的 ZoomValue</b>：ZoomValue 也是 <c>transparentAtRest</c>（10-04 并入亚克力胶囊），
     /// 但它在<b>主树</b>且菜单展开期间指针就停在它上面，强清会让它「按下→悬浮→静止→(移动后)悬浮」地闪一跳
     /// （10-05 实测 ZoomValue bug）。胶囊项由整页几何驱动自维护，强清反而破坏它。其余功能按钮 hover 由常态指针事件维护，更不在此列。</summary>
-    public static void ClearFlyoutHoverStates()
-    {
-        foreach (var link in _instances)
+        public static void ClearFlyoutHoverStates()
         {
-            if (link.ExcludeFromPageHoverDrive) link.ClearTransparentHoverState();
+            foreach (var link in _instances)
+                if (link.ExcludeFromPageHoverDrive) link.ClearTransparentHoverState();
         }
-    }
 
     /// <summary>浮层预设项「独占 hover」：只让 <paramref name="hovered"/> 那一颗亮，其余
     /// <c>transparentAtRest</c>（= 浮层 8 颗）一律灭。<b>由菜单面板自身的 PointerMoved 实时驱动</b>
@@ -117,11 +117,13 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     {
         private readonly bool _transparentAtRest;
         private readonly bool _inPopupTree;
+        private readonly bool _accent;
 
-        internal Link(Button button, bool transparentAtRest, bool inPopupTree) : base(button)
+        internal Link(Button button, bool transparentAtRest, bool inPopupTree, bool accent) : base(button)
         {
             _transparentAtRest = transparentAtRest;
             _inPopupTree = inPopupTree;
+            _accent = accent;
         }
 
         // Button 无选中态，无需额外状态回调
@@ -169,6 +171,40 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
             _dirty = false;
             _lastPressed = pressed;
             _lastHover = _hover;
+
+            // 欢迎页「打开 PDF」按钮（accent 模式，10-05 接管）：原来套 GlanceAccentButtonStyle（自带原生
+            // VSM + BrushTransition），点击弹文件选择器时输入上下文切换、且无法判定鼠标是否仍在按钮上
+            // ⇒ VSM 的 Pressed→Normal→PointerOver 序列在快速点击下闪烁（用户实测 flicker）。改为几何驱动后，
+            // hover 由整页 PageRoot_PointerMoved 实时几何判定、pressed 由 IsPressed 属性回调，模板已无 VSM
+            // ⇒ flicker 根因消除。配色沿用用户已验收的 Obsidian 紫三档（GlanceAccentBrush 0.9 / 0.8 梯度），
+            // 边框与原 GlanceAccentButtonStyle 完全一致：normal / hover 用 AccentControlElevationBorderBrush、
+            // pressed 边框透明（ControlFillColorTransparentBrush）。前景【不再】用 WinUI 自适应的
+            // TextOnAccentFillColor*（它会随系统强调色 / 主题错位，曾导致深色调悬浮态文字错变白且 hover 卡 true
+            // 后无法回落），改为 App.xaml 两主题字典显式写死的 GlanceAccentForeground（深黑 / 浅白）+
+            // GlanceAccentForegroundPressed（深 #595959 / 浅 #E6E6E6）：normal / hover 同源（文字恒定，只靠
+            // 背景 1.0/0.9 紫梯度表状态），pressed 略压一档。两主题键一一对应（见 App.xaml 注释）。
+            if (_accent)
+            {
+                if (pressed)
+                {
+                    _root.Background = Resource("GlanceAccentBrushPressed") as Brush;
+                    _root.Foreground = Resource("GlanceAccentForegroundPressed") as Brush;
+                    _root.BorderBrush = Resource("ControlFillColorTransparentBrush") as Brush;
+                }
+                else if (_hover)
+                {
+                    _root.Background = Resource("GlanceAccentBrushPointerOver") as Brush;
+                    _root.Foreground = Resource("GlanceAccentForeground") as Brush;
+                    _root.BorderBrush = Resource("AccentControlElevationBorderBrush") as Brush;
+                }
+                else
+                {
+                    _root.Background = Resource("GlanceAccentBrush") as Brush;
+                    _root.Foreground = Resource("GlanceAccentForeground") as Brush;
+                    _root.BorderBrush = Resource("AccentControlElevationBorderBrush") as Brush;
+                }
+                return;
+            }
 
             // 与 generic.xaml 的 CommonStates 状态表逐行对应：按下优先于悬停（无 IsChecked 档）。
             // ⚠ 键用 ToggleButton* 的「未选中三档」（App.xaml 主题字典，与亚克力同源、深浅已验收），

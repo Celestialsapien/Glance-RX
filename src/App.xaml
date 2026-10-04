@@ -56,6 +56,14 @@
                     <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
 
+                    <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：不依赖 WinUI 自适应的
+                         TextOnAccentFillColorPrimary（它会随系统强调色 / 主题错位，曾导致深色调悬浮态文字错变白、
+                         且 hover 卡 true 后无法回落）。按 Glance 自有 Obsidian 紫的实测对比度写死：深色调紫(#A882FF)
+                         偏亮 ⇒ 文字黑；浅色调紫(#7852EE)偏暗 ⇒ 文字白。normal / hover 同源（文字恒定，只靠背景
+                         1.0/0.9 梯度表状态），pressed 略压一档。定义见两主题字典。 -->
+                    <SolidColorBrush x:Key="GlanceAccentForeground" Color="#000000" />
+                    <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#595959" />
+
                     <!-- 未选中：generic 深色档同源的三档半透明白，跟亚克力一起走（第 8 轮透明化已回退） -->
                     <SolidColorBrush x:Key="ToggleButtonBackground"
                                      Color="{ThemeResource ControlFillColorDefault}" />
@@ -138,6 +146,11 @@
                     <SolidColorBrush x:Key="GlanceAccentBrush" Color="{ThemeResource GlanceAccent}" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+
+                    <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：与深色档同键、同语义（说明见深色档注释）。
+                         浅色调紫(#7852EE)偏暗 ⇒ 文字白；pressed 略压一档。normal / hover 同源（文字恒定，只靠背景 1.0/0.9 梯度表状态）。 -->
+                    <SolidColorBrush x:Key="GlanceAccentForeground" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#E6E6E6" />
 
                     <!-- 浅色中性底标定（09-27 截图实测）：侧栏面板 #F3F3F3 / 工具栏 #FDFDFD。
                          纯白对齐同屏普通 Button，用户已验收；悬停/按下向灰压一/两档。 -->
@@ -231,14 +244,19 @@
 
             </ResourceDictionary.ThemeDictionaries>
 
-            <!-- 欢迎页"打开文件"按钮专用强调样式（第 12 轮）。
+            <!-- 欢迎页"打开文件"按钮专用强调样式（第 12 轮创建；10-05 改为无状态机）。
                  覆盖 generic 的 AccentButtonBackground* 主题键无效（XamlControlsResources 内部 ThemeResource
-                 不回查 App 主题字典，实测仍是系统蓝）⇒ 自有 Style + 模板，动画只引用上面两字典里的
-                 GlanceAccentBrush{,PointerOver,Pressed}；文字/边框引用 generic 的 TextOnAccent* /
-                 AccentControlElevationBorderBrush（App 引 generic 方向正常），立体边与工具栏 ToggleButton
-                 已选中态同源。模板骨架照抄 generic:8896-8956（AccentButtonStyle），仅换键。 -->
+                 不回查 App 主题字典，实测仍是系统蓝）⇒ 自有 Style + 模板。初始配色引用上面字典里的
+                 GlanceAccentBrush{,PointerOver,Pressed}（Obsidian 紫三档）；文字/边框引用 generic 的
+                 TextOnAccent* / AccentControlElevationBorderBrush（App 引 generic 方向正常）。
+                 模板骨架照抄 generic:8896-8956（AccentButtonStyle），但【已删除 VisualStateGroups 与
+                 BackgroundTransition】—— 该按钮原本靠原生 VSM 驱动 hover/pressed，点击弹文件选择器时输入
+                 上下文切换、无法判定鼠标是否仍在按钮上 ⇒ VSM 的 Pressed→Normal→PointerOver 在快速点击下
+                 闪烁（用户实测 flicker）。10-05 把视觉独占权交给 ButtonVisualOverride 的 accent 模式
+                 （Apply 的 _accent 分支按几何 hover + IsPressed 写同三档紫 + 同边框/前景），与本类其它
+                 接管按钮同源、flicker 根因消除。Disabled 档极少触发（欢迎页按钮恒可用），保持静止紫即可。 -->
             <Style x:Key="GlanceAccentButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
-                <Setter Property="Foreground" Value="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                <Setter Property="Foreground" Value="{ThemeResource GlanceAccentForeground}" />
                 <Setter Property="Background" Value="{ThemeResource GlanceAccentBrush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource AccentControlElevationBorderBrush}" />
                 <Setter Property="CornerRadius" Value="{ThemeResource ControlCornerRadius}" />
@@ -246,60 +264,7 @@
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="Button">
-                            <ContentPresenter x:Name="ContentPresenter" Background="{TemplateBinding Background}" BackgroundSizing="{TemplateBinding BackgroundSizing}" Foreground="{TemplateBinding Foreground}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" ContentTransitions="{TemplateBinding ContentTransitions}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" AutomationProperties.AccessibilityView="Raw">
-                                <ContentPresenter.BackgroundTransition>
-                                    <BrushTransition Duration="0:0:0.083" />
-                                </ContentPresenter.BackgroundTransition>
-
-                                <VisualStateManager.VisualStateGroups>
-                                    <VisualStateGroup x:Name="CommonStates">
-                                        <VisualState x:Name="Normal" />
-
-                                        <VisualState x:Name="PointerOver">
-                                            <Storyboard>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource GlanceAccentBrushPointerOver}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentControlElevationBorderBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                            </Storyboard>
-                                        </VisualState>
-
-                                        <VisualState x:Name="Pressed">
-                                            <Storyboard>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource GlanceAccentBrushPressed}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ControlFillColorTransparentBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource TextOnAccentFillColorSecondaryBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                            </Storyboard>
-                                        </VisualState>
-
-                                        <VisualState x:Name="Disabled">
-                                            <Storyboard>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDisabledBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ControlFillColorTransparentBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
-                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource TextOnAccentFillColorDisabledBrush}" />
-                                                </ObjectAnimationUsingKeyFrames>
-                                            </Storyboard>
-                                        </VisualState>
-
-                                    </VisualStateGroup>
-                                </VisualStateManager.VisualStateGroups>
-                            </ContentPresenter>
+                            <ContentPresenter x:Name="ContentPresenter" Background="{TemplateBinding Background}" BackgroundSizing="{TemplateBinding BackgroundSizing}" Foreground="{TemplateBinding Foreground}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" ContentTransitions="{TemplateBinding ContentTransitions}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" AutomationProperties.AccessibilityView="Raw"/>
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>
