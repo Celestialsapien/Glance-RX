@@ -226,6 +226,7 @@ public sealed partial class MainPage : Page
     private DispatcherTimer? _zoomPillHideTimer; // 缩放胶囊隐藏兜底：Flyout(快速缩放菜单)关闭瞬间的输入上下文切换会吞掉胶囊的 PointerExited，导致胶囊"悬停卡住"不隐藏；低频轮询核对实时光标位置兜底淡出
     private bool _glyphStrokeScaleHooked;        // OpenSecondPdfGlyph 的描边是否已挂钩 RasterizationScale 变化（Loaded 后只挂一次）
     private bool _zoomPresetOverrideAttached;    // 缩放预设浮层 8 颗是否已接管（Flyout 内容首次打开才进可视树，Loaded / Opening 两处兜底各试一次）
+    private bool _pageHoverDriveAttached;        // 整页 hover 几何驱动是否已挂到页面根（避免 Loaded 重入导致重复注册）
 
     public MainPage()
     {
@@ -650,14 +651,36 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(CloseSecondPdfButton);
 
         // 缩放胶囊 4 颗（ZoomOut / ZoomIn / ZoomValue / FitWidth）：与对比视图两颗【完全同一路线】——
-        // 同样套 ButtonNoStateMachineStyle、同样静止就带中性底、hover / pressed 整颗变色（10-02 用户拍板）。
-        ButtonVisualOverride.Attach(ZoomOutButton);
-        ButtonVisualOverride.Attach(ZoomInButton);
-        ButtonVisualOverride.Attach(ZoomValueButton);
-        ButtonVisualOverride.Attach(FitWidthButton);
+        // 同样套 ButtonNoStateMachineStyle、同样静止就带底、hover / pressed 整颗变色（10-02 用户拍板）。
+        // ⚠ 10-04 起静止档改为【完全透明】（transparentAtRest）：胶囊背景是【亚克力】FlyoutPresenterBackground
+        //   （generic 里 = AcrylicInAppFillColorDefaultBrush，会透出 PDF），而原静止档是不透明实色
+        //   （浅色纯白 #FFFFFF）⇒ 实色贴片贴在半透明胶囊上，4 个正圆（CornerRadius=16）与胶囊强对比，
+        //   观感像「胶囊上挖了很多孔」。静止档透明后与胶囊完全一致、看不到圆边界（用户定案，深浅色皆然）。
+        //   ⚠ 这里【不传 inPopupTree】：胶囊在主可视树，必须参与整页 hover 几何驱动，否则悬浮色残留回归。
+        //   hover / pressed 两档保持不变（transparentAtRest 只作用于静止档）。
+        ButtonVisualOverride.Attach(ZoomOutButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(ZoomInButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(ZoomValueButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(FitWidthButton, transparentAtRest: true);
 
         // 缩放预设浮层 8 颗：无 x:Name，按容器遍历接管（见 AttachZoomPresetOverrides）。
         AttachZoomPresetOverrides();
+
+        // —— 悬浮色残留的通用根治（10-04）——
+        // 根因：hover 原本只由【每颗按钮自己】的 PointerEntered/Moved/Exited 维护（基类 Track），
+        // 而 PointerExited 在 popup/flyout 输入上下文切换、快速移动、LightDismiss 覆盖层移除时会被
+        // WinUI 吞掉或误派发 ⇒ 旧项 _hover 卡 true 再也清不掉。
+        //   · 10-03 缩放菜单 8 颗（已用 ZoomPresetPanel 面板驱动 + EnsureRegistered 修过）
+        //   · 10-04 缩放胶囊 4 颗（Opacity=0 时仍 IsHitTestVisible，不可见也会点亮 hover；移出后残留）
+        // 修法：把「面板驱动独占 hover」从缩放菜单推广到【整页】—— 页面根元素的 PointerMoved 实时按几何
+        // 重算所有已接管按钮的 hover，只点亮指针真正落在里面的那颗 ⇒ 任何残留都在下一次移动时自愈。
+        // handledEventsToo=true：ButtonBase 可能把 PointerMoved 标 Handled，否则冒泡不到根。
+        // 浮层 8 颗不在本树（popup 是独立树），仍由 ZoomPresetPanel 自己的处理器驱动。
+        if (this.Content is UIElement pageRoot && !_pageHoverDriveAttached)
+        {
+            pageRoot.AddHandler(PointerMovedEvent, new PointerEventHandler(PageRoot_PointerMoved), true);
+            _pageHoverDriveAttached = true;
+        }
 
         // 侧边栏滚动 → 补渲染滚入视口的缩略图（缓存窗口项滚入视口不触发 ContainerContentChanging）。
         AttachSidebarScrollRefill();
@@ -4905,8 +4928,10 @@ public sealed partial class MainPage : Page
         {
             if (ZoomPresetPanel.Children[i] is Button presetItem)
             {
-                // 与缩放胶囊同源：静止保持透明（浮层项本身是透明底），hover / pressed 才上色。
-                ButtonVisualOverride.Attach(presetItem, transparentAtRest: true);
+                // 静止保持透明（菜单项语义：静止不该有独立底色），hover / pressed 才上色。
+                // inPopupTree: true —— 浮层内容活在 popup 的【独立 Xaml 树】，跨树 GetCurrentPoint 坐标不可靠
+                //   ⇒ 退出整页 hover 几何驱动，改由下方 ZoomPresetPanel 的 PointerMoved 驱动（见 AttachZoomPresetOverrides 末尾）。
+                ButtonVisualOverride.Attach(presetItem, transparentAtRest: true, inPopupTree: true);
                 // ContentPresenter 已 CornerRadius=TemplateBinding，设 Button.CornerRadius 即让悬浮背景被裁圆。
                 presetItem.CornerRadius = itemRadius;
                 attached++;
@@ -4955,6 +4980,19 @@ public sealed partial class MainPage : Page
         if (p.X >= 0 && p.Y >= 0 && p.X < ZoomPresetPanel.ActualWidth && p.Y < ZoomPresetPanel.ActualHeight)
             return;
         ButtonVisualOverride.ClearFlyoutHoverStates();
+    }
+
+    /// <summary>
+    /// 整页指针移动 ⇒ 按实时几何重算<b>所有</b>已接管按钮的 hover（天然独占：只有指针真正落在里面的那颗亮）。
+    /// 这是悬浮色残留的根治：hover 的权威来源从「每颗自己的 PointerExited」换成「每次移动的实时几何」，
+    /// 前者在 popup/flyout 输入上下文切换、快速移动、LightDismiss 覆盖层移除时会被吞掉（10-03 浮层 8 颗、
+    /// 10-04 缩放胶囊 4 颗均因此残留），后者不受影响 ⇒ 任何残留都会在下一次指针移动时自愈。
+    /// 浮层 8 颗不在本树（popup 独立树），仍由 <c>ZoomPresetPanel_PointerMoved</c> 驱动。
+    /// </summary>
+    private void PageRoot_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        ButtonVisualOverride.UpdateHoverFromPointer(e);
+        ToggleButtonVisualOverride.UpdateHoverFromPointer(e);
     }
 
     private void ZoomPresetFlyout_Opening(object sender, object e)

@@ -28,6 +28,25 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         foreach (var link in _instances) link.ForceRefresh();
     }
 
+    /// <summary>
+    /// 按<b>实时指针位置</b>重算本类所有已接管按钮的 hover —— 几何判据，只点亮指针真正落在里面的那颗（天然独占）。
+    /// <para>这是「悬浮色残留」的根因修复：hover 的权威来源改成"每次指针移动时的实时几何重算"，
+    /// 而<b>不再依赖每颗自己收到 <c>PointerExited</c></b> —— 该事件在 popup/flyout 输入上下文切换、
+    /// 快速移动、LightDismiss 覆盖层移除时会被 WinUI 吞掉或误派发（10-03 浮层 8 颗、10-04 缩放胶囊 4 颗均因此残留）。
+    /// 由页面/容器级 <c>PointerMoved</c> 驱动 ⇒ 任何残留都会在<b>下一次指针移动时自愈</b>。</para>
+    /// <para>性能：每次移动遍历全部实例做 <c>GetCurrentPoint</c> 几何判定，但 <c>SetHover</c> 只在
+    /// hover 真变化时才置脏重绘，未变化的走 <c>Apply</c> 早退 ⇒ 不产生额外重绘。</para>
+    /// </summary>
+    public static void UpdateHoverFromPointer(PointerRoutedEventArgs e)
+    {
+        foreach (var link in _instances)
+        {
+            // 活在另一棵 Xaml 树的（popup/flyout 内容）：跨树坐标不可靠，由所在容器的处理器驱动
+            if (link.ExcludeFromPageHoverDrive) continue;
+            link.SetHoverFromPointer(e);
+        }
+    }
+
     /// <summary>接管逻辑的共享内核。具体按钮类型（Button / ToggleButton）由 <typeparamref name="TButton"/> 参数化；
     /// 类型相关的状态回调（如 ToggleButton.IsChecked）由 <see cref="AttachExtra"/> 补挂，状态表由 <see cref="Apply"/> 各自实现。
     /// 用 public 以便从各自独立的接管器类（非嵌套、无法直接触达 protected 嵌套类型）派生 Link。</summary>
@@ -107,11 +126,37 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             Sync();
         }
 
-        private void Track(PointerRoutedEventArgs e)
+        private void Track(PointerRoutedEventArgs e) => SetHoverFromPointer(e);
+
+        /// <summary>按指针相对本按钮的坐标几何判定 hover —— 同一可视树内、无跨树坐标系问题。
+        /// 只在 hover 真变化时才置脏重绘（未变化不触发 Sync，省掉每次移动的无谓 Refresh/Apply）。
+        /// <para>是否参与整页驱动由 <see cref="ExcludeFromPageHoverDrive"/> 决定（<b>不是</b>靠覆写本方法）。
+        /// ⚠ 必须是 <c>internal</c> 而非 <c>protected</c>：包含类 <c>VisualOverrideBase</c> 不是
+        /// <c>BaseLink</c> 的派生类，protected 成员对包含类不可访问（CS0122，实测）。</para></summary>
+        internal void SetHoverFromPointer(PointerRoutedEventArgs e)
         {
             var pos = e.GetCurrentPoint(_button).Position;
-            _hover = pos.X >= 0 && pos.Y >= 0
-                  && pos.X < _button.ActualWidth && pos.Y < _button.ActualHeight;
+            bool inside = pos.X >= 0 && pos.Y >= 0
+                       && pos.X < _button.ActualWidth && pos.Y < _button.ActualHeight;
+            SetHover(inside);
+        }
+
+        /// <summary>是否<b>退出</b>「整页 hover 几何驱动」。默认 false = 参与。
+        /// <para>需要退出的情形：本 Link 的按钮活在<b>另一棵 Xaml 树</b>（popup / flyout 内容）——
+        /// 跨树 <c>GetCurrentPoint</c> 的坐标不可靠（10-03 实证踩过），且它已由<b>所在容器</b>的处理器驱动
+        /// ⇒ 整页驱动必须跳过，否则会误清 / 误亮。</para>
+        /// <para>⚠ 这是<b>事件</b>语义，与「静止档是否透明」的<b>外观</b>语义正交，绝不能复用同一个标志：
+        /// 缩放胶囊 4 颗静止档同样是透明的（要并入亚克力胶囊、看不见圆边界），但它在<b>主可视树</b>里、
+        /// 必须参与整页驱动，否则悬浮色残留会立刻回归（10-04）。</para></summary>
+        internal virtual bool ExcludeFromPageHoverDrive => false;
+
+        /// <summary>直接设定 hover（供页面/容器级驱动「全灭」或外部指派）；
+        /// 同样只在真变化时才置脏重绘。</summary>
+        internal void SetHover(bool hover)
+        {
+            if (_hover == hover) return;
+            _hover = hover;
+            _dirty = true;
             Sync();
         }
 

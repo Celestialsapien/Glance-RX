@@ -64,6 +64,23 @@
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
                                      Color="{ThemeResource ControlFillColorTertiary}" />
 
+                    <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
+                         不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->
+
+                    <!-- 缩放胶囊 4 颗的悬浮/点击态（10-05，第二轮：更透明）：深浅色【共用同一关系】——
+                         悬浮=胶囊反色的【淡 frosted 叠加】（≈16% 白，只轻微提亮、亚克力照透），
+                         按下=靠近胶囊色的【极淡叠加】（≈5% 黑，几乎贴回胶囊）。
+                         本档为深色胶囊（暗）⇒ 悬浮 #29FFFFFF / 按下 #0D000000；浅色档对称反向（见 Light 字典）。
+                         ⚠ 第三轮(10-05)起 hover/pressed 的【alpha 与浅色档一致】(hover 16% / pressed 5%)，
+                         只翻转色相以反色：深=白、浅=偏灰的黑(#3A3A3A)；两模式叠加"强度"相同、亚克力透出一致。
+                         （注：上一步曾把深色也降到 8% 想对齐，用户要求深色保持 16% 不动 ⇒ 改为浅色提回 16% 并改用偏灰黑柔化，
+                          而非压低深色 alpha。）
+                         作用于缩放胶囊 4 颗 + 浮层预设 8 颗（均 transparentAtRest）：两者 hover 事件源不同
+                         （浮层在 popup 独立树、由 ZoomPresetPanel 驱动；胶囊在主树、由整页驱动），但 hover/按下配色同源都用本档。
+                         前景复用静止档（ToggleButtonForeground），不另起键 ⇒ 文字不随悬浮跳动、对比更小。 -->
+                    <SolidColorBrush x:Key="ZoomPillButtonHoverBackground" Color="#29FFFFFF" />
+                    <SolidColorBrush x:Key="ZoomPillButtonPressedBackground" Color="#0D000000" />
+
                     <!-- 未选中前景：TextFillColorPrimary 深色 = #FFFFFF（黑线问题的修复点） -->
                     <SolidColorBrush x:Key="ToggleButtonForeground"
                                      Color="{ThemeResource TextFillColorPrimary}" />
@@ -134,6 +151,15 @@
                                      Color="{ThemeResource GlanceFillNeutralHover}" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
                                      Color="{ThemeResource GlanceFillNeutralPressed}" />
+
+                    <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
+                         不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->
+
+                    <!-- 缩放胶囊 4 颗悬浮/点击态（10-05，第二轮：更透明）：与深色档【同关系】——深色胶囊暗⇒悬浮淡白/按下淡黑；
+                         浅色胶囊亮⇒对称反向：悬浮 #293A3A3A(≈16% 偏灰黑 #3A3A3A，比纯黑柔、对比更小)/按下 #0DFFFFFF(≈5% 白，贴回胶囊)，
+                         hover/pressed 的【alpha 与深色档一致】(16%/5%)，仅色相翻转 ⇒ 两模式叠加强度相同、亚克力透出一致。 -->
+                    <SolidColorBrush x:Key="ZoomPillButtonHoverBackground" Color="#293A3A3A" />
+                    <SolidColorBrush x:Key="ZoomPillButtonPressedBackground" Color="#0DFFFFFF" />
 
                     <!-- 前景/边框与深色字典同一段 markup —— ThemeResource 会按主题各自解析 -->
                     <SolidColorBrush x:Key="ToggleButtonForeground"

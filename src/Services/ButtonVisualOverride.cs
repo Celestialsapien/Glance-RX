@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
 namespace Glance.Services;
@@ -46,8 +47,11 @@ namespace Glance.Services;
 ///
 /// <para><b>适用范围</b>：标准外观功能按钮 + 对比视图开/关 PDF 的两颗 pill（09-30 用户否决透明描边变体，
 /// 改走「整颗变色」同源逻辑）。<b>10-02 补齐</b>缩放胶囊 4 颗与缩放预设浮层 8 颗：
-/// 缩放胶囊 4 颗已与对比视图两颗统一（静止同样带中性底，用户拍板）；
-/// <b>仅缩放预设浮层 8 颗</b>用 <c>transparentAtRest: true</c> —— 静止档底色写缓存的 <c>TransparentBrush</c>
+/// 缩放胶囊 4 颗 10-02 起与对比视图两颗统一（静止同样带底），<b>10-04 再改为静止完全透明</b> ——
+/// 胶囊是亚克力（透 PDF），静止档要与胶囊<b>完全一致、看不到圆边界</b>（用户定案）；
+/// 于是 <c>transparentAtRest</c> 覆盖两类：<b>缩放预设浮层 8 颗</b>（菜单项语义：静止不该有独立底色）
+/// 与 <b>缩放胶囊 4 颗</b>（并入亚克力胶囊）。二者 hover 的事件来源不同，由 <c>inPopupTree</c> 区分。
+/// 透明静止档 —— 静止档底色写缓存的 <c>TransparentBrush</c>
 /// （不可见但仍可命中；<b>绝不是 null</b> —— null 背景的 ContentPresenter 整片不参与命中测试，
 /// 只有文字能被点中，10-02 实测），只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
 /// 仍排除：背景本身是内容（颜色胶囊 / 线宽胶囊）、欢迎页 OpenPdfButton、书签模板内按钮
@@ -56,7 +60,10 @@ namespace Glance.Services;
 internal class ButtonVisualOverride : VisualOverrideBase<Button>
 {
     /// <summary>接管指定按钮的视觉输出。应在控件模板已应用之后调用（例如 Page.Loaded）。</summary>
-    /// <param name="transparentAtRest">true = 静止必须保持透明的按钮（目前只有缩放预设浮层 8 颗）：
+    /// <param name="transparentAtRest">true = 静止必须保持透明的按钮（缩放预设浮层 8 颗 + 缩放胶囊 4 颗）：
+    /// 浮层 8 颗是菜单项语义（静止不该有独立底色）；缩放胶囊 4 颗是要<b>完全并入亚克力胶囊</b>、静止时
+    /// 看不到按钮与胶囊的圆边界（10-04 用户定案）。两者静止档写法一致，但 hover 的事件来源不同
+    /// （见 <paramref name="inPopupTree"/>）。
     /// 静止（既非悬停也非按下）时底色写缓存的 <c>TransparentBrush</c>、边框写 null，
     /// 前景写静止档前景刷（<c>ToggleButtonForeground</c>）；只有 hover / pressed 两档才写已验收的
     /// <c>ToggleButton*PointerOver</c> / <c>ToggleButton*Pressed</c>（整颗变色，与功能按钮同源）。
@@ -65,10 +72,15 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     ///   <c>TransparentBrush</c> 不可见但可命中，才是这里的正确写法。
     /// ⚠ 前景也绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（10-02 实测浮层静止全不可见）。
     /// 09-30 已否决这类按钮的「描边变体」（丑 + 点击无反馈），故不走描边。</param>
-    public static void Attach(Button button, bool transparentAtRest = false)
+    /// <param name="inPopupTree">true = 该按钮活在<b>另一棵 Xaml 树</b>（popup / flyout 内容，目前只有缩放预设浮层 8 颗）。
+    /// 只影响 hover 的<b>事件来源</b>：这类按钮会被整页几何驱动跳过（跨树 <c>GetCurrentPoint</c> 坐标不可靠，10-03 实证），
+    /// 改由它所在容器的 PointerMoved 驱动。
+    /// ⚠ 与「静止档是否透明」<b>正交，不要混用</b>：缩放胶囊 4 颗静止档同样是透明的，但它在<b>主可视树</b>
+    /// ⇒ 必须传 <b>false</b>，否则整页驱动跳过它、悬浮色残留立刻回归。</param>
+    public static void Attach(Button button, bool transparentAtRest = false, bool inPopupTree = false)
     {
         if (button == null) return;
-        new Link(button, transparentAtRest).Attach();
+        new Link(button, transparentAtRest, inPopupTree).Attach();
     }
 
     // 透明刷：静止档拿它（而非 null）填 ContentPresenter.Background。
@@ -77,12 +89,18 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     //   Transparent 刷「不可见但仍可命中」⇒ 整片矩形响应，且不会涂成不透明底。
     private static readonly Brush TransparentBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
 
-    /// <summary>浮层关闭时强清 8 颗预设项的 hover：WinUI 在 Flyout/light-dismiss 关闭瞬间吞掉
-    /// PointerExited ⇒ <c>_hover</c> 卡 true ⇒ 悬浮色残留、下次展开仍亮。仅清
-    /// <c>transparentAtRest</c>（= 浮层项，全 app 唯一一类），不影响其他功能按钮（它们的 hover 由常态指针事件维护）。</summary>
+    /// <summary>浮层关闭/展开时强清预设项的 hover：WinUI 在 Flyout/light-dismiss 关闭瞬间吞掉
+    /// PointerExited ⇒ <c>_hover</c> 卡 true ⇒ 悬浮色残留、下次展开仍亮。
+    /// ⚠ 只清<b>活在 popup 独立树</b>的项（<see cref="VisualOverrideBase{TButton}.BaseLink.ExcludeFromPageHoverDrive"/> = true，
+    /// 即缩放预设浮层 8 颗），<b>不清缩放胶囊的 ZoomValue</b>：ZoomValue 也是 <c>transparentAtRest</c>（10-04 并入亚克力胶囊），
+    /// 但它在<b>主树</b>且菜单展开期间指针就停在它上面，强清会让它「按下→悬浮→静止→(移动后)悬浮」地闪一跳
+    /// （10-05 实测 ZoomValue bug）。胶囊项由整页几何驱动自维护，强清反而破坏它。其余功能按钮 hover 由常态指针事件维护，更不在此列。</summary>
     public static void ClearFlyoutHoverStates()
     {
-        foreach (var link in _instances) link.ClearTransparentHoverState();
+        foreach (var link in _instances)
+        {
+            if (link.ExcludeFromPageHoverDrive) link.ClearTransparentHoverState();
+        }
     }
 
     /// <summary>浮层预设项「独占 hover」：只让 <paramref name="hovered"/> 那一颗亮，其余
@@ -98,14 +116,23 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     private sealed class Link : VisualOverrideBase<Button>.BaseLink
     {
         private readonly bool _transparentAtRest;
+        private readonly bool _inPopupTree;
 
-        internal Link(Button button, bool transparentAtRest) : base(button)
+        internal Link(Button button, bool transparentAtRest, bool inPopupTree) : base(button)
         {
             _transparentAtRest = transparentAtRest;
+            _inPopupTree = inPopupTree;
         }
 
         // Button 无选中态，无需额外状态回调
         protected override void AttachExtra() { }
+
+        /// <summary>整页驱动退出：只有 <c>inPopupTree</c>（缩放预设浮层 8 颗）退出 —— 它们活在 popup 的
+        /// <b>独立 Xaml 树</b>，跨树 <c>GetCurrentPoint</c> 坐标不可靠（10-03 实证），且已由
+        /// <c>ZoomPresetPanel</c> 面板驱动 ⇒ 整页驱动必须跳过，以免误清 / 误亮。
+        /// ⚠ 缩放胶囊 4 颗虽同为透明静止档，但在<b>主树</b> ⇒ 参与整页驱动
+        /// （判据是 <c>inPopupTree</c>，不是静止档透明与否 —— 两者正交）。</summary>
+        internal override bool ExcludeFromPageHoverDrive => _inPopupTree;
 
         /// <summary>浮层强清：仅 transparentAtRest 项才清 hover，避免误清正常功能按钮。</summary>
         protected override void ClearTransparentHoverIfAny()
@@ -160,6 +187,22 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
                 _root.Background = TransparentBrush;
                 _root.BorderBrush = null;
                 _root.Foreground = Resource("ToggleButtonForeground") as Brush;
+                return;
+            }
+
+            if (_transparentAtRest)
+            {
+                // 缩放胶囊 4 颗 + 浮层预设 8 颗（均 transparentAtRest）的悬浮/点击态（10-05 推广到浮层）：
+                // 同源反色/近胶囊【淡叠加】档。静止完全透明（胶囊=并入亚克力、浮层=菜单项语义）；
+                // 悬浮=胶囊反色的≈16% 半透明叠加、按下=靠近胶囊色的≈5% 极淡叠加（亚克力照透、对比很小）。
+                // 两者 hover 事件源不同（浮层在 popup 独立树 → ZoomPresetPanel 驱动；胶囊在主树 → 整页驱动），
+                // 但颜色完全一致 —— 都由本分支按 ZoomPillButtonHover/PressedBackground 上色（仅背景键，
+                // 前景复用静止档 ToggleButtonForeground ⇒ 文字不随悬浮跳动）。
+                // ⚠ 边框留 null：淡叠加已自带形状，加描边反而显脏。
+                string key = pressed ? "ZoomPillButtonPressed" : "ZoomPillButtonHover";
+                _root.Background = Resource(key + "Background") as Brush;
+                _root.Foreground = Resource("ToggleButtonForeground") as Brush;
+                _root.BorderBrush = null;
                 return;
             }
 
