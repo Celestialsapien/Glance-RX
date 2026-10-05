@@ -332,9 +332,6 @@ public sealed partial class MainPage : Page
         ApplyWelcomeChrome(true);   // 初始就是欢迎页（赋同值不触发回调，故显式应用一次）
 
         this.Loaded += MainPage_Loaded;
-        // 侧边栏展开/收起时驱动 Content 层的投影载体：SplitView Pane 自身阴影无法落到主视图，
-        // 故在 ViewerContainerGrid 内放了一枚透明投影元素（SidebarDropShadow），由事件联动显隐。
-        //
         // 【开关侧边栏 = 保持"阅读位置不变量"，而不是死板 fit 到视口】
         // 目标（用户拍板）：纵向布局下，开关前/后视口左右两条边线切到的内容完全一致 ——
         //   侧边栏 Inline 挤开等同于把主轴视口按比例缩放，zoom 随之等比缩放，于是"视口里可见的
@@ -363,24 +360,8 @@ public sealed partial class MainPage : Page
         // VisualTransition.Storyboard 取不到时被 try/catch 静默吞掉）。**别再加回来** ——
         // 要遍历模板 Storyboard，失败还只能静默回退，收益与复杂度不成正比。
         SidebarSplitView.PaneOpening += (s, e) => QueueSidebarReanchor();
-        SidebarSplitView.PaneClosing += (s, e) =>
-        {
-            if (SidebarDropShadow != null) SidebarDropShadow.Visibility = Visibility.Collapsed;
-            QueueSidebarReanchor();
-        };
-        SidebarSplitView.PaneOpened += (s, e) =>
-        {
-            if (SidebarDropShadow != null) SidebarDropShadow.Visibility = Visibility.Visible;
-            UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
-        };
-        // 整个侧边栏隐藏（如回到欢迎页）时，投影一并收起。
-        SidebarSplitView.RegisterPropertyChangedCallback(UIElement.VisibilityProperty,
-            (s, dp) =>
-            {
-                if (SidebarSplitView.Visibility != Visibility.Visible && SidebarDropShadow != null)
-                    SidebarDropShadow.Visibility = Visibility.Collapsed;
-            });
-
+        SidebarSplitView.PaneClosing += (s, e) => QueueSidebarReanchor();
+        SidebarSplitView.PaneOpened += (s, e) => UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
         // 主题切换（设置面板选择/跟随系统变化）时刷新画笔胶囊的选中提示色，
         // 并重刷当前选中的颜色环与粗细背景，保证深浅色模式下对比清晰。
         this.ActualThemeChanged += (s, e) => RefreshPenOptionThemeHighlights();

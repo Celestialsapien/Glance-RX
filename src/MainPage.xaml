@@ -1553,25 +1553,6 @@
 
 
 
-                <!-- 侧边栏右侧阴影：Inline 下 Pane 与主视图相邻（不重叠），此处放一枚骑在缝处的
-
-                     不透明细条，由 ElevationShadow 向右投出柔和阴影压在 PDF 画布上。内容层不被 Pane
-
-                     裁剪，故阴影可见。可见性由 PaneOpened/PaneClosing 联动；Margin=0 使其恒骑在
-
-                     内容左缘（即 Pane 右缘 = 缝），随展开动画自动跟随。 -->
-
-                <Border x:Name="SidebarDropShadow"
-
-                        HorizontalAlignment="Left" VerticalAlignment="Stretch"
-
-                        Width="1" Margin="0,0,0,0" Canvas.ZIndex="45"
-
-                        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Visibility="Collapsed" IsHitTestVisible="False"
-
-                        local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="16">
-
-                </Border>
 
 
 
