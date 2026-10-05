@@ -46,6 +46,18 @@
                 <ResourceDictionary x:Key="Default">
                     <Color x:Key="GlanceAccent">#A882FF</Color>
 
+                    <!-- ⚠ 纵深防御（2026-10-06）：以下中性底三档原先【只定义在浅色字典】。
+                         一旦出现"浅色画刷被应用到深色上下文"（历史事故链路：App.xaml 主题字典的自定义键被
+                         主树核心元素用 {ThemeResource} 引用 ⇒ 主题切换传播错乱 ⇒ 按钮取错主题字典），
+                         WinUI 物化浅色画刷内的 {ThemeResource GlanceFillNeutral*} 时会在深色字典查不到该键
+                         ⇒ COMException（"Cannot find GlanceFillNeutralPressed"）+ 整套配色错乱。
+                         根因（那个引用）已在 a265ad4 移除；此处补进深色字典是【第二道防线】—— 将来再踩到
+                         同类雷时退化为"某处颜色略不对"，而不是整个 app 崩溃。
+                         深色档未选中按钮实际走 ControlFillColor*，此三值仅用于满足解析、不实际显示。 -->
+                    <Color x:Key="GlanceFillNeutral">#2B2B2B</Color>
+                    <Color x:Key="GlanceFillNeutralHover">#353535</Color>
+                    <Color x:Key="GlanceFillNeutralPressed">#404040</Color>
+
                     <!-- 欢迎页"打开文件"按钮专用画刷（第 12 轮）。
                          ⚠ 第 11 轮在主题字典覆盖 generic 的 AccentButtonBackground* 键【无效】：按钮仍是系统蓝。
                            根因 = XamlControlsResources 内部的 {ThemeResource AccentButtonBackground*} 只在 generic

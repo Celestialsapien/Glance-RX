@@ -251,7 +251,9 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         /// 确定性主题源：把"当前应是深色还是浅色"映射成 WinUI 主题字典的键名（Default=暗 / Light=浅）。
         /// 从 <c>_button</c> 沿视觉树向上找第一个显式设置 <see cref="FrameworkElement.RequestedTheme"/>
         /// 为 Dark/Light 的祖先（本 app 主题正是同步写到 MainPage 上的那个值），用它判定深浅；
-        /// 全链都是 Default(跟随系统) 才回落 <c>Application.Current.RequestedTheme</c>（系统主题）。
+        /// 全链都是 Default(跟随系统)、或弹层独立树走到父链断裂时，回落【软件自己的主题设置】
+        /// （<c>MainWindow.IsDarkTheme</c>，已含"Default 回落系统"；详见方法内注释），
+        /// 只有连窗口都取不到才用 <c>Application.Current.RequestedTheme</c>（系统主题）。
         /// 绝不用 <c>_button.ActualTheme</c> —— 它在 RequestedTheme 设置后要经布局通道异步传播，
         /// 主题切换瞬间仍停在旧主题 ⇒ Resource() 读到旧字典、浅色下涂白底，在深色模式里闪一下白。
         /// </summary>
@@ -266,7 +268,19 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
                     if (e.RequestedTheme == ElementTheme.Light) return "Light";
                     e = VisualTreeHelper.GetParent(e) as FrameworkElement;
                 }
-                // 全 Default（跟随系统）：用系统主题判定
+                // ⚠ 兜底必须用【软件自己的主题设置】，不能直接用 Application.Current.RequestedTheme（系统设置）：
+                //    ① 弹层 / 浮层是【独立 XAML 树】，上面这段向上遍历到 popup 根就断了（父链为 null）⇒ 掉到这里；
+                //    ② Application.Current.RequestedTheme 在本 app 里【从未被赋值】，它恒等于 Windows 的
+                //       "默认应用模式"系统设置，与用户在软件里选的主题完全无关 ——
+                //       用户系统应用模式=浅色、软件设为深色时，此处会判成"浅色"⇒ 取到浅色字典的画刷。
+                //    ⇒ 后果：浅色画刷被应用到按深色渲染的按钮，浅色画刷内的
+                //      {ThemeResource GlanceFillNeutral*} 在深色字典查不到 ⇒ COMException + 配色错乱。
+                //    正解 = 取窗口的 WindowRequestedTheme（软件设置已写入），Default 时再回落系统
+                //      —— 与 GpuPageView.xaml.cs:2452 的确定性主题源同源；MainWindow.IsDarkTheme 已封装该回落。
+                if ((Application.Current as App)?.MainWindow is MainWindow mw)
+                    return mw.IsDarkTheme ? "Default" : "Light";
+
+                // 连窗口都取不到（极端情况）：才用系统主题判定
                 return Application.Current?.RequestedTheme == ApplicationTheme.Dark ? "Default" : "Light";
             }
             catch
