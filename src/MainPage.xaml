@@ -1425,7 +1425,7 @@
 
                     <ListView Grid.Row="2" x:Name="BookmarkListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False"
 
-                              IsItemClickEnabled="True" ItemClick="BookmarkListView_ItemClick">
+                              SelectionMode="None" IsItemClickEnabled="True" ItemClick="BookmarkListView_ItemClick">
 
                         <ListView.ItemTemplate>
 
@@ -1511,7 +1511,7 @@
 
                     <!-- Outline -->
 
-                    <ListView Grid.Row="2" x:Name="OutlineListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsItemClickEnabled="True" ItemClick="OutlineListView_ItemClick" IsTabStop="False">
+                    <ListView Grid.Row="2" x:Name="OutlineListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False" SelectionMode="None" IsItemClickEnabled="True" ItemClick="OutlineListView_ItemClick">
 
                         <ListView.ItemTemplate>
 
