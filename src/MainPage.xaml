@@ -1155,7 +1155,26 @@
 
                  若侧边栏内容从 y=0 起排，展开工具栏会切掉标题行与第一张缩略图的上沿。 -->
 
-            <Grid x:Name="ThumbnailSidebarPanel" Padding="0,14,0,0" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+            <!-- 侧边栏右沿：**无任何结构** —— 无投影载体、无 1px 界线，面板到此为止。
+                 分界完全交给内容本身（打开的 PDF 页面白纸边缘 / 欢迎页自身背景）。
+                 ⚠ 不要再给本面板加 BorderBrush：
+                    ① 若引用 App.xaml 主题字典里的【自定义】键（如曾经的 GlanceSidebarDivider），
+                       实测会破坏 WindowsAppSDK 2.2.1 的主题切换 —— 各元素解析出不同主题导致配色错乱，
+                       并最终让按钮取错主题字典崩在 GlanceFillNeutralPressed（2026-10-06 复现定位）。
+                    ② 若覆盖系统键 CardStrokeColorDefaultBrush，会连坐本文件另外 9 处引用
+                       （含缩略图卡片边框）且系统内部 25 个 StaticResource 别名不会跟着变。
+                 若将来确实需要分界，用【代码后置】单独给本面板赋画刷（参照 MainWindow.UpdateWindowBackground）。
+
+                 【接缝处 1px 竖线的成因 —— 已定位，当前未处理】SplitView 模板里 PaneRoot 靠布局定位、
+                 ContentRoot 靠 CompositeTransform 位移（generic.xaml:35818 / :35842），两条边各自取整
+                 ⇒ 接缝漏出约 1px 的 SplitView 底色；而它 Background=Transparent ⇒ 透出 WindowRoot 的
+                 #FAFAFA(浅) / #1C1C1C(深)，形成一条 1px 竖线（实测确认）。
+                 处理：Margin="0,0,-1,0" —— 面板向右探出 1px 压住缝（**用户实测验证可行后采用**）。
+                 本质是用溢出覆盖：那 1px 处画的是【侧栏自己的底】，不再是透出来的窗口底。
+                 （曾因"跨缩放比 / 动画中途的副作用无法逐一验证"一度回退到 Margin=0，用户自行实测后重新启用。）
+                 ⚠ 另记：改 OpenPaneLength 无效 —— Pane 宽度与 Content 位移由同一值驱动、一起动，
+                    是"移动缝"不是"消缝"，缝只会跟着整体挪位置。 -->
+            <Grid x:Name="ThumbnailSidebarPanel" Padding="0,14,0,0" Margin="0,0,-1,0" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
                     <Grid.RowDefinitions>
 
