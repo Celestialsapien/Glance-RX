@@ -58,9 +58,9 @@
 
                     <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：不依赖 WinUI 自适应的
                          TextOnAccentFillColorPrimary（它会随系统强调色 / 主题错位，曾导致深色调悬浮态文字错变白、
-                         且 hover 卡 true 后无法回落）。按 Glance 自有 Obsidian 紫的实测对比度写死：深色调紫(#A882FF)
-                         偏亮 ⇒ 文字黑；浅色调紫(#7852EE)偏暗 ⇒ 文字白。normal / hover 同源（文字恒定，只靠背景
-                         1.0/0.9 梯度表状态），pressed 略压一档。定义见两主题字典。 -->
+                         且 hover 卡 true 后无法回落）。深色档调回 #A882FF（偏亮 ⇒ 黑字 7.3:1，与原 Glance 紫一致）；
+                         浅色档 #9873F7 偏亮，按用户决定保留白字（已实测可接受）、不翻黑。
+                         normal / hover 同源（文字恒定，只靠背景 1.0/0.9 梯度表状态），pressed 略压一档。定义见两主题字典。 -->
                     <SolidColorBrush x:Key="GlanceAccentForeground" Color="#000000" />
                     <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#595959" />
 
@@ -140,7 +140,7 @@
 
                 <!-- ══ 浅色 ══ -->
                 <ResourceDictionary x:Key="Light">
-                    <Color x:Key="GlanceAccent">#7852EE</Color>
+                    <Color x:Key="GlanceAccent">#9873F7</Color>
 
                     <!-- 欢迎页按钮专用画刷（与深色档同层级、同梯度；说明见深色档注释） -->
                     <SolidColorBrush x:Key="GlanceAccentBrush" Color="{ThemeResource GlanceAccent}" />
@@ -148,7 +148,8 @@
                     <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
 
                     <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：与深色档同键、同语义（说明见深色档注释）。
-                         浅色调紫(#7852EE)偏暗 ⇒ 文字白；pressed 略压一档。normal / hover 同源（文字恒定，只靠背景 1.0/0.9 梯度表状态）。 -->
+                         浅色调紫(#9873F7)偏亮 ⇒ 文字白会跌破 AA(3.4:1)；若要保持可读应改黑(6.1:1)。
+                         pressed 略压一档。normal / hover 同源（文字恒定，只靠背景 1.0/0.9 梯度表状态）。 -->
                     <SolidColorBrush x:Key="GlanceAccentForeground" Color="#FFFFFF" />
                     <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#E6E6E6" />
 
