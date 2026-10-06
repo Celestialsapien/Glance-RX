@@ -365,6 +365,10 @@ public sealed partial class MainPage : Page
         // 主题切换（设置面板选择/跟随系统变化）时刷新画笔胶囊的选中提示色，
         // 并重刷当前选中的颜色环与粗细背景，保证深浅色模式下对比清晰。
         this.ActualThemeChanged += (s, e) => RefreshPenOptionThemeHighlights();
+        // 主题变化（下拉选择 / 跟随系统）→ 重刷侧边栏底色，使其与主视图基色保持区分（现代分层配色）。
+        this.ActualThemeChanged += (s, e) => UpdateSidebarBackground();
+        // 构造期首帧即上色（ActualThemeChanged 不保证首帧触发）；不依赖 XAML 主题键，规避主题切换错乱根因。
+        UpdateSidebarBackground();
     }
 
     // 侧边栏开关的重锚触发点：过渡起点事件之后排一个 Low 回合再重锚。
@@ -390,6 +394,23 @@ public sealed partial class MainPage : Page
         ApplyPenOptionThemeBrushes();
         SyncColorSwatchHighlight();
         SelectThicknessPreset(_activeThickness);
+    }
+
+    /// <summary>
+    /// 让侧边栏底色与主视图基色区分（现代分层配色）：
+    /// 浅色模式用比主视图基色(#F3F3F3)更深的 #EAEAEA，深色模式用比主视图基色(#202020)更浅的 #2A2A2A。
+    /// ⚠ 必须在【代码后置】着色，不能引用 App.xaml 主题字典的【自定义】键（那会破坏主题切换，
+    ///   见 2026-10-06 根因定位）；也不能覆盖系统键 CardStrokeColorDefaultBrush（连坐 9 处引用 + 25 个别名）。
+    /// 确定性主题源取 MainWindow.IsDarkTheme（已含 Default→系统 回落），与 UpdateWindowBackground 同源。
+    /// </summary>
+    private void UpdateSidebarBackground()
+    {
+        if (ThumbnailSidebarPanel == null) return;
+        var isDark = ((Application.Current as App)?.MainWindow as MainWindow)?.IsDarkTheme
+                     ?? (ActualTheme == ElementTheme.Dark);
+        ThumbnailSidebarPanel.Background = isDark
+            ? new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x2A, 0x2A, 0x2A))   // 深底上提亮一档
+            : new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xEA, 0xEA, 0xEA));  // 浅底上压暗一档
     }
 
     /// <summary>

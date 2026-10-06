@@ -1174,6 +1174,9 @@
                  （曾因"跨缩放比 / 动画中途的副作用无法逐一验证"一度回退到 Margin=0，用户自行实测后重新启用。）
                  ⚠ 另记：改 OpenPaneLength 无效 —— Pane 宽度与 Content 位移由同一值驱动、一起动，
                     是"移动缝"不是"消缝"，缝只会跟着整体挪位置。 -->
+            <!-- 侧边栏底色由【代码后置】UpdateSidebarBackground() 按主题着色（与主视图基色区分，现代分层配色），
+                 此处 Background 仅作构造期首帧前的系统键兜底（ApplicationPageBackgroundThemeBrush 是系统键、安全），
+                 不要在此改颜色、也不要引用 App.xaml 自定义主题键（破坏主题切换，见 2026-10-06 根因）。 -->
             <Grid x:Name="ThumbnailSidebarPanel" Padding="0,14,0,0" Margin="0,0,-1,0" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
                     <Grid.RowDefinitions>
