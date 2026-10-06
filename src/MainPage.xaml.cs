@@ -312,6 +312,8 @@ public sealed partial class MainPage : Page
         // 布局方向变化 → 同步更新工具栏按钮图标/提示（也覆盖通过 API 而非按钮切换的情况）。
         GpuViewer.LayoutModeChanged += (s, mode) => UpdateLayoutToggleVisual();
         GpuViewerRight.LayoutModeChanged += (s, mode) => UpdateLayoutToggleVisual();
+        GpuViewer.ArrangementChanged += (s, ar) => { if (LayoutViewComboBox != null) LayoutViewComboBox.SelectedIndex = (int)ar; };
+        GpuViewerRight.ArrangementChanged += (s, ar) => { if (LayoutViewComboBox != null) LayoutViewComboBox.SelectedIndex = (int)ar; };
 
         // GPU 标注叠加层：数据仍在 _pages[i].Annotations（保存/撤销/导出管线全复用），
         // GpuPageView 负责绘制与坐标换算（页局部 PDF 点，与旧路径同一坐标空间）。
@@ -834,11 +836,11 @@ public sealed partial class MainPage : Page
             if (ThemeDarkItem != null) ThemeDarkItem.Content = Glance.Services.LocalizationService.Get("ThemeDark");
             if (ThemeDefaultItem != null) ThemeDefaultItem.Content = Glance.Services.LocalizationService.Get("ThemeSystem");
 
-            if (AboutTitleText != null) AboutTitleText.Text = Glance.Services.LocalizationService.Get("AboutTitle");
-            if (DeveloperText != null) DeveloperText.Text = Glance.Services.LocalizationService.Get("Developer");
-
-            if (WebsiteLink != null) WebsiteLink.Content = Glance.Services.LocalizationService.Get("WebsiteLink");
-            if (GitHubLink != null) GitHubLink.Content = Glance.Services.LocalizationService.Get("GitHubLink");
+            // Layout View selector
+            if (LayoutViewLabel != null) LayoutViewLabel.Text = Glance.Services.LocalizationService.Get("LayoutView");
+            if (SinglePageItem != null) SinglePageItem.Content = Glance.Services.LocalizationService.Get("SinglePage");
+            if (TwoPageItem != null) TwoPageItem.Content = Glance.Services.LocalizationService.Get("TwoPage");
+            if (BookItem != null) BookItem.Content = Glance.Services.LocalizationService.Get("BookView");
 
             // Welcome Screen
             if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = Glance.Services.LocalizationService.Get("WelcomeSubtitle");
@@ -867,6 +869,15 @@ public sealed partial class MainPage : Page
             if (ThemeComboBox != null)
             {
                 ThemeComboBox.SelectedIndex = selectedIndex;
+            }
+
+            // 布局视图下拉初始选中项：默认单页（0）。与 ThemeComboBox 同源——初始选中项用代码设，
+            // 不在 XAML 写 SelectedIndex（否则 InitializeComponent 期间会同步触发 SelectionChanged，
+            // 那时 GpuViewer 尚未建好 → NullReferenceException 启动崩溃）。文档加载后由
+            // RestoreView→ArrangementChanged 订阅回填按文档记忆的真实 Arrangement。
+            if (LayoutViewComboBox != null)
+            {
+                LayoutViewComboBox.SelectedIndex = 0;
             }
 
             // Apply theme
@@ -925,6 +936,18 @@ public sealed partial class MainPage : Page
                 // Save theme to file-based settings (portable: stored alongside the app)
                 _settingsService.AppTheme = themeStr;
             }
+        }
+    }
+
+        private void LayoutViewComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (LayoutViewComboBox == null) return;
+        if (LayoutViewComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr && int.TryParse(tagStr, out int idx))
+        {
+            // 下拉只管纵向列数/排版；横向胶片条模式忽略 Arrangement（RecomputeLayout 横向分支不读它）。
+            GpuViewer.Arrangement = (PageArrangement)idx;
+            if (GpuViewerRight != null && GpuViewerRight.Visibility == Visibility.Visible)
+                GpuViewerRight.Arrangement = (PageArrangement)idx;
         }
     }
 
@@ -1082,6 +1105,7 @@ public sealed partial class MainPage : Page
             PageIndex = page,
             RotationDegrees = GpuViewer.RotationDegrees,
             LayoutMode = (int)GpuViewer.LayoutMode,
+            Arrangement = (int)GpuViewer.Arrangement,
             // 侧边栏开关状态随文件记忆：与偏移/缩放同一份记录、同一时机（退出前/切换文档前）落盘。
             SidebarOpen = SidebarSplitView.IsPaneOpen,
             SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
@@ -1377,6 +1401,7 @@ public sealed partial class MainPage : Page
             PageIndex = svPage,
             RotationDegrees = 0,
             LayoutMode = (int)GpuViewer.LayoutMode,
+            Arrangement = (int)GpuViewer.Arrangement,
             SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
 

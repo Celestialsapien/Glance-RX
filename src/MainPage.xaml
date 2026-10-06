@@ -558,7 +558,7 @@
 
         <Grid>
 
-            
+
 
             <!-- Left Section: pinned to the left border; its width never shifts the centered title or right controls -->
 
@@ -572,7 +572,7 @@
 
                     </Button>
 
-                    
+
 
 
 
@@ -586,7 +586,7 @@
 
                     </Button>
 
-                    
+
 
                     <!-- Page Number input box -->
 
@@ -600,13 +600,13 @@
 
                              KeyDown="PageNumberInput_KeyDown" LosingFocus="PageNumberInput_LosingFocus"/>
 
-                    
+
 
                     <!-- Total Pages Label -->
 
                     <TextBlock x:Name="TotalPagesText" Text="/ 0" VerticalAlignment="Center" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" Margin="4,0,8,0" FontSize="13"/>
 
-                    
+
 
                     <!-- Next Page Button -->
 
@@ -712,7 +712,7 @@
 
                                     <TextBlock x:Name="SettingsTitleText" Text="Configuración" FontSize="18" FontWeight="SemiBold"/>
 
-                                    
+
 
                                     <!-- Theme Selector -->
 
@@ -734,31 +734,21 @@
 
 
 
-                                    <MenuFlyoutSeparator/>
+                                    <!-- Layout View Selector -->
 
+                                    <StackPanel Spacing="6">
 
+                                        <TextBlock x:Name="LayoutViewLabel" Text="Layout View" FontSize="12" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
 
-                                    <!-- About Section -->
+                                        <ComboBox x:Name="LayoutViewComboBox" SelectionChanged="LayoutViewComboBox_SelectionChanged" HorizontalAlignment="Stretch" IsTabStop="False">
 
-                                    <StackPanel Spacing="4">
+                                            <ComboBoxItem x:Name="SinglePageItem" Content="Single Page" Tag="0"/>
 
-                                        <TextBlock x:Name="AboutTitleText" Text="Acerca de Glance" FontSize="14" FontWeight="SemiBold"/>
+                                            <ComboBoxItem x:Name="TwoPageItem" Content="Two Pages" Tag="1"/>
 
-                                        <TextBlock Text="Versión 1.0.0.0" FontSize="12" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+                                            <ComboBoxItem x:Name="BookItem" Content="Book" Tag="2"/>
 
-                                        <TextBlock x:Name="DeveloperText" Text="Desarrollado por jonas1ara" FontSize="12" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
-
-                                    </StackPanel>
-
-
-
-                                    <!-- Links -->
-
-                                    <StackPanel Spacing="4">
-
-                                        <HyperlinkButton x:Name="WebsiteLink" Content="Sitio Web Oficial" NavigateUri="https://jonas1ara.github.io/Glance/" IsTabStop="False"/>
-
-                                        <HyperlinkButton x:Name="GitHubLink" Content="Repositorio de GitHub" NavigateUri="https://github.com/jonas1ara/Glance" IsTabStop="False"/>
+                                        </ComboBox>
 
                                     </StackPanel>
 
@@ -1096,7 +1086,7 @@
 
                 <TextBlock x:Name="WelcomeSubtitleText" Text="Abre un documento para comenzar." FontSize="14" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
 
-                
+
 
                 <!-- 配色走 App.xaml 的 GlanceAccentButtonStyle（Obsidian 紫，10-05 已改为无状态机模板）；
                      覆盖 generic 的 AccentButton* 主题键无效（见 App.xaml 第 12 轮注释）。视觉 hover/pressed

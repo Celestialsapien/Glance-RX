@@ -88,6 +88,10 @@ public class ViewStateData
     /// 否则保存的偏移按错轴(横/纵)落定 → 还原后位置偏离。旧记录缺省 0=纵向，向后兼容。</summary>
     public int LayoutMode { get; set; }
 
+    /// <summary>纵向布局下的列数/排版：0=单页，1=双页对开，2=书籍对开。仅纵向布局生效；
+    /// 横向胶片条忽略。须在偏移之前还原（与 LayoutMode 同理）。旧记录缺省 0=单页，向后兼容。</summary>
+    public int Arrangement { get; set; }
+
     /// <summary>退出时侧边栏（缩略图/书签/大纲）是否展开。重开同一 PDF 时按此状态打开。
     /// 旧记录缺省 false（未记录 → 收起），与 SplitView 的 XAML 默认值一致。</summary>
     public bool SidebarOpen { get; set; }

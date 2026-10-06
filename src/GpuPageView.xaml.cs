@@ -52,6 +52,22 @@ public enum PageLayoutMode
 }
 
 /// <summary>
+/// 纵向布局下的"列数/排版"轴，与 PageLayoutMode（横/纵主轴）相互独立。
+/// 仅影响【纵向】布局：横向胶片条模式忽略此值（始终单列）。
+/// 移植自 sumatrapdf-master/src/DocumentLayout.cpp 的 CollectFacingRows / RelayoutFacingWithSpreads
+/// （本应用无 spread，故省略 spread 分支）。
+/// </summary>
+public enum PageArrangement
+{
+    /// <summary>单页视图：纵向单列（默认，与原单列行为完全一致）。</summary>
+    Single = 0,
+    /// <summary>双页视图（facing）：页配对为 (1,2)(3,4)… 左右两列并排。</summary>
+    Facing = 1,
+    /// <summary>书籍视图（book）：封面页 1 独占右栏，其后 (2,3)(4,5)… 左右两列。</summary>
+    Book = 2,
+}
+
+/// <summary>
 /// 标注指针事件参数：视口坐标已换算为【页局部坐标，PDF 点单位，未旋转】，
 /// 与旧路径 Canvas_Pointer* 的坐标空间一致 → MainPage 的标注数据逻辑可原样复用。
 /// </summary>
@@ -224,6 +240,11 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
 
     private PageLayoutMode _layoutMode = PageLayoutMode.VerticalContinuous;
 
+    /// <summary>纵向布局下的列数/排版（单页 / 双页 / 书籍），与 _layoutMode（横纵主轴）轴独立。
+    /// 横向胶片条模式忽略此值（始终单列）。Arrangement 变化时复用 _layoutSwitch* 稳定窗口与
+    /// ReanchorAfterLayoutChange 重锚。</summary>
+    private PageArrangement _arrangement = PageArrangement.Single;
+
     /// <summary>
     /// 布局切换的"稳定窗口"。重排会改 Spacer 尺寸，ScrollViewer 的可滚动范围要等下一轮布局才刷新，
     /// 期间 ChangeView 的偏移可能被旧 extent 夹断、随后 ViewChanged 同步回读一个被夹断的偏移（多为 0）——
@@ -326,6 +347,71 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
             {
                 if (_pages.Count == 0 || _layoutMode != value || !_layoutSwitchInFlight) return;
                 if (_layoutSwitchAnchor != anchor) return; // 已被更新的切换取代
+                ReanchorAfterLayoutChange(anchor, newZoomPercent, pageLocalX, pageLocalY);
+            });
+            StartLayoutSwitchWatchdog();
+        }
+    }
+
+    /// <summary>
+    /// 纵向布局下的列数/排版（单页 / 双页 / 书籍），与 LayoutMode（横纵主轴）轴独立。
+    /// 切换时：重排布局 → 若原本处于"适应"缩放则按新列宽重算适应值（否则保留用户手动缩放）
+    /// → 锚定切换前的当前页，使视口不飘走。复用布局切换稳定窗口机制。
+    /// </summary>
+    public event EventHandler<PageArrangement>? ArrangementChanged;
+
+    /// <summary>
+    /// 纵向布局下的列数/排版。设置时复用 _layoutSwitch* 稳定窗口与 ReanchorAfterLayoutChange 重锚，
+    /// 行为对齐 LayoutMode setter。横向胶片条模式忽略此值（RecomputeLayout 的横向分支不读它）。
+    /// </summary>
+    public PageArrangement Arrangement
+    {
+        get => _arrangement;
+        set
+        {
+            if (_arrangement == value) return;
+
+            int anchor = CurrentPageIndex;
+            // 【布局切换稳定窗口】与 LayoutMode 共用，防止重排期间 ViewChanged 把夹断偏移当权威写回。
+            _layoutSwitchInFlight = true;
+            _layoutSwitchAnchor = anchor;
+            _layoutSwitchStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            StopLayoutSwitchWatchdog();
+
+            double zOld = (_liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor);
+            if (zOld <= 0) zOld = 1.0;
+            double vpW = _vpW, vpH = _vpH;
+            double cx = _liveH / zOld + vpW / 2.0 / zOld;
+            double cy = _liveV / zOld + vpH / 2.0 / zOld;
+            double pageLocalX = 0, pageLocalY = 0;
+            if (anchor >= 0 && anchor < _pages.Count)
+            {
+                var ar = _pages[anchor].LayoutRect;
+                pageLocalX = cx - ar.X;
+                pageLocalY = cy - ar.Y;
+            }
+            double oldFit = FitToViewportPercent;
+            double curZoomPercent = (_liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor) * 100.0;
+            bool wasFitted = Math.Abs(curZoomPercent - oldFit) < 1.0;
+
+            StopSmoothZoom();
+            StopWheelScroll();
+            CancelPendingRestore();
+
+            _arrangement = value;
+            ArrangementChanged?.Invoke(this, value);
+            if (_pages.Count == 0) { _layoutSwitchInFlight = false; return; }
+
+            RecomputeLayout(_pages);
+
+            // 切列数不改变主轴，故"适应"仍按【纵向适应宽度】重算（列数变多时自动缩到两列都可见）。
+            double newZoomPercent = wasFitted ? FitToViewportPercent : curZoomPercent;
+            ReanchorAfterLayoutChange(anchor, newZoomPercent, pageLocalX, pageLocalY);
+
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                if (_pages.Count == 0 || _arrangement != value || !_layoutSwitchInFlight) return;
+                if (_layoutSwitchAnchor != anchor) return;
                 ReanchorAfterLayoutChange(anchor, newZoomPercent, pageLocalX, pageLocalY);
             });
             StartLayoutSwitchWatchdog();
@@ -1564,12 +1650,17 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         // 这里只改内部字段 + 重排 + 通知工具栏图标，偏移由下方 TryApplyPendingRestore 精确应用。
         if (_pages.Count > 0)
         {
+            bool layoutChanged = false;
             var lm = (PageLayoutMode)vs.LayoutMode;
-            if (lm != _layoutMode)
+            if (lm != _layoutMode) { _layoutMode = lm; layoutChanged = true; }
+            var ar = (PageArrangement)vs.Arrangement;
+            if (ar != _arrangement) { _arrangement = ar; layoutChanged = true; }
+            if (layoutChanged)
             {
-                _layoutMode = lm;
+                // 布局必须在偏移之前还原（SavedAtUtc 注释已说明）：重建 Spacer 尺寸，使后续偏移按正确布局落定。
                 RecomputeLayout(_pages);
                 LayoutModeChanged?.Invoke(this, lm);
+                ArrangementChanged?.Invoke(this, ar);
             }
         }
         _pendingRestore = vs;
@@ -2661,6 +2752,46 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         NotifyViewState();
     }
 
+    /// <summary>双列对开的"行"：FirstPage..LastPage（1-based，含端点）；单行单页时两者相等。</summary>
+    private readonly struct FacingRow
+    {
+        public FacingRow(int first, int last) { FirstPage = first; LastPage = last; }
+        public int FirstPage { get; }
+        public int LastPage { get; }
+    }
+
+    /// <summary>
+    /// 把页配对成双列对开的"行"。移植自 sumatrapdf-master/src/DocumentLayout.cpp CollectFacingRows
+    /// （省略 spread 分支：本应用无横向跨页 spread）。
+    /// - bookView：封面页 1 独占一行 (1,1)，其后 (2,3)(4,5)…
+    /// - 否则（facing）：(1,2)(3,4)…；末尾单页独占一行 (n,n)。
+    /// </summary>
+    private static List<FacingRow> CollectFacingRows(int pageCount, bool bookView)
+    {
+        var rows = new List<FacingRow>();
+        if (pageCount < 1) return rows;
+        int page = 1;
+        if (bookView)
+        {
+            rows.Add(new FacingRow(1, 1));
+            page = 2;
+        }
+        while (page <= pageCount)
+        {
+            if (page + 1 <= pageCount)
+            {
+                rows.Add(new FacingRow(page, page + 1));
+                page += 2;
+            }
+            else
+            {
+                rows.Add(new FacingRow(page, page));
+                page += 1;
+            }
+        }
+        return rows;
+    }
+
     /// <summary>
     /// 按当前【布局方向 + 旋转角】计算文档布局（90/270° 交换宽高），并撑出滚动范围。UI 线程调用。
     /// 两种方向都是连续布局：所有页首尾相接串在主轴上，交叉轴居中。
@@ -2694,27 +2825,92 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
             return;
         }
 
-        double maxDipW = 0;
-        foreach (var p in pages)
+        if (_arrangement == PageArrangement.Single)
         {
-            double dipW = (swap ? p.HeightPoints : p.WidthPoints) * 96.0 / 72.0;
-            maxDipW = Math.Max(maxDipW, dipW);
+            // 单页：垂直单列、文档内水平居中（原单列行为，零回归）。
+            double maxDipW = 0;
+            foreach (var p in pages)
+            {
+                double dipW = (swap ? p.HeightPoints : p.WidthPoints) * 96.0 / 72.0;
+                maxDipW = Math.Max(maxDipW, dipW);
+            }
+            double contentW = maxDipW + DocMargin * 2;
+            double y = DocMargin;
+            foreach (var p in pages)
+            {
+                double dipW = (swap ? p.HeightPoints : p.WidthPoints) * 96.0 / 72.0;
+                double dipH = (swap ? p.WidthPoints : p.HeightPoints) * 96.0 / 72.0;
+                p.LayoutRect = new Rect((contentW - dipW) / 2.0, y, dipW, dipH);
+                y += dipH + PageGap;
+            }
+            double totalH = y - PageGap + DocMargin;
+            Spacer.Width = contentW;
+            Spacer.Height = Math.Max(totalH, 1);
+            return;
         }
 
-        // 布局：垂直连续，页在文档内水平居中。
-        double contentW = maxDipW + DocMargin * 2;
-        double y = DocMargin;
-        foreach (var p in pages)
+        // 双页 / 书籍：双列对开，移植自 sumatrapdf-master/src/DocumentLayout.cpp
+        // RelayoutFacingWithSpreads（省略 spread / R2L 分支）。每行顶对齐、行高取行内最大页高；
+        // 左列右对齐到右栏左缘、右列左对齐；整体以 DocMargin 为左右边距，不随视口缩放（与单列一致）。
+        var rows = CollectFacingRows(pages.Count, _arrangement == PageArrangement.Book);
+        double colMax0 = 0, colMax1 = 0;
+        double currPosY = DocMargin;
+        // 第一遍：确定每列最大宽与每行高度（顶对齐，x 暂置 0）。
+        foreach (var row in rows)
         {
-            double dipW = (swap ? p.HeightPoints : p.WidthPoints) * 96.0 / 72.0;
-            double dipH = (swap ? p.WidthPoints : p.HeightPoints) * 96.0 / 72.0;
-            p.LayoutRect = new Rect((contentW - dipW) / 2.0, y, dipW, dipH);
-            y += dipH + PageGap;
+            double rowMaxDy = 0;
+            for (int pageNo = row.FirstPage; pageNo <= row.LastPage; pageNo++)
+            {
+                var p = pages[pageNo - 1];
+                double dipW = (swap ? p.HeightPoints : p.WidthPoints) * 96.0 / 72.0;
+                double dipH = (swap ? p.WidthPoints : p.HeightPoints) * 96.0 / 72.0;
+                p.LayoutRect = new Rect(0, currPosY, dipW, dipH);
+                rowMaxDy = Math.Max(rowMaxDy, dipH);
+                if (row.FirstPage == row.LastPage)
+                {
+                    bool cover = _arrangement == PageArrangement.Book && row.FirstPage == 1;
+                    if (cover) colMax1 = Math.Max(colMax1, dipW);
+                    else colMax0 = Math.Max(colMax0, dipW);
+                }
+                else
+                {
+                    if (pageNo == row.FirstPage) colMax0 = Math.Max(colMax0, dipW);
+                    else colMax1 = Math.Max(colMax1, dipW);
+                }
+            }
+            currPosY += rowMaxDy + PageGap;
         }
-        double totalH = y - PageGap + DocMargin;
-
-        Spacer.Width = contentW;
-        Spacer.Height = Math.Max(totalH, 1);
+        double contentW2 = colMax0 + PageGap + colMax1 + DocMargin * 2;
+        double pageOffX = DocMargin;
+        // 第二遍：按列位置定 x（左列右对齐、右列左对齐；封面页放右栏）。
+        foreach (var row in rows)
+        {
+            if (row.FirstPage == row.LastPage)
+            {
+                var p = pages[row.FirstPage - 1];
+                double dipW = p.LayoutRect.Width;
+                bool cover = _arrangement == PageArrangement.Book && row.FirstPage == 1;
+                double x = cover ? (pageOffX + colMax0 + PageGap) : (pageOffX + colMax0 - dipW);
+                p.LayoutRect = new Rect(x, p.LayoutRect.Y, dipW, p.LayoutRect.Height);
+            }
+            else
+            {
+                int col = 0;
+                double x = pageOffX;
+                for (int pageNo = row.FirstPage; pageNo <= row.LastPage; pageNo++)
+                {
+                    var p = pages[pageNo - 1];
+                    double dipW = p.LayoutRect.Width;
+                    double px = (col == 0) ? (x + colMax0 - dipW) : x;
+                    p.LayoutRect = new Rect(px, p.LayoutRect.Y, dipW, p.LayoutRect.Height);
+                    x += (col == 0 ? colMax0 : colMax1) + PageGap;
+                    col++;
+                }
+            }
+        }
+        double totalH2 = currPosY - PageGap + DocMargin;
+        Spacer.Width = Math.Max(contentW2, 1);
+        Spacer.Height = Math.Max(totalH2, 1);
     }
 
     private void Viewer_SizeChanged(object sender, SizeChangedEventArgs e)
