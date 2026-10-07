@@ -52,8 +52,8 @@ namespace Glance.Services;
 ///
 /// Concurrency: the print events run on the UI thread. The native page render is
 /// kicked off inside Task.Run (no UI SynchronizationContext) and awaited with
-/// GetResult() — this avoids the await-on-UI-thread deadlock, because
-/// AsyncBridge.RunNativeAsync already offloads the FFI call to the thread pool.
+/// GetResult() — this avoids the await-on-UI-thread deadlock, because the
+/// native FFI call is offloaded to the thread pool via Task.Run.
 /// The bitmap is written into a WriteableBitmap.PixelBuffer (synchronous), so no
 /// async SetBitmapAsync is needed either.
 /// </summary>

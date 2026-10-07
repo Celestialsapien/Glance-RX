@@ -49,6 +49,15 @@ public enum AnnotationType
     Pen
 }
 
+/// <summary>操作指南浮层里的一行：左侧手势/按键标签 + 右侧本地化说明。
+/// 声明在【命名空间级】而非 MainPage 内部，是为了让 XAML 编译绑定
+/// <c>x:DataType="local:GuideRow"</c> 能解析到类型（xmlns:local = "using:Glance"）。</summary>
+public sealed class GuideRow
+{
+    public string Gesture { get; init; } = string.Empty;
+    public string Description { get; init; } = string.Empty;
+}
+
 public sealed partial class MainPage : Page
 {
     public static MainPage? Current { get; private set; }
@@ -659,6 +668,12 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(OpenSecondPdfButton);
         ButtonVisualOverride.Attach(CloseSecondPdfButton);
 
+        // 设置浮层内的「操作指南」按钮：与标准功能按钮同源（静止带底 + hover/pressed 整颗变色），
+        // 消除原「透明底 + 无反馈」的简陋观感。
+        // ⚠ inPopupTree=true：按钮活在主可视树之外的 SettingsFlyout 独立树，跨树 GetCurrentPoint 坐标不可靠，
+        //   必须退出整页几何驱动（否则被 PageRoot_PointerMoved 误判 hover），改由按钮自身 PointerMoved 驱动（基类 Track 同树坐标）。
+        ButtonVisualOverride.Attach(GuideButton, inPopupTree: true);
+
         // 缩放胶囊 4 颗（ZoomOut / ZoomIn / ZoomValue / FitWidth）：与对比视图两颗【完全同一路线】——
         // 同样套 ButtonNoStateMachineStyle、同样静止就带底、hover / pressed 整颗变色（10-02 用户拍板）。
         // ⚠ 10-04 起静止档改为【完全透明】（transparentAtRest）：胶囊背景是【亚克力】FlyoutPresenterBackground
@@ -842,6 +857,14 @@ public sealed partial class MainPage : Page
             if (TwoPageItem != null) TwoPageItem.Content = Glance.Services.LocalizationService.Get("TwoPage");
             if (BookItem != null) BookItem.Content = Glance.Services.LocalizationService.Get("BookView");
 
+            // Operations guide overlay（按钮标签与浮层标题共用 GuideTitle）
+            if (GuideButtonText != null) GuideButtonText.Text = Glance.Services.LocalizationService.Get("GuideTitle");
+            if (GuideTitleText != null) GuideTitleText.Text = Glance.Services.LocalizationService.Get("GuideTitle");
+            if (GuideMouseSectionText != null) GuideMouseSectionText.Text = Glance.Services.LocalizationService.Get("GuideMouseSection");
+            if (GuideKeyboardSectionText != null) GuideKeyboardSectionText.Text = Glance.Services.LocalizationService.Get("GuideKeyboardSection");
+            if (GuideCloseButton != null) GuideCloseButton.Content = Glance.Services.LocalizationService.Get("GuideClose");
+            BuildGuideRows();
+
             // Welcome Screen
             if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = Glance.Services.LocalizationService.Get("WelcomeSubtitle");
             if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = Glance.Services.LocalizationService.Get("WelcomeOpenButton");
@@ -949,6 +972,78 @@ public sealed partial class MainPage : Page
             if (GpuViewerRight != null && GpuViewerRight.Visibility == Visibility.Visible)
                 GpuViewerRight.Arrangement = (PageArrangement)idx;
         }
+    }
+
+    // ---------------- 操作指南浮层（GuideOverlay） ----------------
+
+    /// <summary>本地化缩写，仅用于构建指南行，避免每行重复全限定名。</summary>
+    private static string Loc(string key) => Glance.Services.LocalizationService.Get(key);
+
+    /// <summary>构建指南内容。两条itum都以【源码】为准而非凭记忆抄先手：
+    /// · 鼠标行 ↔ GpuPageView.xaml.cs 的指针/滚轮处理器：左键拖拽平移(:4080)、右键上下拖拽数值缩放(:4097,
+    ///   4159 处 deltaY = 起点Y − 当前Y，故向上放大)、双击 (:3865 适应宽度↔100%)、Ctrl+滚轮缩放 (:1381)、
+    ///   Shift+滚轮交叉轴 (:1405)、标注工具启用时的书写分支 (:4062)。
+    /// · 键盘行 ↔ MainPage.xaml 的 Page.KeyboardAccelerators (:453-505)，外加构造函数里补的两个主键盘
+    ///   键 Ctrl+= / Ctrl+-（本 SDK 投影缺 OemPlus/OemMinus 枚举名，故用键码 0xBB / 0xBD 添加）。
+    /// 任一侧变更时请同步此处，否则指南会失真。</summary>
+    private void BuildGuideRows()
+    {
+        if (GuideMouseItems != null)
+        {
+            GuideMouseItems.ItemsSource = new List<GuideRow>
+            {
+                new() { Gesture = Loc("GuideMousePanGesture"),         Description = Loc("GuideMousePanDesc") },
+                new() { Gesture = Loc("GuideMousePenDrawGesture"),     Description = Loc("GuideMousePenDrawDesc") },
+                new() { Gesture = Loc("GuideMouseWheelGesture"),       Description = Loc("GuideMouseWheelDesc") },
+                new() { Gesture = Loc("GuideMouseCtrlWheelGesture"),   Description = Loc("GuideMouseCtrlWheelDesc") },
+                new() { Gesture = Loc("GuideMouseShiftWheelGesture"),  Description = Loc("GuideMouseShiftWheelDesc") },
+                new() { Gesture = Loc("GuideMouseDoubleClickGesture"), Description = Loc("GuideMouseDoubleClickDesc") },
+                new() { Gesture = Loc("GuideMouseRightZoomGesture"),   Description = Loc("GuideMouseRightZoomDesc") },
+            };
+        }
+
+        if (GuideKeyboardItems != null)
+        {
+            // 按键标签是【符号】而非可译散文（键帽上写的就是 Ctrl、Home、End），故不进本地化字典；
+            // 右侧说明全部走 LocalizationService，符合"对话框文案不得硬编码"的约定。
+            GuideKeyboardItems.ItemsSource = new List<GuideRow>
+            {
+                new() { Gesture = "Ctrl + O",         Description = Loc("GuideKeyOpenDesc") },
+                new() { Gesture = "Ctrl + +",         Description = Loc("GuideKeyZoomInDesc") },
+                new() { Gesture = "Ctrl + -",         Description = Loc("GuideKeyZoomOutDesc") },
+                new() { Gesture = "Ctrl + 0",         Description = Loc("GuideKeyZoomResetDesc") },
+                new() { Gesture = "F",                Description = Loc("GuideKeyFitDesc") },
+                new() { Gesture = "G",                Description = Loc("GuideKeyToggleAnnotsDesc") },
+                new() { Gesture = "↑ ↓ ← →", Description = Loc("GuideKeyArrowsDesc") },
+                new() { Gesture = "Space / PageDown", Description = Loc("GuideKeyNextPageDesc") },
+                new() { Gesture = "PageUp",           Description = Loc("GuideKeyPrevPageDesc") },
+                new() { Gesture = "Home",             Description = Loc("GuideKeyFirstPageDesc") },
+                new() { Gesture = "End",              Description = Loc("GuideKeyLastPageDesc") },
+                new() { Gesture = "Ctrl + D",         Description = Loc("GuideKeyBookmarkDesc") },
+                new() { Gesture = "Ctrl + Z",         Description = Loc("GuideKeyUndoDesc") },
+                new() { Gesture = "Ctrl + Y",         Description = Loc("GuideKeyRedoDesc") },
+                new() { Gesture = "Ctrl + S",         Description = Loc("GuideKeySaveDesc") },
+                new() { Gesture = "Ctrl + P",         Description = Loc("GuideKeyPrintDesc") },
+            };
+        }
+    }
+
+    /// <summary>设置菜单「操作指南」按钮：先收起设置 Flyout（弹层绘制在 popup 层，若不收起会盖在
+    /// 主视觉树里的浮层之上），再显示指南浮层。</summary>
+    private void GuideButton_Click(object sender, RoutedEventArgs e)
+    {
+        SettingsFlyout?.Hide();
+        GuideOverlay?.Visibility = Visibility.Visible;
+    }
+
+    private void GuideScrim_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        GuideOverlay?.Visibility = Visibility.Collapsed;
+    }
+
+    private void GuideCloseButton_Click(object sender, RoutedEventArgs e)
+    {
+        GuideOverlay?.Visibility = Visibility.Collapsed;
     }
 
     private async void OpenPdf_Click(object sender, RoutedEventArgs e)

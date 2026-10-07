@@ -18,8 +18,7 @@ src/
 ├── MainPage.xaml(.cs)           # Main UI + page rendering
 ├── App.xaml(.cs)                # Application entry point
 ├── Interop/
-│   ├── GlanceNative.cs          # P/Invoke FFI declarations
-│   └── AsyncBridge.cs           # C# async ↔ Rust sync bridge
+│   └── GlanceNative.cs          # P/Invoke FFI declarations
 ├── Services/
 │   ├── PdfRenderService.cs      # PDF rendering wrapper
 │   ├── PdfExportService.cs      # 真实 PDF /Ink 注解对象读写（文件即唯一真相源）
@@ -47,7 +46,6 @@ src/
 #### PdfRenderService.cs
 - `InitializeAsync(filePath)` - Load PDF document
 - `RenderPageAsync(pageIndex)` - Render single page to bitmap
-- Called via AsyncBridge for thread-safe FFI
 
 #### PdfExportService.cs
 - 批注以 PDF 原生 /Ink 注解对象写入（非破坏性、可移除、可显隐）
@@ -61,11 +59,6 @@ src/
 - Struct definitions: `EngineCreateResult`, `Response`
 - DllImportResolver for dynamic DLL discovery
 - Memory management (`memory_free()`)
-
-#### AsyncBridge.cs
-- `RunNativeAsync<T>(nativeCall)` - Wrapper for FFI calls
-- Runs on thread pool to prevent UI blocking
-- Returns Task<T> for async/await integration
 
 ## Building
 
@@ -108,7 +101,7 @@ cd src/tests/TestDllLoad && dotnet run
 
 1. **Edit XAML** (`MainPage.xaml`) - Layout, bindings
 2. **Update C#** (`MainPage.xaml.cs`) - Event handlers, logic
-3. **Call Rust** (via AsyncBridge + GlanceNative) - PDF operations
+3. **Call Rust** (via GlanceNative FFI) - PDF operations
 4. **Test locally** (`dotnet run`) - Launch app
 5. **Commit** - Git push to GitHub
 

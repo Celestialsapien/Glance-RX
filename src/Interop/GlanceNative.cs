@@ -97,7 +97,7 @@ public static class GlanceNative
         string errorMsg;
         if (response.ErrorMsg != IntPtr.Zero)
         {
-            errorMsg = Marshal.PtrToStringAnsi(response.ErrorMsg) ?? "Unknown error";
+            errorMsg = Marshal.PtrToStringUTF8(response.ErrorMsg) ?? "Unknown error";
             memory_free(response.ErrorMsg);
         }
         else

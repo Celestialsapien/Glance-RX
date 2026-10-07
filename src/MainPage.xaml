@@ -708,9 +708,39 @@
 
                             <Flyout x:Name="SettingsFlyout" Placement="BottomEdgeAlignedRight" FlyoutPresenterStyle="{StaticResource SettingsFlyoutPresenterStyle}">
 
-                                <StackPanel x:Name="SettingsFlyoutPanel" Spacing="16" Width="260" Padding="4" KeyDown="SettingsFlyout_KeyDown">
+                                <!-- 底部预留大留白：以「卡片顶 → 第一个下拉框顶」为顶部参考（实测 ≈70 DIP，含标题行盒与上方 padding），
+                                     底部同步留出 ≈69 DIP（4 presenter + 1 border + 64 panel），使上下留空对应。
+                                     这块空间按用户要求预留；后续往里放内容时，把 64 收掉即可。 -->
+                                <StackPanel x:Name="SettingsFlyoutPanel" Spacing="16" Width="260" Padding="4,4,4,64" KeyDown="SettingsFlyout_KeyDown">
 
-                                    <TextBlock x:Name="SettingsTitleText" Text="Configuración" FontSize="18" FontWeight="SemiBold"/>
+                                    <!-- 标题行：标题(左) + 「操作指南」按钮(右, 同行右上角)。
+                                         按钮移到此处后，下方布局分组与底部预留大留白(Panel Padding 底部 64)保持不变。 -->
+                                    <Grid VerticalAlignment="Center">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <TextBlock x:Name="SettingsTitleText" Grid.Column="0" Text="Configuración" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+
+                                        <!-- 操作指南按钮：与标题同行、置于右上角。
+                                             内容 = ReadingMode 图标(U+E736, Segoe MDL2 Assets) + 文字，图标放文字前（语义 ReadingMode）。
+                                             hover/pressed 反馈由 MainPage.xaml.cs 的 ButtonVisualOverride.Attach(GuideButton, inPopupTree:true) 提供。 -->
+                                        <Button x:Name="GuideButton" Grid.Column="1" Style="{StaticResource ButtonNoStateMachineStyle}" Click="GuideButton_Click"
+                                                HorizontalAlignment="Right" VerticalAlignment="Center"
+                                                Padding="8,4"
+                                                UseLayoutRounding="True" IsTabStop="False">
+
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <!-- 字体回退列表：Win11 优先用推荐的 Segoe Fluent Icons，Win10 回退到 Segoe MDL2 Assets。
+                                                     两个字体在 U+E736 处均映射为 ReadingMode（已查 Microsoft Learn 官方表确认），
+                                                     故回退不会改变语义图标，只切换视觉风格，天然自适应 Win10/Win11。 -->
+                                                <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Glyph="&#xE736;" FontSize="13" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="GuideButtonText" Text="Operations Guide" FontSize="12" VerticalAlignment="Center"/>
+                                            </StackPanel>
+
+                                        </Button>
+                                    </Grid>
 
 
 
@@ -1956,7 +1986,107 @@
 
              pixel-perfect margin symmetry and identical height without any reference frame drift. -->
 
+        <!-- ================= Operations guide overlay =================
+             Hosted deliberately in the MAIN visual tree (last child of the page root grid, painted above
+             the SplitView via ZIndex) rather than in a Flyout/Popup: a popup is a separate visual tree
+             with a null parent chain, so it does NOT inherit the window RequestedTheme and would fall
+             back to the system theme instead of the app's own light/dark setting — see App.xaml header.
+             Consequently this references ONLY stock ThemeResource brushes already proven elsewhere in
+             this project (SolidBackgroundFillColorBaseBrush / CardStrokeColorDefaultBrush /
+             ControlCornerRadius / SystemControlForegroundBaseMediumBrush); no custom App.xaml key is
+             referenced from the main tree, which is what previously broke theme switching. Text uses the
+             default foreground so it adapts to the request theme automatically. -->
+        <Grid x:Name="GuideOverlay" Visibility="Collapsed" Canvas.ZIndex="3000">
 
+            <Grid.Resources>
+                <!-- Shared row template for both the mouse and the keyboard section. -->
+                <DataTemplate x:Key="GuideRowTemplate" x:DataType="local:GuideRow">
+                    <Grid Padding="0,5" ColumnSpacing="14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="200"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <!-- 手势/按键胶囊：边框必须用 ControlStrongStrokeColorDefaultBrush（浅 45% 黑 / 深 55% 白），
+                             原先的 CardStrokeColorDefaultBrush 浅色档只有 6% 黑 → 框几乎隐形，视觉上像"下方缺一块"。
+                             浅底用 ControlFillColorDefaultBrush（浅 70% 白）给出键帽观感。二者均为 WinUI 原生键
+                             （同 CardStrokeColorDefaultBrush 一族），非自定义 App 键，不触碰主题切换雷区。
+                             MinHeight + VerticalAlignment=Center + 上下 4px 内边距：保证文字永不贴边/被裁。
+                             Width=140（全列等宽）：胶囊默认贴内容自适应宽度时，连同为单字母的 F/G 都因字形宽度不同而大小不一。
+                             140 是按【三语最长标签】取的：zh「画笔模式：左键拖动」≈128、en「Pen mode: left-drag」≈115、
+                             es「Modo lápiz: arrastre」≈120，均可单行容纳。es 原本的冗长写法（最长 ≈247）已同步收短，
+                             否则固定宽会把西语那几条挤成两行（宽虽等、高却乱）。用固定 Width 而非 MinWidth：任一语言下宽度都一致。 -->
+                        <Border Grid.Column="0"
+                                Background="{ThemeResource ControlFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource ControlStrongStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="{ThemeResource ControlCornerRadius}"
+                                Padding="10,4" MinHeight="28" Width="140"
+                                HorizontalAlignment="Left" VerticalAlignment="Center">
+                            <TextBlock Text="{x:Bind Gesture}" FontSize="12"
+                                       TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <!-- FontSize 必须是整数 12（= 标准 Caption 档）：原来是 12.5，是全仓库唯一的非整数字号，
+                             在 100/125/150/175% 四档缩放下都落在非整数像素上，行盒高度非整数会导致相邻行的
+                             基线交替错半像素、行距忽宽忽窄（16 行密集列表里最明显）。12 在五档 DPI 下全是整数。 -->
+                        <TextBlock Grid.Column="1" Text="{x:Bind Description}" FontSize="12"
+                                   TextWrapping="Wrap" VerticalAlignment="Center"
+                                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+                    </Grid>
+                </DataTemplate>
+            </Grid.Resources>
+
+            <!-- Dimmed backdrop; tapping it dismisses the guide. A neutral black scrim reads correctly in both themes. -->
+            <Grid x:Name="GuideScrim" Background="Black" Opacity="0.35" Tapped="GuideScrim_Tapped"/>
+
+            <Border x:Name="GuideCard"
+                    Margin="40,32" MaxWidth="720"
+                    HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{ThemeResource ControlCornerRadius}"
+                    Padding="24,20">
+
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" x:Name="GuideTitleText" Text="Operations Guide"
+                               FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+
+                    <ScrollViewer Grid.Row="1" Margin="0,16" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled" Padding="0,0,12,0">
+                        <StackPanel Spacing="22">
+
+                            <StackPanel Spacing="10">
+                                <TextBlock x:Name="GuideMouseSectionText" Text="Mouse Operations"
+                                           FontSize="14" FontWeight="SemiBold"/>
+                                <ItemsControl x:Name="GuideMouseItems"
+                                              ItemTemplate="{StaticResource GuideRowTemplate}"/>
+                            </StackPanel>
+
+                            <StackPanel Spacing="10">
+                                <TextBlock x:Name="GuideKeyboardSectionText" Text="Keyboard Shortcuts"
+                                           FontSize="14" FontWeight="SemiBold"/>
+                                <ItemsControl x:Name="GuideKeyboardItems"
+                                              ItemTemplate="{StaticResource GuideRowTemplate}"/>
+                            </StackPanel>
+
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <Button Grid.Row="2" x:Name="GuideCloseButton" Content="Close"
+                            Style="{StaticResource ButtonNoStateMachineStyle}"
+                            HorizontalAlignment="Right" IsTabStop="False"
+                            Padding="16,7" Click="GuideCloseButton_Click"/>
+
+                </Grid>
+
+            </Border>
+
+        </Grid>
 
     </Grid>
 

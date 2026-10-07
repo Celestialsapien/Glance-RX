@@ -333,7 +333,7 @@ public class PdfRenderService : IDisposable
     private static void ThrowCreateError(GlanceNative.EngineCreateResult result, string operation)
     {
         if (result.ErrorMsg == IntPtr.Zero) return;
-        string msg = Marshal.PtrToStringAnsi(result.ErrorMsg) ?? "Unknown error";
+        string msg = Marshal.PtrToStringUTF8(result.ErrorMsg) ?? "Unknown error";
         GlanceNative.memory_free(result.ErrorMsg);
         throw new InvalidOperationException($"{operation}: {msg}");
     }
