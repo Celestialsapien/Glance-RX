@@ -44,19 +44,9 @@
 
                 <!-- ══ 深色（WinUI 的 "Default" 档，不是 "Dark"）══ -->
                 <ResourceDictionary x:Key="Default">
-                    <Color x:Key="GlanceAccent">#A882FF</Color>
-
-                    <!-- ⚠ 纵深防御（2026-10-06）：以下中性底三档原先【只定义在浅色字典】。
-                         一旦出现"浅色画刷被应用到深色上下文"（历史事故链路：App.xaml 主题字典的自定义键被
-                         主树核心元素用 {ThemeResource} 引用 ⇒ 主题切换传播错乱 ⇒ 按钮取错主题字典），
-                         WinUI 物化浅色画刷内的 {ThemeResource GlanceFillNeutral*} 时会在深色字典查不到该键
-                         ⇒ COMException（"Cannot find GlanceFillNeutralPressed"）+ 整套配色错乱。
-                         根因（那个引用）已在 a265ad4 移除；此处补进深色字典是【第二道防线】—— 将来再踩到
-                         同类雷时退化为"某处颜色略不对"，而不是整个 app 崩溃。
-                         深色档未选中按钮实际走 ControlFillColor*，此三值仅用于满足解析、不实际显示。 -->
-                    <Color x:Key="GlanceFillNeutral">#2B2B2B</Color>
-                    <Color x:Key="GlanceFillNeutralHover">#353535</Color>
-                    <Color x:Key="GlanceFillNeutralPressed">#404040</Color>
+                    <!-- GlanceAccent (Obsidian 紫) 直接内联为画刷 Color 字面量，避免 <Color> 资源元素触发
+                         WMC0001 "Unknown type 'Color'"。深色未选中底走 ControlFillColor*，原深色的
+                         GlanceFillNeutral* 纵深防御三档已无引用方（根因在 a265ad4 移除），随本修复一并删除。 -->
 
                     <!-- 欢迎页"打开文件"按钮专用画刷（第 12 轮）。
                          ⚠ 第 11 轮在主题字典覆盖 generic 的 AccentButtonBackground* 键【无效】：按钮仍是系统蓝。
@@ -64,9 +54,9 @@
                            自己的字典链解析，不回查 App 主题字典（与 AccentFillColor* 渗不进同族陷阱）。
                          ⇒ 正解 = App 自有 Style（GlanceAccentButtonStyle，见 ThemeDictionaries 之后）+ 模板，
                            模板动画只引用下面三支画刷。App 引 generic 的键方向正常（工具栏三档半透白即证据）。 -->
-                    <SolidColorBrush x:Key="GlanceAccentBrush" Color="{ThemeResource GlanceAccent}" />
-                    <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
-                    <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+                    <SolidColorBrush x:Key="GlanceAccentBrush" Color="#A882FF" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="#A882FF" Opacity="0.9" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="#A882FF" Opacity="0.8" />
 
                     <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：不依赖 WinUI 自适应的
                          TextOnAccentFillColorPrimary（它会随系统强调色 / 主题错位，曾导致深色调悬浮态文字错变白、
@@ -143,21 +133,21 @@
 
                     <!-- 已选中：Obsidian 紫。0.9 / 0.8 两档沿用 generic 的 AccentFill* 梯度 -->
                     <SolidColorBrush x:Key="ToggleButtonBackgroundChecked"
-                                     Color="{ThemeResource GlanceAccent}" />
+                                     Color="#A882FF" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver"
-                                     Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
+                                     Color="#A882FF" Opacity="0.9" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed"
-                                     Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+                                     Color="#A882FF" Opacity="0.8" />
                 </ResourceDictionary>
 
                 <!-- ══ 浅色 ══ -->
                 <ResourceDictionary x:Key="Light">
-                    <Color x:Key="GlanceAccent">#9873F7</Color>
+                    <!-- GlanceAccent (Obsidian 紫 · 浅色档 #9873F7) 内联为画刷 Color 字面量，避免 <Color> 资源元素触发 WMC0001。 -->
 
                     <!-- 欢迎页按钮专用画刷（与深色档同层级、同梯度；说明见深色档注释） -->
-                    <SolidColorBrush x:Key="GlanceAccentBrush" Color="{ThemeResource GlanceAccent}" />
-                    <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
-                    <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+                    <SolidColorBrush x:Key="GlanceAccentBrush" Color="#9873F7" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="#9873F7" Opacity="0.9" />
+                    <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="#9873F7" Opacity="0.8" />
 
                     <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：与深色档同键、同语义（说明见深色档注释）。
                          浅色调紫(#9873F7)偏亮 ⇒ 文字白会跌破 AA(3.4:1)；若要保持可读应改黑(6.1:1)。
@@ -166,17 +156,15 @@
                     <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#E6E6E6" />
 
                     <!-- 浅色中性底标定（09-27 截图实测）：侧栏面板 #F3F3F3 / 工具栏 #FDFDFD。
-                         纯白对齐同屏普通 Button，用户已验收；悬停/按下向灰压一/两档。 -->
-                    <Color x:Key="GlanceFillNeutral">#FFFFFF</Color>
-                    <Color x:Key="GlanceFillNeutralHover">#F6F6F6</Color>
-                    <Color x:Key="GlanceFillNeutralPressed">#ECECEC</Color>
+                         纯白对齐同屏普通 Button，用户已验收；悬停/按下向灰压一/两档。三档字面量已直接内联到
+                         ToggleButtonBackground* 画刷（见下），不再以 <Color> 资源定义，避免 WMC0001。 -->
 
                     <SolidColorBrush x:Key="ToggleButtonBackground"
-                                     Color="{ThemeResource GlanceFillNeutral}" />
+                                     Color="#FFFFFF" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver"
-                                     Color="{ThemeResource GlanceFillNeutralHover}" />
+                                     Color="#F6F6F6" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
-                                     Color="{ThemeResource GlanceFillNeutralPressed}" />
+                                     Color="#ECECEC" />
 
                     <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
                          不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->
@@ -248,11 +236,11 @@
                     <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="#00FFFFFF" />
 
                     <SolidColorBrush x:Key="ToggleButtonBackgroundChecked"
-                                     Color="{ThemeResource GlanceAccent}" />
+                                     Color="#9873F7" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver"
-                                     Color="{ThemeResource GlanceAccent}" Opacity="0.9" />
+                                     Color="#9873F7" Opacity="0.9" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed"
-                                     Color="{ThemeResource GlanceAccent}" Opacity="0.8" />
+                                     Color="#9873F7" Opacity="0.8" />
                 </ResourceDictionary>
 
             </ResourceDictionary.ThemeDictionaries>
