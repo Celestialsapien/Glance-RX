@@ -583,7 +583,17 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
         }
     }
 
-    /// <summary>平滑翻到指定页（弹簧引擎动画过去）；越界忽略。供空格/PageDown/PageUp 使用。</summary>
+    /// <summary>空格：下翻一个视口（视口高度的弹簧滚动，与缩放无关）。
+    /// 一次 = 当前视口正下方那一屏；连点无缝接续；到末屏由 AddWheelScroll 的弹簧自夹到底。</summary>
+    public void ScrollViewportDown()
+    {
+        if (_vpH <= 0) return;
+        // 下滚 = 正 dv（与 ScrollByArrow 的 Down 同向，因 WheelScrollFactor 为负，Down 实际传 +|notch|）。
+        // 步长 = 一个视口高度(_vpH，屏幕 DIP)：滚动偏移与视口同单位，故一次恰为一整屏，与缩放无关。
+        AddWheelScroll(0, _vpH);
+    }
+
+    /// <summary>平滑翻到指定页（弹簧引擎动画过去）；越界忽略。供 PageDown/PageUp 使用。</summary>
     public void GoToPageSmooth(int index)
     {
         var pages = _pages;

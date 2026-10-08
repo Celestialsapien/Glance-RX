@@ -1015,7 +1015,8 @@ public sealed partial class MainPage : Page
                 new() { Gesture = "F",                Description = Loc("GuideKeyFitDesc") },
                 new() { Gesture = "G",                Description = Loc("GuideKeyToggleAnnotsDesc") },
                 new() { Gesture = "↑ ↓ ← →", Description = Loc("GuideKeyArrowsDesc") },
-                new() { Gesture = "Space / PageDown", Description = Loc("GuideKeyNextPageDesc") },
+                new() { Gesture = "Space",            Description = Loc("GuideKeySpaceViewportDesc") },
+                new() { Gesture = "PageDown",         Description = Loc("GuideKeyNextPageDesc") },
                 new() { Gesture = "PageUp",           Description = Loc("GuideKeyPrevPageDesc") },
                 new() { Gesture = "Home",             Description = Loc("GuideKeyFirstPageDesc") },
                 new() { Gesture = "End",              Description = Loc("GuideKeyLastPageDesc") },
@@ -5421,8 +5422,9 @@ public sealed partial class MainPage : Page
 
     /// <summary>
     /// 阅读区键盘导航（与焦点无关，走 KeyboardAccelerator 全局分发）。
-    /// 方向键=视口滚动一格（弹簧）；空格/PageDown=下一页、PageUp=上一页（弹簧翻页）；
-    /// Home/End=首页/末页（直接跳、无动画）。文本输入控件/按钮/列表等保留原生按键行为。
+    /// 方向键=滚轮滚一格的弹簧滚动（并非整屏）；空格=下翻一个视口（视口高度弹簧滚动，与缩放无关）；
+    /// PageDown/PageUp=下一页/上一页弹簧翻页；Home/End=首页/末页（直接跳、无动画）。
+    /// 文本输入控件/按钮/列表等保留原生按键行为。
     /// </summary>
     private void Nav_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
@@ -5444,8 +5446,12 @@ public sealed partial class MainPage : Page
                 GpuViewer.ScrollByArrow(sender.Key);
                 break;
 
-            // 空格 / PageDown：跳到下一页（弹簧动画，移动一页靠弹簧足够，不加遮罩）。
+            // 空格：下翻一个视口（视口高度弹簧滚动，与缩放无关）；连点无缝接续，到末屏由弹簧自夹。
             case VirtualKey.Space:
+                GpuViewer.ScrollViewportDown();
+                break;
+
+            // PageDown：跳到下一页（弹簧动画，移动一页靠弹簧足够，不加遮罩）。
             case VirtualKey.PageDown:
                 GpuViewer.GoToPageSmooth(_currentPageIndex + 1);
                 break;
