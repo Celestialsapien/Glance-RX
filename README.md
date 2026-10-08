@@ -1,162 +1,144 @@
 # Glance
 
-![Glance Logo](docs/img/logo_paramarca.png)
+![Glance](docs/img/glance_hero_1920x1080.png)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Framework: WinUI 3](https://img.shields.io/badge/Framework-WinUI_3-purple.svg)](https://learn.microsoft.com/en-us/windows/apps/winui/winui3/)
-[![Platform: Windows 11](https://img.shields.io/badge/Platform-Windows_11-blue.svg)](https://www.microsoft.com/windows/)
-[![Language: C#](https://img.shields.io/badge/Language-C%23-green.svg)](https://learn.microsoft.com/en-us/dotnet/csharp/)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Framework: WinUI 3](https://img.shields.io/badge/Framework-WinUI_3-purple.svg)](https://learn.microsoft.com/zh-cn/windows/apps/winui/winui3/)
+[![Platform: Windows 10+](https://img.shields.io/badge/Platform-Windows_10%2B-blue.svg)](https://www.microsoft.com/windows/)
+[![Language: C# / Rust](https://img.shields.io/badge/Language-C%23%20%2F%20Rust-green.svg)](https://learn.microsoft.com/dotnet/csharp/)
 
-<a href="https://apps.microsoft.com/detail/9P387LMMCCTB" target="_blank">
-  <img src="https://developer.microsoft.com/en-us/store/badges/images/English_get-it-from-MS.png" alt="Get it from Microsoft Store" height="40" />
-</a>
+Glance-me 是一款改良自jonas1ara的Glance的高性能 PDF 阅读器，基于 Windows 11 的 WinUI 3 外壳，搭配 Rust 原生渲染后端（MuPDF）与 Win2D GPU 合成。
 
-Glance is a fast, lightweight, and elegant PDF document viewer designed specifically for Windows 11. Built from the ground up following Fluent Design principles, it offers a visually integrated experience featuring Mica transparency and smooth transitions. It combines the speed and minimalist design of classic document viewers like GNOME Evince with modern annotation tools inspired by Adobe Acrobat.
-
-<!-- ![Glance Demo](docs/img/Glance.gif) -->
+> 完全免安装、可移植（self-contained，非打包形态）：用户数据只写入 exe 同级目录，**绝不写入 C 盘、AppData 或系统 Temp**。
 
 ---
 
-## Key Features
+## 核心特性
 
-* **Premium Aesthetics and Fluent Design:**
-  * Native use of Windows 11 Mica backdrop that adapts dynamically to the user's desktop wallpaper.
-  * Integrated window title bar and translucent sidebar for an immersive reading experience.
-  * Full support for automatic light and dark system themes.
-* **Visual Welcome Screen (Evince-style):**
-  * Grid layout displaying recent documents using cover page thumbnails rendered from the first page of each PDF.
-  * Single-click quick access to recently opened files with automatic registry cleanup if files are moved or deleted.
-* **Side-by-Side Comparison (Split View):**
-  * Compare two PDF documents side-by-side dynamically with synchronous vertical layout grids.
-  * Clear comparison toggle that safely restores localized viewer states on close.
-* **Freehand Drawing Tools:**
-  * Smooth digital freehand ink drawing with a rounded pen pointer (PenMode), ideal for digital signatures, sketches, or writing handwritten notes directly on the page.
-* **Precision Highlighter Tool:**
-  * Accurate text selection highlight mapping.
-  * Dynamic 7-color palette (Yellow, Green, Cyan, Magenta, Red, Blue, Black) that appears exclusively in editing modes.
-  * Automatic Alpha channel calculation (31% opacity) to ensure the translucent color highlights the text without obscuring the original content.
-* **Sticky Notes:**
-  * Drop floating comment bubbles anywhere on the PDF with a clean popover overlay to write, view, edit, and store reader remarks.
-* **System Language Localization:**
-  * Automatic interface localization detection (Spanish and English supported natively).
-* **Interactive Close and Save Flow:**
-  * Prompts users with a localized 3-button confirmation ("Save and Exit", "Exit without saving", "Cancel") if unsaved changes exist and auto-save is off, preventing data loss.
-* **Auto-saving Annotations:**
-  * All notes, highlights, and freehand drawing strokes are saved automatically to a local JSON database upon pointer release, ensuring immediate persistence.
-* **Real-time Document Rotation:**
-  * Native rotation controls to rotate the document in 90-degree increments, dynamically updating dimensions to prevent page clipping.
-* **Keyboard Shortcuts (Undo):**
-  * Full edit history with support for undoing annotations using the universal Ctrl + Z shortcut.
-* **Fluent Sidebar Index:**
-  * Navigation via high-definition page thumbnails rendered sequentially to prevent visual layout scrambling during UI virtualization recycling.
+* **渲染内核（Sumatra 内核 + MuPDF 后端）：**
+  * 将 Sumatra PDF 的 `RenderCache` 渲染/内存管理引擎 **1:1 移植**为 C# 端的 `TileRenderCache`（物理像素瓦片、按需预取、近环全分辨率 / 远环快照），后端由 Rust 封装的 MuPDF 经 FFI 提供页位图，Win2D (`CanvasVirtualControl`) 在 GPU 上做合成。
+  * 统一运动引擎（弹簧模型）驱动所有缩放与平移。
+* **布局与缩放：**
+  * 纵向 / 横向连续滚动；单页、双页、书籍对开三种版面。
+  * 缩放范围 **0.1×–4.0×**；双击在「适应宽度 ↔ 实际大小 100%」之间切换。
+  * 滚轮、Ctrl+滚轮、右键拖拽缩放、方向键 / 空格翻页等丰富交互。
+* **批注（本地持久化）：**
+  * 手写画笔，七色标注（黄 / 绿 / 青 / 洋红 / 红 / 蓝 / 黑）。
+  * 撤销 / 重做（支持多步）；批注经 Rust 端序列化，落盘为本地 JSON，退出提示保存。
+* **支持密码 PDF：** 支持打开受密码保护的 PDF（登录对话框 + FFI 向原生后端传递解锁凭据，覆盖阅读 / 对比视图）。
+* **分屏对比：** 并排打开两个 PDF 同步对照，中间附带红色同步滚动条。
+* **导航：** 侧边栏缩略图、书签、大纲（目录）。
+* **打印与导出：** 直接打印；用 PDFsharp 把批注烧录回 PDF，导出带签注的副本。打印功能实机测试较少，可能有未知问题。
+* **多语言：** 中文 / 英语 / 西班牙语，按系统区域自动选择；所有界面文案统一经 `LocalizationService.Get(...)` 读取，无硬编码字符串。
+* **主题：** 现代主题配色，浅色 / 深色 / 跟随系统三档。部分区域有亚克力效果。
+* **运行时手感调参：** 同级目录下的 `config.txt` 可调节缩放范围、弹簧刚度、滚轮步进、留白等参数，**删文件即恢复出厂**，无需重新编译。
 
 ---
 
-## Architecture
+## 架构
 
-Glance uses a **hybrid C# + Rust architecture** for optimal performance:
+Glance 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 
-* **Frontend:** WinUI 3 (C#/.NET 10.0) - Native Windows 11 aesthetics with Mica backdrop
-* **Backend:** Rust (MuPDF) — Native, multi-threaded PDF rendering engine
-* **Bridge:** P/Invoke FFI - Type-safe C# ↔ Rust interop
+* **前端（外壳）：** WinUI 3（C# / .NET 10，`net10.0-windows10.0.26100.0`）—— 原生 Windows 11 外观、交互与排版。
+* **后端（渲染）：** Rust（`glance-native`，编译为 `cdylib`）—— 基于 MuPDF 的单进程多线程渲染引擎（每个线程持有独立的 `fz_context`），负责栅格化、批注处理与本地 JSON 持久化。
+* **桥接：** P/Invoke FFI（`GlanceNative.cs`）—— 类型安全的 C# ↔ Rust 互操作；所有 `extern "C"` 入口以 `catch_unwind` 兜底，杜绝跨 FFI 边界 panic 导致的静默崩溃。
+* **合成：** Win2D / `CanvasVirtualControl` —— 在 GPU 上把原生后端产出的物理像素瓦片合成为最终画面。
 
----
+### 渲染管线（要点）
 
-## Libraries & Key Dependencies
-
-Glance relies on several open-source libraries and native projections to achieve high-performance rendering, PDF manipulations, and native platform integration:
-
-### Frontend (.NET / C#)
-* **[Windows App SDK (WinUI 3)](https://github.com/microsoft/microsoft-ui-xaml):** The modern Fluent user interface framework for native Windows desktop development.
-* **[PDFsharp](https://github.com/empira/PDFsharp):** The open-source .NET library used for compiling and burning user drawings, highlights, and annotations back into the original PDF files.
-
-### Backend & FFI (Rust)
-* **[windows-rs](https://github.com/microsoft/windows-rs):** Microsoft's official Rust projection library, providing native access to Windows APIs directly from Rust.
-* **[mupdf](https://crates.io/crates/mupdf):** Safe Rust bindings around [MuPDF](https://mupdf.com/), the multi-threaded PDF rendering engine that powers Glance's native backend.
-* **[serde](https://github.com/serde-rs/serde):** Serialization framework used for the local JSON annotation/drawing database.
+1. 缩放 / 滚动落定后，`TileRenderCache`（`GpuPageView` 宿主）按物理像素计算可见页的瓦片需求（单位体系与 Sumatra 一致，引擎内部不再出现 DIP）。
+2. 渲染请求经 FFI 提交给 Rust 后端，由 MuPDF 在原生线程池内栅格化，零拷贝地把位图所有权交给 C# 缓存。
+3. Win2D 在 GPU 上做 GPU src/dest-rect 变换与合成；缩放 / 平移在弹簧收敛期内不触发重渲染，仅在落定后补齐缺失瓦片。
 
 ---
 
-## System Requirements
+## 技术栈与依赖
 
-* **OS:** Windows 10 or later
-* **Platform:** Windows App SDK 1.5+ (WinUI 3)
-* **Runtime:** .NET 10.0
+### 前端（.NET / C#）
+* **[Windows App SDK (WinUI 3) 2.2.0](https://github.com/microsoft/microsoft-ui-xaml)：** 现代 Fluent 界面框架，原生 Windows 桌面开发。
+* **[Win2D 1.3.1](https://github.com/microsoft/Win2D)：** GPU 呈现层（`CanvasVirtualControl`），用于瓦片合成。
+* **[PDFsharp 6.1.1](https://github.com/empira/PDFsharp)：** 将用户批注烧录回原始 PDF 并导出。
+
+### 后端与 FFI（Rust）
+* **[MuPDF（`mupdf` crate 0.8）](https://mupdf.com/)：** 单进程多线程 PDF 渲染引擎，是 Glance 原生后端的渲染内核。
+* **[windows-rs 0.51](https://github.com/microsoft/windows-rs)：** 微软官方 Rust 投影，提供对 Windows API 的原生访问。
+* **[serde / serde_json](https://github.com/serde-rs/serde)：** 本地 JSON 批注 / 书签数据库的序列化框架。
+
+---
+
+## 系统要求
+
+* **操作系统：** Windows 10 17763（1809）或更高版本。
+* **运行时：** 以 self-contained 方式分发，**无需在目标机器另行安装 .NET 运行时**；支持 x86 / x64 / ARM64。
+* **开发环境（仅构建时需要）：** .NET 10 SDK、Rust 工具链（MSVC 目标）、Visual Studio 2022（可选）。
 
 ---
 
 <details>
-<summary><strong>📚 Development & Building (For Contributors)</strong></summary>
+<summary><strong>📚 构建与运行（面向开发者）</strong></summary>
 
-### Prerequisites
+### 前置条件
 
-* **.NET 10.0 SDK** - [dotnet.microsoft.com](https://dotnet.microsoft.com)
-* **Rust 1.70+** - [rustup.rs](https://rustup.rs)
-* **Visual Studio 2022** (optional)
+* **.NET 10 SDK** —— [dotnet.microsoft.com](https://dotnet.microsoft.com)
+* **Rust 1.70+**（需 MSVC 目标工具集）—— [rustup.rs](https://rustup.rs)
+* **Visual Studio 2022**（可选）
 
-### Build Instructions
+### 构建步骤
 
-1. Clone repository:
+1. 克隆本仓库：
    ```bash
-   git clone https://github.com/jonas1ara/Glance.git
+   git clone <本仓库地址>
    cd Glance
    ```
 
-2. Build Rust backend:
+2. 构建 Rust 后端（**可省略**）：
+   C# 工程已在 `BeforeTargets="Build"` 通过 `BuildNativeLib` 目标**自动**以 release 模式拉起 `cargo build`，并把产物 `glance_native.dll` 自动复制到输出目录。如需手动构建：
    ```bash
    cd native/glance-native
    cargo build --release
    ```
-   *(Note: Building in release mode is required as the C# project is configured to automatically look for the Rust DLL in `target/release/`).*
 
-   > **Windows / Visual Studio note:** On some Visual Studio installations the `mupdf-sys` build script fails to detect the MSVC platform toolset or `libclang` (required by `bindgen`). If `cargo build` fails with an `MSB8020` ("cannot find Visual Studio build tools") or a `libclang` error, copy `native/glance-native/.cargo/config.toml.example` to `native/glance-native/.cargo/config.toml` and set `MUPDF_MSVC_PLATFORM_TOOLSET` and `LIBCLANG_PATH` to match your machine. The real `config.toml` is git-ignored and must never be committed.
+   > **Windows / Visual Studio 提示：** 部分 VS 安装下 `mupdf-sys` 的构建脚本无法自动探测 MSVC 平台工具集或 `libclang`（bindgen 所需）。若 `cargo build` 报 `MSB8020`（找不到 VS 生成工具）或 `libclang` 相关错误，请将 `native/glance-native/.cargo/config.toml.example` 复制为 `native/glance-native/.cargo/config.toml`，并把 `MUPDF_MSVC_PLATFORM_TOOLSET` 与 `LIBCLANG_PATH` 指向本机实际路径。真正的 `config.toml` 已被 git 忽略，**切勿提交**。
 
-3. Build and Run C# frontend:
+3. 构建并运行 C# 前端：
    ```bash
    cd ../../src
    dotnet run --project Glance.csproj
    ```
-   *(Note: The MSBuild system automatically copies the compiled `glance_native.dll` and `pdfium.dll` to the output directory during build, so no manual file copying is needed).*
+   （MSBuild 会在构建期自动编译并复制 `glance_native.dll`，无需手动拷贝。）
 
-### Architecture Phases
+### 构建变体
 
-- **Phase 1: FFI Foundation (P/Invoke bridge)** ✅
-  * Established C-compatible unmanaged boundaries.
-  * Registered dynamic DLL resolvers (`NativeLibrary.SetDllImportResolver`) to locate Glance backend binaries.
-- **Phase 2: Persistence (JSON file I/O)** ✅
-  * Engineered Rust-side serialization adaptors using Serde.
-  * Formulated local drawing database formats to store vectors, comments, and marks.
-- **Phase 3: Annotation Processing (validation, geometry)** ✅
-  * Formulated validation rules for comments, highlights, and colors.
-  * Created safety checks for drawing coordinates.
-- **Phase 4: PDF Rendering (lazy loading, async)** ✅
-  * Integrated the MuPDF rendering engine via safe Rust bindings and a P/Invoke FFI bridge.
-  * Designed async rendering buffers on C# thread pools using `CancellationToken` loops to prevent thread collisions.
-- **Phase 5: Localization & UX Polish** ✅
-  * Integrated operating system locale detector.
-  * Formulated localized interactive exit confirmation dialog flows (Save, Discard, Cancel).
+* **Debug：** `dotnet build`
+* **Release：** `dotnet build -c Release`
+* **清理：** `dotnet clean` 与 `cargo clean`
 
-### Build Variants
+### 质量门槛
 
-- **Debug:** `cargo build --debug && dotnet build`
-- **Release:** `cargo build --release && dotnet build -c Release`
-- **Clean:** `cargo clean && dotnet clean`
+* 交付前需通过 **Debug + Release 双构建，0 错误 0 警告** 的标准。
+* 便携版约束：禁止向 C 盘 / AppData / 系统 Temp 写入任何数据；用户数据只写 `AppContext.BaseDirectory`。
 
 </details>
 
 ---
 
-## Support & Funding
+## 致谢与来源
 
-If you find Glance PDF useful and would like to support its development, you can sponsor the project through the following platforms:
+Glance-me 建立在多个优秀的开源项目之上，特此致谢：
 
-* **Buy Me A Coffee:**  
-  [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/jonas1ara)
-* **Mercado Pago (Mexico):**  
-  [![Mercado Pago](https://img.shields.io/badge/Mercado%20Pago-Donate-00B1EA?style=for-the-badge&logo=mercadopago&logoColor=white)](https://link.mercadopago.com.mx/glance)
+* **[Glance](https://github.com/jonas1ara/Glance)：** jonas1ara的原型
+* **[Sumatra PDF](https://www.sumatrapdfreader.org/)：** 渲染内核（`RenderCache` 瓦片引擎与 `DocumentLayout` 版面逻辑）被 1:1 移植为 C# 端的 `TileRenderCache`，是 Glance-me 高速、稳定渲染的基础。
+* **[MuPDF](https://mupdf.com/)（Artifex）：** 经 Rust 绑定的底层 PDF 渲染引擎，提供栅格化能力。
+* **[WinUI 3 / Windows App SDK](https://github.com/microsoft/microsoft-ui-xaml) 与 [Win2D](https://github.com/microsoft/Win2D)：** 微软提供的现代 Fluent 界面框架与 GPU 呈现层。
+* **[PDFsharp](https://github.com/empira/PDFsharp)：** 批注烧录与 PDF 导出。
+* **[Rust](https://www.rust-lang.org/)、[windows-rs](https://github.com/microsoft/windows-rs)、[serde](https://github.com/serde-rs/serde)：** 原生后端与序列化基座。
 
 ---
 
-## License
+## 许可证
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+Glance 基于 **GNU Affero General Public License v3 (AGPL-3.0)** 发布，详见 [LICENSE](LICENSE)。
+
+* **MuPDF**（Artifex）作为原生渲染后端，本身以 AGPL-3.0 发布（`mupdf` crate 0.8，精确版本见 `native/glance-native/Cargo.toml` 与 `Cargo.lock`）；其对应完整源码随本仓库公开。
+* 渲染内核 `TileRenderCache` 是对 **Sumatra PDF**（GPL-3.0）`RenderCache` 的 1:1 移植，依 GPL-3.0 → AGPL-3.0 的单向兼容性，在本项目下整体以 AGPL-3.0 发布。
+* 原生后端静态链接了多个第三方库（FreeType、Little CMS、OpenJPEG、jbig2dec、zlib、Brotli、Zint、ZXing-C++、Tesseract 等），它们的许可文本汇总于 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
