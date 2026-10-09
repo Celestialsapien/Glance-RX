@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 
 using System;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// 一维【临界阻尼弹簧】(critically damped spring)，用解析解积分。

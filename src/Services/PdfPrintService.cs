@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -35,10 +35,10 @@ using Microsoft.UI.Xaml.Printing;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
-/// WPS-style printing for Glance.
+/// WPS-style printing for GlanceRX.
 ///
 /// Shows the system print dialog (printer / copies / orientation / duplex / paper /
 /// color) via the WinUI3 PrintManager, then prints the requested PDF pages at high
@@ -235,7 +235,7 @@ public sealed class PdfPrintService : IDisposable
         try
         {
             _printTaskRequested = true;
-            string taskTitle = string.IsNullOrWhiteSpace(_documentTitle) ? "Glance" : _documentTitle;
+            string taskTitle = string.IsNullOrWhiteSpace(_documentTitle) ? "Glance-RX" : _documentTitle;
             var task = args.Request.CreatePrintTask(taskTitle, OnPrintTaskSourceRequested);
             taskCreated = true;
             task.Completed += OnPrintTaskCompleted;

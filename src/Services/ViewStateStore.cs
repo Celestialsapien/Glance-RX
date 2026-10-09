@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@ using System.IO;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// 借鉴 SumatraPDF：把【所有 PDF】的阅读位置/缩放/窗口几何集中存进【单个 txt 文件】。

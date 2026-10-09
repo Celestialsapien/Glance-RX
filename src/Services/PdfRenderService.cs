@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -19,9 +19,9 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Glance.Interop;
+using GlanceRX.Interop;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// Service for rendering PDF pages to BGRA bitmaps.
@@ -90,19 +90,19 @@ public class PdfRenderService : IDisposable
         // 避免同步卡住 UI 线程（冷启动时窗口/加载状态才能立即响应）。
         var result = await Task.Run(() =>
         {
-            IntPtr pathPtr = GlanceNative.MarshalUtf8(pdfFilePath);
-            IntPtr pwPtr = password == null ? IntPtr.Zero : GlanceNative.MarshalUtf8(password);
+            IntPtr pathPtr = GlanceRXNative.MarshalUtf8(pdfFilePath);
+            IntPtr pwPtr = password == null ? IntPtr.Zero : GlanceRXNative.MarshalUtf8(password);
             try
             {
                 // hot capacity = 0 → 原生侧不逐出解析页缓存（1:1 Sumatra pageInfos：
                 // 每页 display list 永久持有）。⚠ LRU 逐出会导致 DL 重建 → 全新 fz_image
                 // → store 已解码图变孤儿 → 每块瓦片重新解码整页扫描图（CPU 风暴根因）。
-                return GlanceNative.mu_engine_open(pathPtr, pwPtr, 0);
+                return GlanceRXNative.mu_engine_open(pathPtr, pwPtr, 0);
             }
             finally
             {
-                GlanceNative.FreeUtf8(pwPtr);
-                GlanceNative.FreeUtf8(pathPtr);
+                GlanceRXNative.FreeUtf8(pwPtr);
+                GlanceRXNative.FreeUtf8(pathPtr);
             }
         }, cancellationToken).ConfigureAwait(false);
 
@@ -158,9 +158,9 @@ public class PdfRenderService : IDisposable
     /// <c>cache->Add()</c> 接管所有权、<c>FreePixmap()</c> 释放；这里完全同构：
     /// 返回的指针直接就是缓存条目的像素本体，条目作废时由 <c>memory_free</c> 释放。
     ///
-    /// ⚠ 调用方【必须】接管所有权：交给缓存，或自行调用 <c>GlanceNative.memory_free(data, len)</c>。
+    /// ⚠ 调用方【必须】接管所有权：交给缓存，或自行调用 <c>GlanceRXNative.memory_free(data, len)</c>。
     /// THREAD-SAFE：与 <c>mu_render_page_region_bgra</c> 的约定一致（每线程独立 fz_context）。
-    /// <paramref name="cookie"/>：fz_cookie 兼容 abort block（GlanceCookie.New()，可为 Zero）——
+    /// <paramref name="cookie"/>：fz_cookie 兼容 abort block（GlanceRXCookie.New()，可为 Zero）——
     /// = Sumatra RenderPageArgs{abortCookie}，MuPDF 在 display-list 操作间隙自查中止。
     /// </summary>
     public (IntPtr Data, int Length, int W, int H) RenderPageRegionOwningNative(
@@ -170,14 +170,14 @@ public class PdfRenderService : IDisposable
     {
         EnsureReady();
         EnsureRenderPriority();
-        var resp = GlanceNative.mu_render_page_region_bgra(
+        var resp = GlanceRXNative.mu_render_page_region_bgra(
             _engine, pageIndex, devW, devH, x0, y0, x1, y1,
             cookie,
             out IntPtr data, out ulong len, out uint w, out uint h);
-        GlanceNative.ThrowIfFailed(resp, "Render page region");
+        GlanceRXNative.ThrowIfFailed(resp, "Render page region");
         if (data == IntPtr.Zero || len == 0)
         {
-            if (data != IntPtr.Zero) GlanceNative.memory_free(data, len);
+            if (data != IntPtr.Zero) GlanceRXNative.memory_free(data, len);
             return (IntPtr.Zero, 0, (int)w, (int)h);
         }
         return (data, (int)len, (int)w, (int)h);
@@ -194,7 +194,7 @@ public class PdfRenderService : IDisposable
         // 单文档 reload 快速（仅重解析 xref）；并行渲染线程不会卡在 reload 上，因为
         // get_parsed 的锁只保护 cache 查询/重建，reload 持有同一把锁刷新后立即释放。
         return await Task.Run(
-            () => GlanceNative.mu_engine_reload(_engine),
+            () => GlanceRXNative.mu_engine_reload(_engine),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -202,7 +202,7 @@ public class PdfRenderService : IDisposable
     public async Task<uint> GetPageCountAsync(CancellationToken cancellationToken = default)
     {
         EnsureReady();
-        return await Task.Run(() => GlanceNative.mu_engine_page_count(_engine), cancellationToken).ConfigureAwait(false);
+        return await Task.Run(() => GlanceRXNative.mu_engine_page_count(_engine), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Page dimensions in PDF points (1/72 inch).</summary>
@@ -213,7 +213,7 @@ public class PdfRenderService : IDisposable
         EnsureReady();
         return await Task.Run(() =>
         {
-            if (!GlanceNative.mu_engine_page_dimensions(_engine, pageIndex, out float w, out float h))
+            if (!GlanceRXNative.mu_engine_page_dimensions(_engine, pageIndex, out float w, out float h))
             {
                 throw new InvalidOperationException($"Get page dimensions failed for page {pageIndex}");
             }
@@ -242,7 +242,7 @@ public class PdfRenderService : IDisposable
             var handle = GCHandle.Alloc(dims, GCHandleType.Pinned);
             try
             {
-                if (!GlanceNative.mu_engine_page_dimensions_all(_engine, count, handle.AddrOfPinnedObject()))
+                if (!GlanceRXNative.mu_engine_page_dimensions_all(_engine, count, handle.AddrOfPinnedObject()))
                 {
                     throw new InvalidOperationException("Get page dimensions (all) failed");
                 }
@@ -278,7 +278,7 @@ public class PdfRenderService : IDisposable
             try
             {
                 return await Task.Run(
-                    () => GlanceNative.mu_engine_warmup_page(_engine, pageIndex),
+                    () => GlanceRXNative.mu_engine_warmup_page(_engine, pageIndex),
                     cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -321,11 +321,11 @@ public class PdfRenderService : IDisposable
     private (byte[], int, int, int) RenderPageCore(uint pageIndex, uint width, uint height)
     {
         EnsureRenderPriority();
-        var resp = GlanceNative.mu_render_page_bgra(
+        var resp = GlanceRXNative.mu_render_page_bgra(
             _engine, pageIndex, width, height,
             IntPtr.Zero,
             out IntPtr data, out ulong len, out uint w, out uint h);
-        GlanceNative.ThrowIfFailed(resp, "Render page");
+        GlanceRXNative.ThrowIfFailed(resp, "Render page");
         return CopyOut(data, len, w, h);
     }
 
@@ -343,15 +343,15 @@ public class PdfRenderService : IDisposable
         }
         finally
         {
-            GlanceNative.memory_free(data, len);
+            GlanceRXNative.memory_free(data, len);
         }
     }
 
-    private static void ThrowCreateError(GlanceNative.EngineCreateResult result, string operation)
+    private static void ThrowCreateError(GlanceRXNative.EngineCreateResult result, string operation)
     {
         if (result.ErrorMsg == IntPtr.Zero) return;
         string msg = Marshal.PtrToStringUTF8(result.ErrorMsg) ?? "Unknown error";
-        GlanceNative.memory_free(result.ErrorMsg);
+        GlanceRXNative.memory_free(result.ErrorMsg);
         throw new InvalidOperationException($"{operation}: {msg}");
     }
 
@@ -399,7 +399,7 @@ public class PdfRenderService : IDisposable
         }
         if (_engine != IntPtr.Zero)
         {
-            try { GlanceNative.mu_engine_destroy(_engine); } catch { }
+            try { GlanceRXNative.mu_engine_destroy(_engine); } catch { }
             _engine = IntPtr.Zero;
         }
         _initialized = false;

@@ -2,7 +2,7 @@
 
 <Page
 
-    x:Class="Glance.MainPage"
+    x:Class="GlanceRX.MainPage"
 
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
 
@@ -10,9 +10,9 @@
 
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
 
-    xmlns:local="using:Glance"
+    xmlns:local="using:GlanceRX"
 
-    xmlns:services="using:Glance.Services"
+    xmlns:services="using:GlanceRX.Services"
 
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
 
@@ -1112,7 +1112,7 @@
 
             <StackPanel Grid.Row="0" Spacing="8" Margin="0,0,0,24">
 
-                <TextBlock Text="Glance" FontSize="28" FontWeight="Bold"/>
+                <TextBlock Text="Glance-RX" FontSize="28" FontWeight="Bold"/>
 
                 <TextBlock x:Name="WelcomeSubtitleText" Text="Abre un documento para comenzar." FontSize="14" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
 

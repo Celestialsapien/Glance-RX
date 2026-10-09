@@ -1,6 +1,6 @@
 # Glance Native Backend (Rust)
 
-Native performance layer for Glance PDF viewer. Handles PDF rendering, validation, and persistent storage.
+Native performance layer for Glance-RX PDF viewer. Handles PDF rendering, validation, and persistent storage.
 
 ## What Rust Does Here
 

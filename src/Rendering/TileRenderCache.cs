@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -24,7 +24,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Windows.Foundation;
 
-namespace Glance.Rendering;
+namespace GlanceRX.Rendering;
 
 // ============================================================================
 // TileRenderCache — 1:1 port of sumatrapdf-master/src/RenderCache.{h,cpp}
@@ -155,7 +155,7 @@ internal sealed class PageRenderRequest
     public ulong Timestamp;
     public int ErrorCode;   // 0 = success
 
-    /// <summary>FitzAbortCookie 对应物（GlanceCookie 24B 共享块）。入队时 Zero（= Sumatra
+    /// <summary>FitzAbortCookie 对应物（GlanceRXCookie 24B 共享块）。入队时 Zero（= Sumatra
     /// newRequest-&gt;abortCookie = nullptr）；worker 开渲前分配并存入 _curReqs[threadIdx]
     /// 同一对象 → AbortCurrentRequestLocked 可见并跨线程写 abort=1；渲染返回且
     /// _curReqs 置空后由 worker 持 _requestAccess 释放（与 aborter 互斥，无 UAF）。</summary>
@@ -198,7 +198,7 @@ internal interface ITileRenderHost
     void PostToUi(Action action);
     /// <summary>render thread 的渲染入口（= Sumatra `engine->RenderPage(RenderPageArgs)`）。
     /// 入参 devW/devH/x0..y1 均为物理像素（与 mu_render_page_region_bgra 一致）。
-    /// cookie = FitzAbortCookie 对应物（GlanceCookie 分配的 24B fz_cookie 兼容块），
+    /// cookie = FitzAbortCookie 对应物（GlanceRXCookie 分配的 24B fz_cookie 兼容块），
     /// MuPDF 在 display-list 操作间隙自查中止（EngineMupdf.cpp:6542）。
     /// 【同步】渲染一块瓦片，返回【拥有所有权的 native BGRA 缓冲】——不拷贝、也不释放；
     /// 调用方负责把所有权交给缓存，或在丢弃时用 <see cref="FreeTilePixels"/> 释放。
@@ -1068,7 +1068,7 @@ internal sealed class TileRenderCache : IDisposable
         cr.Abort = true;
         if (cr.Cookie != IntPtr.Zero)
         {
-            try { Glance.Interop.GlanceCookie.Abort(cr.Cookie); } catch { }
+            try { GlanceRX.Interop.GlanceRXCookie.Abort(cr.Cookie); } catch { }
         }
     }
 
@@ -1091,7 +1091,7 @@ internal sealed class TileRenderCache : IDisposable
                 queueEmpty = ClearCurrentRequestLocked(threadIdx);
                 if (pendingCookie != IntPtr.Zero)
                 {
-                    try { Glance.Interop.GlanceCookie.Free(pendingCookie); } catch { }
+                    try { GlanceRX.Interop.GlanceRXCookie.Free(pendingCookie); } catch { }
                     pendingCookie = IntPtr.Zero;
                 }
             }
@@ -1111,7 +1111,7 @@ internal sealed class TileRenderCache : IDisposable
                 // 出口分配；我们同样在开渲前创建）→ 存入 _curReqs 同一对象，aborter 可见。
                 try
                 {
-                    cookie = Glance.Interop.GlanceCookie.New();
+                    cookie = GlanceRX.Interop.GlanceRXCookie.New();
                     req.Cookie = cookie;
                     pendingCookie = cookie;
                 }

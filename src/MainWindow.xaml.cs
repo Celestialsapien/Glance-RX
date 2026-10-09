@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@ using System;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Input;
 
-namespace Glance;
+namespace GlanceRX;
 
 /// <summary>
 /// The application window. This hosts a Frame that displays pages. Add your
@@ -130,6 +130,14 @@ public sealed partial class MainWindow : Window
                 }
                 catch { }
             };
+
+            // DPI 变化 → 系统小/大图标度量（SM_CXSMICON / SM_CXICON）随之改变，
+            // 精确尺寸图标需按新度量重载对应帧。
+            WindowRoot.Loaded += (s, e) =>
+            {
+                if (s is FrameworkElement fe && fe.XamlRoot != null)
+                    fe.XamlRoot.Changed += OnXamlRootScaleChanged;
+            };
         }
 
         // Set the window icon using absolute path lookup
@@ -137,6 +145,11 @@ public sealed partial class MainWindow : Window
         if (System.IO.File.Exists(iconPath))
         {
             AppWindow.SetIcon(iconPath);
+            // AppWindow.SetIcon 只注册单个 HICON；任务管理器下拉行等 shell 消费方
+            // 请求小图标时，Windows 会用 GDI 从它现场缩放（最近邻），深色描边被
+            // 挤粗、与 exe 内嵌帧（shell 高质量管线）观感不一致——见
+            // ApplyExactSizeWindowIcons 注释。
+            ApplyExactSizeWindowIcons(iconPath);
         }
         else
         {
@@ -239,6 +252,86 @@ public sealed partial class MainWindow : Window
             ApplyNativeWindowBackground(isDark);
         }
         catch { }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 精确尺寸窗口图标：
+    // AppWindow.SetIcon 只把 .ico 注册为单个 HICON；任务管理器"进程"页下拉
+    // 行、Alt-Tab 等 shell 消费方请求小图标时，Windows 用 GDI 从该 HICON 现
+    // 场缩放（最近邻拉伸）——深色描边不参与平均、相对变粗变黑，与 exe 内嵌
+    // 帧走 shell 高质量管线的观感（如任务管理器组头）不一致。
+    // 修复：用 LoadImage 按 SM_CXSMICON / SM_CXICON 的当前度量值，从
+    // AppIcon.ico 直接加载对应精确帧（ico 内置 16/20/24/28/32/40/48/56/64/
+    // 128/256 全档，覆盖 100%–200% DPI 的系统小/大图标尺寸），再以
+    // WM_SETICON 分别设定小/大图标——取图零拉伸，两条通道观感一致。
+    // ─────────────────────────────────────────────────────────────────────
+    private const uint IMAGE_ICON = 1;
+    private const uint LR_LOADFROMFILE = 0x00000010;
+    private const uint WM_SETICON = 0x0080;
+    private const int ICON_SMALL = 0;
+    private const int ICON_BIG = 1;
+    private const int SM_CXICON = 11;
+    private const int SM_CYICON = 12;
+    private const int SM_CXSMICON = 49;
+    private const int SM_CYSMICON = 50;
+
+    private IntPtr _hIconSmall = IntPtr.Zero;
+    private IntPtr _hIconBig = IntPtr.Zero;
+    private int _lastSmallIconSize = 0;
+    private string? _exactIconPath;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadImage(IntPtr hInstance, string lpszName, uint uType, int cxDesired, int cyDesired, uint fuLoad);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
+    /// <summary>
+    /// 按系统当前小/大图标度量值，从 AppIcon.ico 加载精确尺寸的帧并经
+    /// WM_SETICON 设给窗口。重复调用会先 DestroyIcon 旧的 HICON（DPI 变化
+    /// 重载路径使用）；被 AppWindow.SetIcon 注册的框架内部 HICON 不归我们
+    /// 释放，进程生命周期仅一次，可忽略。
+    /// </summary>
+    private void ApplyExactSizeWindowIcons(string iconPath)
+    {
+        _exactIconPath = iconPath;
+        try
+        {
+            var hwnd = Microsoft.UI.Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+            if (hwnd == IntPtr.Zero) return;
+
+            var hSmall = LoadImage(IntPtr.Zero, iconPath, IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+            if (hSmall != IntPtr.Zero)
+            {
+                SendMessageW(hwnd, WM_SETICON, (IntPtr)ICON_SMALL, hSmall);
+                if (_hIconSmall != IntPtr.Zero) DestroyIcon(_hIconSmall);
+                _hIconSmall = hSmall;
+                _lastSmallIconSize = GetSystemMetrics(SM_CXSMICON);
+            }
+
+            var hBig = LoadImage(IntPtr.Zero, iconPath, IMAGE_ICON,
+                GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE);
+            if (hBig != IntPtr.Zero)
+            {
+                SendMessageW(hwnd, WM_SETICON, (IntPtr)ICON_BIG, hBig);
+                if (_hIconBig != IntPtr.Zero) DestroyIcon(_hIconBig);
+                _hIconBig = hBig;
+            }
+        }
+        catch { }
+    }
+
+    private void OnXamlRootScaleChanged(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        // DPI 改变 → 系统小/大图标度量改变 → 按新度量重载精确帧。
+        if (_exactIconPath != null && GetSystemMetrics(SM_CXSMICON) != _lastSmallIconSize)
+        {
+            ApplyExactSizeWindowIcons(_exactIconPath);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -456,7 +549,7 @@ public sealed partial class MainWindow : Window
             int h = defH;
             int state = WIN_STATE_NONE;
 
-            var vs = string.IsNullOrEmpty(pdfPath) ? null : Glance.Services.ViewStateStore.Load(pdfPath);
+            var vs = string.IsNullOrEmpty(pdfPath) ? null : GlanceRX.Services.ViewStateStore.Load(pdfPath);
             if (vs != null && vs.WindowState != WIN_STATE_NONE && vs.WindowWidth > 0 && vs.WindowHeight > 0)
             {
                 x = vs.WindowX;
@@ -508,7 +601,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>把当前窗口几何写进该 PDF 的视图记录（SumatraPDF.cpp:833-841 的 Glance 等价）。
     /// 只在退出/切换文档保存视图状态时调用，不做实时监听——与 Sumatra 一致。</summary>
-    public void CaptureWindowGeometry(Glance.Services.ViewStateData data, string pdfPath)
+    public void CaptureWindowGeometry(GlanceRX.Services.ViewStateData data, string pdfPath)
     {
         try
         {
@@ -519,7 +612,7 @@ public sealed partial class MainWindow : Window
             // （Sumatra 同样是"最小化时不更新 windowPos"，SumatraPDF.cpp:816-818）。
             if (IsIconic(hwnd))
             {
-                var prev = Glance.Services.ViewStateStore.Load(pdfPath);
+                var prev = GlanceRX.Services.ViewStateStore.Load(pdfPath);
                 if (prev == null) return;
                 data.WindowState = prev.WindowState;
                 data.WindowX = prev.WindowX;
@@ -598,7 +691,7 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Sets the text shown in the custom title bar (e.g. "Glance — filename.pdf").
+    /// Sets the text shown in the custom title bar (e.g. "Glance-RX — filename.pdf").
     /// </summary>
     public void SetWindowTitle(string title)
     {
@@ -716,11 +809,11 @@ public sealed partial class MainWindow : Window
     {
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
-            Title = Glance.Services.LocalizationService.Get("UnsavedChangesTitle"),
-            Content = Glance.Services.LocalizationService.Get("UnsavedChangesContent"),
-            PrimaryButtonText = Glance.Services.LocalizationService.Get("SaveAndExit"),
-            SecondaryButtonText = Glance.Services.LocalizationService.Get("ExitWithoutSaving"),
-            CloseButtonText = Glance.Services.LocalizationService.Get("Cancel"),
+            Title = GlanceRX.Services.LocalizationService.Get("UnsavedChangesTitle"),
+            Content = GlanceRX.Services.LocalizationService.Get("UnsavedChangesContent"),
+            PrimaryButtonText = GlanceRX.Services.LocalizationService.Get("SaveAndExit"),
+            SecondaryButtonText = GlanceRX.Services.LocalizationService.Get("ExitWithoutSaving"),
+            CloseButtonText = GlanceRX.Services.LocalizationService.Get("Cancel"),
             XamlRoot = this.Content.XamlRoot,
             // ContentDialog 不自动跟随窗口根元素的 RequestedTheme（WinUI 3 已知问题），
             // 必须显式携带根元素解析后的 ActualTheme，否则与主界面主题不一致。

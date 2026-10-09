@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,9 +25,9 @@ using PdfSharp.Pdf.IO;
 using PdfSharp.Pdf.Annotations;
 using PdfSharp.Pdf.Advanced;
 using PdfSharp.Drawing;
-using Glance;
+using GlanceRX;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// 把批注写成 PDF 原生的 /Ink 注解对象（非破坏性、可移除、可显隐），而非把笔迹烘焙进

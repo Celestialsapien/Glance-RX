@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -32,7 +32,7 @@ using System.Threading.Tasks;
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
 
-namespace Glance;
+namespace GlanceRX;
 
 /// <summary>
 /// Provides application-specific behavior to supplement the default Application class.

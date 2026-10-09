@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@ using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// 清理程序输出目录中由 WinUI 3 / .NET 依赖库带来的多余卫星资源语言文件夹。

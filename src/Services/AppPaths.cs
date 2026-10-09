@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -18,21 +18,21 @@
 using System;
 using System.IO;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// Glance 便携版的「数据根目录」：程序本体目录下的 <c>GlanceData</c> 子目录。
 /// </summary>
 /// <remarks>
 /// 背景：此前 软件设置（settings.json）、文件退出记忆（GlanceViewStates.txt）、书签（bookmarks.json）
-/// 与崩溃日志（crash_*.log / crash_native_*.log）全部直接落在 Glance.exe 同级目录里，
+/// 与崩溃日志（crash_*.log / crash_native_*.log）全部直接落在 GlanceRX.exe 同级目录里，
 /// 和编译产物混在一起——既难找，也无法整体清理。
 /// 现在 GlanceData 内再分两层：**数据文件（本文件上述各 *FilePath）** 与
 /// **崩溃日志（Crash 子目录）**，诊断不和用户数据同处一个目录。
 ///
 /// ⚠ 硬约束不变：便携版禁止写 C 盘 / AppData / 系统 Temp。这里【不是】把数据搬到别处，
 /// 而是在 <see cref="AppContext.BaseDirectory"/> 之下收拢进一个专建子目录：
-/// 程序本体目录依然只有 Glance.exe、本机库、Assets 等随包产物，GlanceData 是唯一的数据区。
+/// 程序本体目录依然只有 GlanceRX.exe、本机库、Assets 等随包产物，GlanceData 是唯一的数据区。
 ///
 /// 目录不存在时自动创建（首次运行 / 首次拷贝后即落地）。
 /// ⚠ 这里【不做】「把 exe 同级的旧数据文件搬进来的迁移」：便携版的标准用法是整目录拷贝，

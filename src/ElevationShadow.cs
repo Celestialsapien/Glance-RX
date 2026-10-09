@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -19,7 +19,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using System.Numerics;
 
-namespace Glance
+namespace GlanceRX
 {
     /// <summary>
     /// 立体投影附加属性：给任意 UIElement 挂一枚 ThemeShadow，并配合 Translation.Z 抬升，

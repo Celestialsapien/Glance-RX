@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Diagnostics;
-using Glance.Rendering;
+using GlanceRX.Rendering;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.Text;
@@ -41,13 +41,13 @@ using Microsoft.UI.Xaml.Hosting;
 using Windows.Foundation;
 using Windows.Graphics.DirectX;
 using Windows.System;
-using Glance.Services;
-using Glance.Diagnostics;
+using GlanceRX.Services;
+using GlanceRX.Diagnostics;
 using Windows.UI.Core;
-using Glance.Interop;
-using static Glance.Tuning;
+using GlanceRX.Interop;
+using static GlanceRX.Tuning;
 
-namespace Glance;
+namespace GlanceRX;
 
 /// <summary>每页信息：PDF 点尺寸 + 在文档坐标系（DIP, 缩放=1）中的布局矩形。</summary>
 public sealed class GpuPageInfo
@@ -116,7 +116,7 @@ public sealed class GpuAnnotationPointerArgs
 /// 内存模型（与滚动距离、文档长度无关）：
 ///   视口画布(固定 ~25MB) + 页位图 LRU(6 页封顶, 4000px 长边上限, ~288MB) + 像素池(~64MB封顶) ≈ 稳定 500-700MB；滚动停下后空闲回收可回落峰值。
 /// </summary>
-public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRenderHost
+public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileRenderHost
 {
     // 横向连续布局的页间距(DIP)：书本/杂志横向串页时相邻页应更"贴"，
     // 视觉上接近跨页装订；沿用纵向的 16 会把左右两页拉开、破坏跨页阅读的连贯感。
@@ -3705,7 +3705,7 @@ public sealed partial class GpuPageView : UserControl, Glance.Rendering.ITileRen
     void ITileRenderHost.FreeTilePixels(IntPtr data, int length)
     {
         if (data == IntPtr.Zero) return;
-        try { GlanceNative.memory_free(data, (ulong)length); } catch { }
+        try { GlanceRXNative.memory_free(data, (ulong)length); } catch { }
     }
 
     /// <summary>BlitPixmapRegion 对应物：GPU 位图惰性创建（CPU 位图仍是缓存真身，与 Sumatra 一致），

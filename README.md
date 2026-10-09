@@ -1,13 +1,13 @@
-# Glance
+# Glance-RX
 
-![Glance](docs/img/glance_hero_1920x1080.png)
+![Glance-RX](docs/img/glance_hero_1920x1080.png)
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Framework: WinUI 3](https://img.shields.io/badge/Framework-WinUI_3-purple.svg)](https://learn.microsoft.com/zh-cn/windows/apps/winui/winui3/)
 [![Platform: Windows 10+](https://img.shields.io/badge/Platform-Windows_10%2B-blue.svg)](https://www.microsoft.com/windows/)
 [![Language: C# / Rust](https://img.shields.io/badge/Language-C%23%20%2F%20Rust-green.svg)](https://learn.microsoft.com/dotnet/csharp/)
 
-Glance-me 是一款改良自jonas1ara的Glance的高性能 PDF 阅读器，基于 Windows 11 的 WinUI 3 外壳，搭配 Rust 原生渲染后端（MuPDF）与 Win2D GPU 合成。
+Glance-RX 是一款改良自 jonas1ara 的 Glance 的高性能 PDF 阅读器，基于 Windows 11 的 WinUI 3 外壳，搭配 Rust 原生渲染后端（MuPDF）与 Win2D GPU 合成。
 
 > 完全免安装、可移植（self-contained，非打包形态）：用户数据只写入 exe 同级目录，**绝不写入 C 盘、AppData 或系统 Temp**。
 
@@ -37,11 +37,11 @@ Glance-me 是一款改良自jonas1ara的Glance的高性能 PDF 阅读器，基�
 
 ## 架构
 
-Glance 采用 **C# 前端 + Rust 原生后端** 的混合架构：
+Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 
 * **前端（外壳）：** WinUI 3（C# / .NET 10，`net10.0-windows10.0.26100.0`）—— 原生 Windows 11 外观、交互与排版。
 * **后端（渲染）：** Rust（`glance-native`，编译为 `cdylib`）—— 基于 MuPDF 的单进程多线程渲染引擎（每个线程持有独立的 `fz_context`），负责栅格化、批注处理与本地 JSON 持久化。
-* **桥接：** P/Invoke FFI（`GlanceNative.cs`）—— 类型安全的 C# ↔ Rust 互操作；所有 `extern "C"` 入口以 `catch_unwind` 兜底，杜绝跨 FFI 边界 panic 导致的静默崩溃。
+* **桥接：** P/Invoke FFI（`GlanceRXNative.cs`）—— 类型安全的 C# ↔ Rust 互操作；所有 `extern "C"` 入口以 `catch_unwind` 兜底，杜绝跨 FFI 边界 panic 导致的静默崩溃。
 * **合成：** Win2D / `CanvasVirtualControl` —— 在 GPU 上把原生后端产出的物理像素瓦片合成为最终画面。
 
 ### 渲染管线（要点）
@@ -60,7 +60,7 @@ Glance 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 * **[PDFsharp 6.1.1](https://github.com/empira/PDFsharp)：** 将用户批注烧录回原始 PDF 并导出。
 
 ### 后端与 FFI（Rust）
-* **[MuPDF（`mupdf` crate 0.8）](https://mupdf.com/)：** 单进程多线程 PDF 渲染引擎，是 Glance 原生后端的渲染内核。
+* **[MuPDF（`mupdf` crate 0.8）](https://mupdf.com/)：** 单进程多线程 PDF 渲染引擎，是 Glance-RX 原生后端的渲染内核。
 * **[windows-rs 0.51](https://github.com/microsoft/windows-rs)：** 微软官方 Rust 投影，提供对 Windows API 的原生访问。
 * **[serde / serde_json](https://github.com/serde-rs/serde)：** 本地 JSON 批注 / 书签数据库的序列化框架。
 
@@ -88,7 +88,7 @@ Glance 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 1. 克隆本仓库：
    ```bash
    git clone <本仓库地址>
-   cd Glance
+   cd Glance-RX
    ```
 
 2. 构建 Rust 后端（**可省略**）：
@@ -124,10 +124,10 @@ Glance 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 
 ## 致谢与来源
 
-Glance-me 建立在多个优秀的开源项目之上，特此致谢：
+Glance-RX 建立在多个优秀的开源项目之上，特此致谢：
 
-* **[Glance](https://github.com/jonas1ara/Glance)：** jonas1ara的原型
-* **[Sumatra PDF](https://www.sumatrapdfreader.org/)：** 渲染内核（`RenderCache` 瓦片引擎与 `DocumentLayout` 版面逻辑）被 1:1 移植为 C# 端的 `TileRenderCache`，是 Glance-me 高速、稳定渲染的基础。
+* **[Glance](https://github.com/jonas1ara/Glance)（jonas1ara 的原型）：** Glance-RX 在此基础上进行了大幅改造，依其 MIT 许可以 AGPL-3.0 再许可，并保留其原始 MIT 版权与许可声明（见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)）。
+* **[Sumatra PDF](https://www.sumatrapdfreader.org/)：** 渲染内核（`RenderCache` 瓦片引擎与 `DocumentLayout` 版面逻辑）被 1:1 移植为 C# 端的 `TileRenderCache`，是 Glance-RX 高速、稳定渲染的基础。
 * **[MuPDF](https://mupdf.com/)（Artifex）：** 经 Rust 绑定的底层 PDF 渲染引擎，提供栅格化能力。
 * **[WinUI 3 / Windows App SDK](https://github.com/microsoft/microsoft-ui-xaml) 与 [Win2D](https://github.com/microsoft/Win2D)：** 微软提供的现代 Fluent 界面框架与 GPU 呈现层。
 * **[PDFsharp](https://github.com/empira/PDFsharp)：** 批注烧录与 PDF 导出。
@@ -137,8 +137,9 @@ Glance-me 建立在多个优秀的开源项目之上，特此致谢：
 
 ## 许可证
 
-Glance 基于 **GNU Affero General Public License v3 (AGPL-3.0)** 发布，详见 [LICENSE](LICENSE)。
+Glance-RX 基于 **GNU Affero General Public License v3 (AGPL-3.0)** 发布，详见 [LICENSE](LICENSE)。
 
 * **MuPDF**（Artifex）作为原生渲染后端，本身以 AGPL-3.0 发布（`mupdf` crate 0.8，精确版本见 `native/glance-native/Cargo.toml` 与 `Cargo.lock`）；其对应完整源码随本仓库公开。
 * 渲染内核 `TileRenderCache` 是对 **Sumatra PDF**（GPL-3.0）`RenderCache` 的 1:1 移植，依 GPL-3.0 → AGPL-3.0 的单向兼容性，在本项目下整体以 AGPL-3.0 发布。
+* 本项目派生自 **[jonas1ara/Glance](https://github.com/jonas1ara/Glance)**（MIT）；依 MIT → AGPL-3.0 兼容性整体以 AGPL-3.0 发布，并保留其原始 MIT 版权与许可声明（见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)）。
 * 原生后端静态链接了多个第三方库（FreeType、Little CMS、OpenJPEG、jbig2dec、zlib、Brotli、Zint、ZXing-C++、Tesseract 等），它们的许可文本汇总于 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

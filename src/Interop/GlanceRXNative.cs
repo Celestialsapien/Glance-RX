@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -19,19 +19,19 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 
-namespace Glance.Interop;
+namespace GlanceRX.Interop;
 
 /// <summary>
 /// P/Invoke wrapper for Rust FFI functions in glance_native.dll
 /// </summary>
-public static class GlanceNative
+public static class GlanceRXNative
 {
     private const string DllName = "glance_native";
 
     // Static constructor to register DLL import resolver
-    static GlanceNative()
+    static GlanceRXNative()
     {
-        NativeLibrary.SetDllImportResolver(typeof(GlanceNative).Assembly, DllImportResolver);
+        NativeLibrary.SetDllImportResolver(typeof(GlanceRXNative).Assembly, DllImportResolver);
     }
 
     /// <summary>
@@ -206,7 +206,7 @@ public static class GlanceNative
     /// memory_free(ptr, len)), outLen/outWidth/outHeight describe it.
     /// <paramref name="cookie"/> may be <see cref="IntPtr.Zero"/>; otherwise it
     /// must point to a 24-byte fz_cookie-compatible abort block created by
-    /// <see cref="GlanceCookie.New"/> — MuPDF checks it between display-list ops
+    /// <see cref="GlanceRXCookie.New"/> — MuPDF checks it between display-list ops
     /// and cancels this render mid-flight when the aborter writes 1.
     /// </summary>
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -288,7 +288,7 @@ public static class GlanceNative
 /// _curReqs 置空后（持 _requestAccess）Free。aborter 写 abort 与 worker Free
 /// 都在 _requestAccess 临界区内 → 无 use-after-free。
 /// </summary>
-public static class GlanceCookie
+public static class GlanceRXCookie
 {
     private const int Size = 24; // sizeof(fz_cookie) on x64
 

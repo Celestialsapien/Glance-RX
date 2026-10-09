@@ -1,6 +1,6 @@
 # Glance Frontend (C# WinUI 3)
 
-User interface and application logic for Glance PDF viewer. Handles rendering, annotations, and all user interactions.
+User interface and application logic for Glance-RX PDF viewer. Handles rendering, annotations, and all user interactions.
 
 ## What C# Does Here
 
@@ -18,7 +18,7 @@ src/
 ├── MainPage.xaml(.cs)           # Main UI + page rendering
 ├── App.xaml(.cs)                # Application entry point
 ├── Interop/
-│   └── GlanceNative.cs          # P/Invoke FFI declarations
+│   └── GlanceRXNative.cs          # P/Invoke FFI declarations
 ├── Services/
 │   ├── PdfRenderService.cs      # PDF rendering wrapper
 │   ├── PdfExportService.cs      # 真实 PDF /Ink 注解对象读写（文件即唯一真相源）
@@ -54,7 +54,7 @@ src/
 
 ### Interop Layer
 
-#### GlanceNative.cs
+#### GlanceRXNative.cs
 - P/Invoke declarations for `glance_native.dll`
 - Struct definitions: `EngineCreateResult`, `Response`
 - DllImportResolver for dynamic DLL discovery
@@ -101,7 +101,7 @@ cd src/tests/TestDllLoad && dotnet run
 
 1. **Edit XAML** (`MainPage.xaml`) - Layout, bindings
 2. **Update C#** (`MainPage.xaml.cs`) - Event handlers, logic
-3. **Call Rust** (via GlanceNative FFI) - PDF operations
+3. **Call Rust** (via GlanceRXNative FFI) - PDF operations
 4. **Test locally** (`dotnet run`) - Launch app
 5. **Commit** - Git push to GitHub
 

@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -18,7 +18,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Glance.Services
+namespace GlanceRX.Services
 {
     public static class LocalizationService
     {

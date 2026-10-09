@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
-namespace Glance.Services;
+namespace GlanceRX.Services;
 
 /// <summary>
 /// <see cref="ButtonVisualOverride"/> 与 <see cref="ToggleButtonVisualOverride"/> 的共享基座。

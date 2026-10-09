@@ -1,4 +1,4 @@
-// Glance - a high-performance PDF reader
+// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -44,16 +44,16 @@ using Microsoft.UI.Input;
 using Windows.System;
 using Windows.UI.Core;
 using System.Runtime.InteropServices;
-using Glance.Interop;
-using Glance.Services;
-using static Glance.Tuning;
+using GlanceRX.Interop;
+using GlanceRX.Services;
+using static GlanceRX.Tuning;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PdfSharp.Pdf.Advanced;
 using PdfSharp.Pdf.Annotations;
 using PdfSharp.Drawing;
 
-namespace Glance;
+namespace GlanceRX;
 
 public enum EditMode
 {
@@ -68,7 +68,7 @@ public enum AnnotationType
 
 /// <summary>操作指南浮层里的一行：左侧手势/按键标签 + 右侧本地化说明。
 /// 声明在【命名空间级】而非 MainPage 内部，是为了让 XAML 编译绑定
-/// <c>x:DataType="local:GuideRow"</c> 能解析到类型（xmlns:local = "using:Glance"）。</summary>
+/// <c>x:DataType="local:GuideRow"</c> 能解析到类型（xmlns:local = "using:GlanceRX"）。</summary>
 public sealed class GuideRow
 {
     public string Gesture { get; init; } = string.Empty;
@@ -861,34 +861,34 @@ public sealed partial class MainPage : Page
             // Set all UI element strings based on system language (detected in LocalizationService)
 
             // Settings Panel
-            if (SettingsTitleText != null) SettingsTitleText.Text = Glance.Services.LocalizationService.Get("Settings");
-            if (AppThemeLabel != null) AppThemeLabel.Text = Glance.Services.LocalizationService.Get("AppTheme");
+            if (SettingsTitleText != null) SettingsTitleText.Text = GlanceRX.Services.LocalizationService.Get("Settings");
+            if (AppThemeLabel != null) AppThemeLabel.Text = GlanceRX.Services.LocalizationService.Get("AppTheme");
 
-            if (ThemeLightItem != null) ThemeLightItem.Content = Glance.Services.LocalizationService.Get("ThemeLight");
-            if (ThemeDarkItem != null) ThemeDarkItem.Content = Glance.Services.LocalizationService.Get("ThemeDark");
-            if (ThemeDefaultItem != null) ThemeDefaultItem.Content = Glance.Services.LocalizationService.Get("ThemeSystem");
+            if (ThemeLightItem != null) ThemeLightItem.Content = GlanceRX.Services.LocalizationService.Get("ThemeLight");
+            if (ThemeDarkItem != null) ThemeDarkItem.Content = GlanceRX.Services.LocalizationService.Get("ThemeDark");
+            if (ThemeDefaultItem != null) ThemeDefaultItem.Content = GlanceRX.Services.LocalizationService.Get("ThemeSystem");
 
             // Layout View selector
-            if (LayoutViewLabel != null) LayoutViewLabel.Text = Glance.Services.LocalizationService.Get("LayoutView");
-            if (SinglePageItem != null) SinglePageItem.Content = Glance.Services.LocalizationService.Get("SinglePage");
-            if (TwoPageItem != null) TwoPageItem.Content = Glance.Services.LocalizationService.Get("TwoPage");
-            if (BookItem != null) BookItem.Content = Glance.Services.LocalizationService.Get("BookView");
+            if (LayoutViewLabel != null) LayoutViewLabel.Text = GlanceRX.Services.LocalizationService.Get("LayoutView");
+            if (SinglePageItem != null) SinglePageItem.Content = GlanceRX.Services.LocalizationService.Get("SinglePage");
+            if (TwoPageItem != null) TwoPageItem.Content = GlanceRX.Services.LocalizationService.Get("TwoPage");
+            if (BookItem != null) BookItem.Content = GlanceRX.Services.LocalizationService.Get("BookView");
 
             // Operations guide overlay（按钮标签与浮层标题共用 GuideTitle）
-            if (GuideButtonText != null) GuideButtonText.Text = Glance.Services.LocalizationService.Get("GuideTitle");
-            if (GuideTitleText != null) GuideTitleText.Text = Glance.Services.LocalizationService.Get("GuideTitle");
-            if (GuideMouseSectionText != null) GuideMouseSectionText.Text = Glance.Services.LocalizationService.Get("GuideMouseSection");
-            if (GuideKeyboardSectionText != null) GuideKeyboardSectionText.Text = Glance.Services.LocalizationService.Get("GuideKeyboardSection");
-            if (GuideCloseButton != null) GuideCloseButton.Content = Glance.Services.LocalizationService.Get("GuideClose");
+            if (GuideButtonText != null) GuideButtonText.Text = GlanceRX.Services.LocalizationService.Get("GuideTitle");
+            if (GuideTitleText != null) GuideTitleText.Text = GlanceRX.Services.LocalizationService.Get("GuideTitle");
+            if (GuideMouseSectionText != null) GuideMouseSectionText.Text = GlanceRX.Services.LocalizationService.Get("GuideMouseSection");
+            if (GuideKeyboardSectionText != null) GuideKeyboardSectionText.Text = GlanceRX.Services.LocalizationService.Get("GuideKeyboardSection");
+            if (GuideCloseButton != null) GuideCloseButton.Content = GlanceRX.Services.LocalizationService.Get("GuideClose");
             BuildGuideRows();
 
             // Welcome Screen
-            if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = Glance.Services.LocalizationService.Get("WelcomeSubtitle");
-            if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = Glance.Services.LocalizationService.Get("WelcomeOpenButton");
+            if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeSubtitle");
+            if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeOpenButton");
 
             // Sidebar（添加书签按钮无文字，用本地化串补可访问名称）
             if (AddBookmarkButton != null)
-                AutomationProperties.SetName(AddBookmarkButton, Glance.Services.LocalizationService.Get("AddBookmark"));
+                AutomationProperties.SetName(AddBookmarkButton, GlanceRX.Services.LocalizationService.Get("AddBookmark"));
             ApplySidebarMode(); // refresh header text after localization strings are ready
         }
         catch { }
@@ -927,8 +927,8 @@ public sealed partial class MainPage : Page
                 if (mainWindow?.Content is FrameworkElement rootElement)
                 {
                     rootElement.RequestedTheme = theme;
-                    Glance.Services.ToggleButtonVisualOverride.RefreshAll();
-                    Glance.Services.ButtonVisualOverride.RefreshAll();
+                    GlanceRX.Services.ToggleButtonVisualOverride.RefreshAll();
+                    GlanceRX.Services.ButtonVisualOverride.RefreshAll();
                 }
 
                 // Update title bar and window background colors to match the theme
@@ -959,8 +959,8 @@ public sealed partial class MainPage : Page
                 if (mainWindow?.Content is FrameworkElement rootElement)
                 {
                     rootElement.RequestedTheme = theme;
-                    Glance.Services.ToggleButtonVisualOverride.RefreshAll();
-                    Glance.Services.ButtonVisualOverride.RefreshAll();
+                    GlanceRX.Services.ToggleButtonVisualOverride.RefreshAll();
+                    GlanceRX.Services.ButtonVisualOverride.RefreshAll();
                 }
 
                 // Update title bar and window background colors to match the theme
@@ -994,7 +994,7 @@ public sealed partial class MainPage : Page
     // ---------------- 操作指南浮层（GuideOverlay） ----------------
 
     /// <summary>本地化缩写，仅用于构建指南行，避免每行重复全限定名。</summary>
-    private static string Loc(string key) => Glance.Services.LocalizationService.Get(key);
+    private static string Loc(string key) => GlanceRX.Services.LocalizationService.Get(key);
 
     /// <summary>构建指南内容。两条itum都以【源码】为准而非凭记忆抄先手：
     /// · 鼠标行 ↔ GpuPageView.xaml.cs 的指针/滚轮处理器：左键拖拽平移(:4080)、右键上下拖拽数值缩放(:4097,
@@ -1103,9 +1103,9 @@ public sealed partial class MainPage : Page
                     // Show error dialog
                     var errorDialog = new ContentDialog
                     {
-                        Title = Glance.Services.LocalizationService.Get("Error"),
-                    Content = string.Format(Glance.Services.LocalizationService.Get("PdfLoadErrorContent"), ex.Message),
-                    CloseButtonText = Glance.Services.LocalizationService.Get("Ok"),
+                        Title = GlanceRX.Services.LocalizationService.Get("Error"),
+                    Content = string.Format(GlanceRX.Services.LocalizationService.Get("PdfLoadErrorContent"), ex.Message),
+                    CloseButtonText = GlanceRX.Services.LocalizationService.Get("Ok"),
                     XamlRoot = this.XamlRoot,
                     RequestedTheme = DialogTheme()
                 };
@@ -1156,7 +1156,7 @@ public sealed partial class MainPage : Page
             int currentPage = PageListView.SelectedIndex;
             if (currentPage < 0) currentPage = 0;
 
-            var printService = new Glance.Services.PdfPrintService(hwnd, printRender, _pages, docTitle, currentPage);
+            var printService = new GlanceRX.Services.PdfPrintService(hwnd, printRender, _pages, docTitle, currentPage);
 
             bool shown = await printService.ShowPrintDialogAsync();
             if (!shown)
@@ -1193,11 +1193,11 @@ public sealed partial class MainPage : Page
     {
         var dialog = new ContentDialog
         {
-            Title = Glance.Services.LocalizationService.Get(titleKey),
+            Title = GlanceRX.Services.LocalizationService.Get(titleKey),
             Content = arg == null
-                ? Glance.Services.LocalizationService.Get(contentKey)
-                : string.Format(Glance.Services.LocalizationService.Get(contentKey), arg),
-            CloseButtonText = Glance.Services.LocalizationService.Get("Ok"),
+                ? GlanceRX.Services.LocalizationService.Get(contentKey)
+                : string.Format(GlanceRX.Services.LocalizationService.Get(contentKey), arg),
+            CloseButtonText = GlanceRX.Services.LocalizationService.Get("Ok"),
             XamlRoot = this.XamlRoot,
             RequestedTheme = DialogTheme()
         };
@@ -1335,7 +1335,7 @@ public sealed partial class MainPage : Page
                 }
 
                 // 2. Export annotations to the temporary file (直接以当前文档为源写真实注解对象)
-                var exportService = new Glance.Services.PdfExportService();
+                var exportService = new GlanceRX.Services.PdfExportService();
                 await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, tempFile, savedList, pageRotations, _currentPdfPassword);
 
                 // 3. Overwrite original file
@@ -1468,10 +1468,10 @@ public sealed partial class MainPage : Page
             {
                 var dialog = new ContentDialog
                 {
-                    Title = Glance.Services.LocalizationService.Get("OverwriteFailedTitle"),
-                    Content = Glance.Services.LocalizationService.Get("OverwriteFailedContent"),
-                    PrimaryButtonText = Glance.Services.LocalizationService.Get("SaveCopy"),
-                    CloseButtonText = Glance.Services.LocalizationService.Get("Cancel"),
+                    Title = GlanceRX.Services.LocalizationService.Get("OverwriteFailedTitle"),
+                    Content = GlanceRX.Services.LocalizationService.Get("OverwriteFailedContent"),
+                    PrimaryButtonText = GlanceRX.Services.LocalizationService.Get("SaveCopy"),
+                    CloseButtonText = GlanceRX.Services.LocalizationService.Get("Cancel"),
                     XamlRoot = this.XamlRoot,
                     RequestedTheme = DialogTheme()
                 };
@@ -1481,7 +1481,7 @@ public sealed partial class MainPage : Page
                 {
                     return await ExportPdfAsync(notify);
                 }
-                if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveToastFailed"), ToastIconKind.Error);
+                if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveToastFailed"), ToastIconKind.Error);
                 return false;
             }
             finally
@@ -1491,7 +1491,7 @@ public sealed partial class MainPage : Page
         }
 
         // 保存成功。关闭窗口路径(notify=false)不提示。
-        if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveToastSuccess"), ToastIconKind.Success);
+        if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveToastSuccess"), ToastIconKind.Success);
         return true;
     }
 
@@ -1575,7 +1575,7 @@ public sealed partial class MainPage : Page
             _pdfRenderService?.Dispose();
             _pdfRenderService = null;
 
-            var exportService = new Glance.Services.PdfExportService();
+            var exportService = new GlanceRX.Services.PdfExportService();
             await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, file.Path, savedList, pageRotations, _currentPdfPassword);
 
             HasUnsavedChanges = false;
@@ -1618,7 +1618,7 @@ public sealed partial class MainPage : Page
 
             // 3. 成功提示：改用右下角小弹窗（自动消失），不再弹模态对话框（免去点击确定）。
             //    关闭窗口路径(notify=false)不提示（窗口即将关闭）。
-            if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveAsToastSuccess"), ToastIconKind.Success);
+            if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveAsToastSuccess"), ToastIconKind.Success);
             // 原模态对话框会引发焦点态变化导致视口漂移，曾需在对话框后补保视口；现已无对话框，
             // 但保留这两次 RestoreView 作为防御（无害），确保另存为后视口纹丝不动。
             try { GpuViewer.RestoreView(savedView); } catch { }
@@ -1647,7 +1647,7 @@ public sealed partial class MainPage : Page
                 }
             }
             catch { }
-            if (notify) ShowSaveToast(Glance.Services.LocalizationService.Get("SaveAsToastFailed"), ToastIconKind.Error);
+            if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveAsToastFailed"), ToastIconKind.Error);
             return false;
         }
         finally
@@ -2103,9 +2103,9 @@ public sealed partial class MainPage : Page
         {
                 var dialog = new ContentDialog
                 {
-                    Title = Glance.Services.LocalizationService.Get("PdfLoadErrorTitle"),
-                    Content = $"{Glance.Services.LocalizationService.Get("Error")}: {ex.Message}\n\n{Glance.Services.LocalizationService.Get("Stack")}:\n{ex.StackTrace}",
-                    CloseButtonText = Glance.Services.LocalizationService.Get("Ok"),
+                    Title = GlanceRX.Services.LocalizationService.Get("PdfLoadErrorTitle"),
+                    Content = $"{GlanceRX.Services.LocalizationService.Get("Error")}: {ex.Message}\n\n{GlanceRX.Services.LocalizationService.Get("Stack")}:\n{ex.StackTrace}",
+                    CloseButtonText = GlanceRX.Services.LocalizationService.Get("Ok"),
                     XamlRoot = this.XamlRoot,
                     RequestedTheme = DialogTheme()
                 };
@@ -2127,24 +2127,24 @@ public sealed partial class MainPage : Page
             stack.Children.Add(new TextBlock
             {
                 Text = isRetry
-                    ? Glance.Services.LocalizationService.Get("PasswordMessageRetry")
-                    : string.Format(Glance.Services.LocalizationService.Get("PasswordMessage"), fileName),
+                    ? GlanceRX.Services.LocalizationService.Get("PasswordMessageRetry")
+                    : string.Format(GlanceRX.Services.LocalizationService.Get("PasswordMessage"), fileName),
                 TextWrapping = TextWrapping.Wrap,
             });
             var passwordBox = new PasswordBox
             {
                 Width = 320,
-                PlaceholderText = Glance.Services.LocalizationService.Get("PasswordPlaceholder"),
+                PlaceholderText = GlanceRX.Services.LocalizationService.Get("PasswordPlaceholder"),
             };
             passwordBox.Loaded += (s, e) => passwordBox.Focus(FocusState.Programmatic);
             stack.Children.Add(passwordBox);
 
             var dialog = new ContentDialog
             {
-                Title = Glance.Services.LocalizationService.Get(isRetry ? "PasswordTitleRetry" : "PasswordTitle"),
+                Title = GlanceRX.Services.LocalizationService.Get(isRetry ? "PasswordTitleRetry" : "PasswordTitle"),
                 Content = stack,
-                PrimaryButtonText = Glance.Services.LocalizationService.Get("Open"),
-                CloseButtonText = Glance.Services.LocalizationService.Get("Cancel"),
+                PrimaryButtonText = GlanceRX.Services.LocalizationService.Get("Open"),
+                CloseButtonText = GlanceRX.Services.LocalizationService.Get("Cancel"),
                 DefaultButton = ContentDialogButton.Primary,
                 XamlRoot = this.XamlRoot,
                 RequestedTheme = DialogTheme(),
@@ -2228,9 +2228,9 @@ public sealed partial class MainPage : Page
         OutlineListView.Visibility = _currentSidebarMode == SidebarMode.Outline ? Visibility.Visible : Visibility.Collapsed;
         SidebarHeaderText.Text = _currentSidebarMode switch
         {
-            SidebarMode.Bookmarks => Glance.Services.LocalizationService.Get("SidebarBookmarks"),
-            SidebarMode.Outline => Glance.Services.LocalizationService.Get("SidebarOutline"),
-            _ => Glance.Services.LocalizationService.Get("SidebarThumbnails"),
+            SidebarMode.Bookmarks => GlanceRX.Services.LocalizationService.Get("SidebarBookmarks"),
+            SidebarMode.Outline => GlanceRX.Services.LocalizationService.Get("SidebarOutline"),
+            _ => GlanceRX.Services.LocalizationService.Get("SidebarThumbnails"),
         };
     }
 
@@ -2266,10 +2266,10 @@ public sealed partial class MainPage : Page
         if (_totalPages == 0 || _currentPageIndex < 0 || _currentPageIndex >= _totalPages) return;
         if (_bookmarks.Any(b => b.PageIndex == _currentPageIndex)) return;
         InsertBookmarkSorted(_currentPageIndex,
-            string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), _currentPageIndex + 1));
+            string.Format(GlanceRX.Services.LocalizationService.Get("BookmarkPagePlaceholder"), _currentPageIndex + 1));
         SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
-        ShowSaveToast(Glance.Services.LocalizationService.Get("BookmarkAddedToast"), ToastIconKind.Bookmark);
+        ShowSaveToast(GlanceRX.Services.LocalizationService.Get("BookmarkAddedToast"), ToastIconKind.Bookmark);
     }
 
     /// <summary>Ctrl+D：收藏当前页书签（与侧边栏顶部收藏按钮等效，同样弹收藏气泡）。
@@ -2312,11 +2312,11 @@ public sealed partial class MainPage : Page
         else
         {
             InsertBookmarkSorted(idx,
-                string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), idx + 1));
+                string.Format(GlanceRX.Services.LocalizationService.Get("BookmarkPagePlaceholder"), idx + 1));
         }
         SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
-        ShowSaveToast(Glance.Services.LocalizationService.Get(msgKey), kind);
+        ShowSaveToast(GlanceRX.Services.LocalizationService.Get(msgKey), kind);
     }
 
     // 书签成员关系的唯一真源是 _bookmarks；缩略图行内的星必须与它保持一致，
@@ -2380,7 +2380,7 @@ public sealed partial class MainPage : Page
         _bookmarks.Remove(bm);
         SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
-        ShowSaveToast(Glance.Services.LocalizationService.Get("BookmarkRemovedToast"), ToastIconKind.Remove);
+        ShowSaveToast(GlanceRX.Services.LocalizationService.Get("BookmarkRemovedToast"), ToastIconKind.Remove);
     }
 
     private void BookmarkEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -2433,7 +2433,7 @@ public sealed partial class MainPage : Page
             foreach (var b in saved.OrderBy(x => x.PageIndex))
             {
                 string name = string.IsNullOrWhiteSpace(b.DisplayName)
-                    ? string.Format(Glance.Services.LocalizationService.Get("BookmarkPagePlaceholder"), b.PageIndex + 1)
+                    ? string.Format(GlanceRX.Services.LocalizationService.Get("BookmarkPagePlaceholder"), b.PageIndex + 1)
                     : b.DisplayName;
                 _bookmarks.Add(new BookmarkViewModel { PageIndex = b.PageIndex, DisplayName = name });
             }
@@ -2455,7 +2455,7 @@ public sealed partial class MainPage : Page
             {
                 _outlineItems.Add(new OutlineItemViewModel
                 {
-                    Title = Glance.Services.LocalizationService.Get("NoOutline"),
+                    Title = GlanceRX.Services.LocalizationService.Get("NoOutline"),
                     PageIndex = -1,
                     Indent = 0,
                 });
@@ -3419,12 +3419,12 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// Shows the open document's name in the window title bar (e.g. "Glance — file.pdf").
+    /// Shows the open document's name in the window title bar (e.g. "Glance-RX — file.pdf").
     /// Replaces the old centered toolbar title, which could overlap toolbar buttons.
     /// </summary>
     private void UpdateWindowTitle(string? fileName)
     {
-        string title = string.IsNullOrEmpty(fileName) ? "Glance" : $"Glance — {fileName}";
+        string title = string.IsNullOrEmpty(fileName) ? "Glance-RX" : $"Glance-RX — {fileName}";
         if (Application.Current is App app && app.MainWindow is MainWindow glanceWindow)
             glanceWindow.SetWindowTitle(title);
     }
