@@ -1,7 +1,4 @@
 # Glance-RX
-
-![Glance-RX](docs/img/glance_hero_1920x1080.png)
-
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Framework: WinUI 3](https://img.shields.io/badge/Framework-WinUI_3-purple.svg)](https://learn.microsoft.com/zh-cn/windows/apps/winui/winui3/)
 [![Platform: Windows 10+](https://img.shields.io/badge/Platform-Windows_10%2B-blue.svg)](https://www.microsoft.com/windows/)
@@ -9,26 +6,26 @@
 
 Glance-RX 是一款改良自 jonas1ara 的 Glance 的高性能 PDF 阅读器，基于 Windows 11 的 WinUI 3 外壳，搭配 Rust 原生渲染后端（MuPDF）与 Win2D GPU 合成。
 
-> 完全免安装、可移植（self-contained，非打包形态）：用户数据只写入 exe 同级目录，**绝不写入 C 盘、AppData 或系统 Temp**。
+> 完全免安装、可移植（self-contained，非打包形态）：用户数据只写入 exe 同级目录的 `GlanceData` 子目录，**不写入系统 AppData 或系统 Temp**（仅当 `GlanceData` 不可写时，崩溃日志会降级写到系统 Temp）。
 
 ---
 
 ## 核心特性
 
 * **渲染内核（Sumatra 内核 + MuPDF 后端）：**
-  * 将 Sumatra PDF 的 `RenderCache` 渲染/内存管理引擎 **1:1 移植**为 C# 端的 `TileRenderCache`（物理像素瓦片、按需预取、近环全分辨率 / 远环快照），后端由 Rust 封装的 MuPDF 经 FFI 提供页位图，Win2D (`CanvasVirtualControl`) 在 GPU 上做合成。
+  * 将 Sumatra PDF 的 `RenderCache` 渲染/内存管理引擎 **1:1 移植**为 C# 端的 `TileRenderCache`（物理像素瓦片、按需预取、单级缓存，与 Sumatra `RenderCache` 一致），后端由 Rust 封装的 MuPDF 经 FFI 提供页位图，Win2D (`CanvasVirtualControl`) 在 GPU 上做合成。
   * 统一运动引擎（弹簧模型）驱动所有缩放与平移。
 * **布局与缩放：**
   * 纵向 / 横向连续滚动；单页、双页、书籍对开三种版面。
   * 缩放范围 **0.1×–4.0×**；双击在「适应宽度 ↔ 实际大小 100%」之间切换。
   * 滚轮、Ctrl+滚轮、右键拖拽缩放、方向键 / 空格翻页等丰富交互。
-* **批注（本地持久化）：**
+* **批注（PDF 原生注解，本地持久化）：**
   * 手写画笔，七色标注（黄 / 绿 / 青 / 洋红 / 红 / 蓝 / 黑）。
-  * 撤销 / 重做（支持多步）；批注经 Rust 端序列化，落盘为本地 JSON，退出提示保存。
+  * 撤销 / 重做（支持多步）。批注以**真实 PDF `/Ink` 注解对象**写入 PDF 文件本身（文件即唯一真相源，不生成独立 JSON 侧车）；关闭时若有未保存更改会弹出保存提示（保存并退出 / 不保存退出 / 取消）。
 * **支持密码 PDF：** 支持打开受密码保护的 PDF（登录对话框 + FFI 向原生后端传递解锁凭据，覆盖阅读 / 对比视图）。
 * **分屏对比：** 并排打开两个 PDF 同步对照，中间附带红色同步滚动条。
 * **导航：** 侧边栏缩略图、书签、大纲（目录）。
-* **打印与导出：** 直接打印；用 PDFsharp 把批注烧录回 PDF，导出带签注的副本。打印功能实机测试较少，可能有未知问题。
+* **打印与导出：** 直接打印；保存 / 导出时由 PDFsharp 把批注作为真实 PDF `/Ink` 注解对象写回（保存原地覆盖原文件、导出为带签注副本）。打印功能实机测试较少，可能有未知问题。
 * **多语言：** 中文 / 英语 / 西班牙语，按系统区域自动选择；所有界面文案统一经 `LocalizationService.Get(...)` 读取，无硬编码字符串。
 * **主题：** 现代主题配色，浅色 / 深色 / 跟随系统三档。部分区域有亚克力效果。
 * **运行时手感调参：** 同级目录下的 `config.txt` 可调节缩放范围、弹簧刚度、滚轮步进、留白等参数，**删文件即恢复出厂**，无需重新编译。
@@ -40,7 +37,7 @@ Glance-RX 是一款改良自 jonas1ara 的 Glance 的高性能 PDF 阅读器，�
 Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 
 * **前端（外壳）：** WinUI 3（C# / .NET 10，`net10.0-windows10.0.26100.0`）—— 原生 Windows 11 外观、交互与排版。
-* **后端（渲染）：** Rust（`glance-native`，编译为 `cdylib`）—— 基于 MuPDF 的单进程多线程渲染引擎（每个线程持有独立的 `fz_context`），负责栅格化、批注处理与本地 JSON 持久化。
+* **后端（渲染）：** Rust（`glance-native`，编译为 `cdylib`）—— 基于 MuPDF 的单进程多线程渲染引擎（每个线程持有独立的 `fz_context`），负责栅格化与原生线程池内的页位图生成。
 * **桥接：** P/Invoke FFI（`GlanceRXNative.cs`）—— 类型安全的 C# ↔ Rust 互操作；所有 `extern "C"` 入口以 `catch_unwind` 兜底，杜绝跨 FFI 边界 panic 导致的静默崩溃。
 * **合成：** Win2D / `CanvasVirtualControl` —— 在 GPU 上把原生后端产出的物理像素瓦片合成为最终画面。
 
@@ -62,7 +59,7 @@ Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 ### 后端与 FFI（Rust）
 * **[MuPDF（`mupdf` crate 0.8）](https://mupdf.com/)：** 单进程多线程 PDF 渲染引擎，是 Glance-RX 原生后端的渲染内核。
 * **[windows-rs 0.51](https://github.com/microsoft/windows-rs)：** 微软官方 Rust 投影，提供对 Windows API 的原生访问。
-* **[serde / serde_json](https://github.com/serde-rs/serde)：** 本地 JSON 批注 / 书签数据库的序列化框架。
+* **[serde / serde_json](https://github.com/serde-rs/serde)：** Rust 侧内部数据（反）序列化框架（如注解模型的结构化表示）。书签等用户数据由 C# 端 `System.Text.Json` 落盘于便携目录 `GlanceData`。
 
 ---
 
@@ -116,7 +113,7 @@ Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 ### 质量门槛
 
 * 交付前需通过 **Debug + Release 双构建，0 错误 0 警告** 的标准。
-* 便携版约束：禁止向 C 盘 / AppData / 系统 Temp 写入任何数据；用户数据只写 `AppContext.BaseDirectory`。
+* 便携版约束：禁止向系统 AppData / 系统 Temp 写入任何数据；用户数据只写 `AppContext.BaseDirectory` 下的 `GlanceData` 子目录（该目录不可写时崩溃日志降级到系统 Temp）。
 
 </details>
 
