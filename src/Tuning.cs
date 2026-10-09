@@ -56,6 +56,12 @@ namespace GlanceRX
 #   - 想回退某项：直接删掉那一行（或改回""默认""列的值）。
 #     To revert a key: delete its line (or set it back to the default value).
 #
+# ⚠ 安全边界 / Safety: 每个键的【有效区间】已写在对应行尾（如 [0, 256]、(0, 5]）。
+#    越界或非法（非数字 / Infinity / NaN）的值会在启动时自动钳到安全范围，不会让程序崩溃；
+#    但钳制会悄悄改变手感，所以请按区间填写。
+#    Out-of-range / invalid values are auto-clamped to a safe range at launch (no crash),
+#    but clamping silently changes feel — so please stay within the stated range.
+#
 # 一键回退（恢复出厂）/ One-click factory reset:
 #   直接删除本文件即可。下次打开 Glance 会以【全部默认值】运行，并在本目录
 #   （或默认位置）自动重新生成一份【全默认值】的 config.txt —— 等价于""恢复出厂设置""。
@@ -65,126 +71,147 @@ namespace GlanceRX
 
 
 # ---------------- 缩放范围 / Zoom range ----------------
-# 最小缩放比例（0.1 = 10%）。调小可整页预览超大跨页杂志。
-# Min zoom ratio (0.1 = 10%). Lower = fit huge spreads on screen.
-MinZoom = 0.1                     # 默认 0.1 | default
+# 最小缩放比例。有效区间 (0, MaxZoom)，建议 0.02 ~ 5.0。
+# Min zoom ratio. Valid (0, MaxZoom); recommended 0.02 ~ 5.0.
+# 若 >= MaxZoom 会被自动钳为 MaxZoom×0.5，否则缩放夹取逻辑会抛异常。
+# If >= MaxZoom it is auto-clamped to MaxZoom×0.5, else zoom clamping throws.
+MinZoom = 0.1                     # 默认 0.1 | default | 区间 (0, MaxZoom)
 
-# 最大缩放比例（4.0 = 400%）。
-# Max zoom ratio (4.0 = 400%).
-MaxZoom = 4.0                     # 默认 4.0 | default
+# 最大缩放比例。有效区间 (MinZoom, 16]，建议 0.05 ~ 16.0。
+# Max zoom ratio. Valid (MinZoom, 16]; recommended 0.05 ~ 16.0.
+MaxZoom = 4.0                     # 默认 4.0 | default | 区间 (MinZoom, 16]
 
 
 # ---------------- 布局留白 / Layout margins (DIP) ----------------
-# 文档四周留白（DIP）。/ Margin around the document (DIP).
-DocMargin = 16.0                  # 默认 16.0 | default
+# 文档四周留白（DIP）。有效区间 [0, 256]，非负（负值会把内容拉出屏幕）。
+# Doc margin (DIP). Valid [0, 256], non-negative.
+DocMargin = 16.0                  # 默认 16.0 | default | 区间 [0, 256]
 
-# 纵向连续布局页间距（DIP）。/ Vertical continuous layout page gap (DIP).
-PageGap = 16.0                    # 默认 16.0 | default
+# 纵向连续布局页间距（DIP）。有效区间 [0, 256]，非负。
+# Vertical page gap (DIP). Valid [0, 256], non-negative.
+PageGap = 16.0                    # 默认 16.0 | default | 区间 [0, 256]
 
-# 横向连续布局页间距（DIP）。书本/杂志横向串页时更""贴""，破坏感更小。
-# Horizontal continuous layout page gap (DIP). Tighter for cross-page reading.
-PageGapHorizontal = 6.0           # 默认 6.0 | default
+# 横向连续布局页间距（DIP）。有效区间 [0, 256]，非负。
+# Horizontal page gap (DIP). Valid [0, 256], non-negative.
+PageGapHorizontal = 6.0           # 默认 6.0 | default | 区间 [0, 256]
 
 
 # ---------------- 光栅并发 / Raster concurrency ----------------
-# 光栅线程自动模式上限：auto = min(逻辑核数, 本值)。
-# Auto-mode ceiling: auto = min(logical cores, this).
-RenderWorkerCap = 16              # 默认 16 | default
+# 自动模式并发上限：auto = min(物理核-1, 本值)。有效区间 [1, 1024]，且必须 <= RenderWorkerHardCap。
+# Auto ceiling: auto = min(physical cores - 1, this). Valid [1, 1024]; must be <= HardCap.
+# 低于 1 会被钳为 1，否则 Math.Clamp(...,1,Cap) 抛异常。
+# Below 1 clamps to 1, else Math.Clamp(...,1,Cap) throws.
+RenderWorkerCap = 16              # 默认 16 | default | 区间 [1, 1024]
 
-# 绝对硬上限（防止极端配置让线程抢占 CPU/内存带宽）。
-# Absolute hard ceiling (prevents thread over-subscription on extreme configs).
-RenderWorkerHardCap = 24          # 默认 24 | default
+# 绝对硬上限（并发不可能超过此值）。有效区间 [1, 1024]，且必须 >= RenderWorkerCap。
+# Absolute hard ceiling. Valid [1, 1024]; must be >= Cap (else auto-raised to Cap).
+# 低于 1 会被钳为 1，否则 Math.Clamp 抛异常。/ Below 1 clamps to 1, else throws.
+RenderWorkerHardCap = 24          # 默认 24 | default | 区间 [1, 1024]
 
 
 # ---------------- 滚动 / Scrolling ----------------
-# 判定滚动方向的死区(DIP)。远小于一次滚轮位移(~100)，但吃掉触控板抖动。
-# Deadzone for scroll direction (DIP). Smaller than a wheel notch (~100) but kills jitter.
-ScrollDirDeadzone = 8.0           # 默认 8.0 | default
+# 判定滚动方向的死区(DIP)。有效区间 [0, 256]，非负。
+# Scroll direction deadzone (DIP). Valid [0, 256], non-negative.
+ScrollDirDeadzone = 8.0           # 默认 8.0 | default | 区间 [0, 256]
 
 
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
 # 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动下方收敛阈值。
 # ~99% settle time ≈ 6.6/ω. Want faster? Raise ω only; leave settle thresholds alone.
+# 以下三个 ω 的有效区间均为 (0, 200] rad/s，必须 > 0：
+# All three omegas valid (0, 200] rad/s, must be > 0:
+#   ω <= 0 时弹簧退化为瞬切（负值本应指数发散、画面乱跳）。
+#   ω <= 0 makes the spring snap instantly (negative would diverge).
 
 # 滚轮滚动弹簧硬度：≈315ms 收敛，跟手且顺滑。
 # Wheel scroll spring: ~315ms settle, responsive & smooth.
-ScrollSpringOmega = 21.0          # 默认 21.0 | default
+ScrollSpringOmega = 21.0          # 默认 21.0 | default | 区间 (0, 200]
 
 # 双击/按钮/Ctrl+滚轮缩放弹簧：≈370ms，有""推进感""。
-# Double-click / button / Ctrl+wheel zoom spring: ~370ms, with a sense of push.
-ZoomSpringOmega = 18.0            # 默认 18.0 | default
+# Double-click / button / ctrl+wheel zoom spring: ~370ms, with a sense of push.
+ZoomSpringOmega = 18.0            # 默认 18.0 | default | 区间 (0, 200]
 
 # 右键拖拽缩放弹簧：≈165ms，以跟手为主、只滤输入抖动。
 # Right-drag zoom spring: ~165ms, follows hand, only filters jitter.
-RightZoomSpringOmega = 40.0       # 默认 40.0 | default
+RightZoomSpringOmega = 40.0       # 默认 40.0 | default | 区间 (0, 200]
 
 
 # ---------------- 滚轮与缩放步进 / Wheel & zoom step ----------------
-# 滚轮一格位移系数。负值=前推往回看。幅度 3.0 → 一档≈360px（视口约1/3）。
-# Wheel notch factor (negative = push forward = scroll back). 3.0 → ~360px/notch.
-# 2.0≈240px 偏稳，4.0≈480px 更奔放。/ 2.0 steady, 4.0 snappier.
-WheelScrollFactor = -3.0          # 默认 -3.0 | default
+# 滚轮一格位移系数。有效区间 [-50, 50]；负值=前推往回看（符号有意保留，只限幅）。
+# Wheel notch factor. Valid [-50, 50]; negative = push forward = scroll back (sign kept, magnitude clamped).
+WheelScrollFactor = -3.0          # 默认 -3.0 | default | 区间 [-50, 50]
 
-# Ctrl+滚轮缩放强度（每档 120 delta 约缩放 3%）。越大滚轮缩放越猛。
-# Ctrl+wheel zoom strength (~3% per notch). Higher = more aggressive.
-CtrlWheelZoomStrength = 0.25      # 默认 0.25 | default
+# Ctrl+滚轮缩放强度（每档 120 delta 约缩放 3%）。有效区间 [0, 5]，非负（负值会反向缩放）。
+# Ctrl+wheel zoom strength (~3% per notch). Valid [0, 5], non-negative (negative inverts).
+CtrlWheelZoomStrength = 0.25      # 默认 0.25 | default | 区间 [0, 5]
 
-# 缩放按钮(+/-)每按一次步进（百分比点：100%→110%）。
-# Zoom in/out button step per click (percentage points: 100%→110%).
-ZoomButtonStep = 10.0             # 默认 10.0 | default
+# 缩放按钮(+/-)每按一次步进（百分比点：100%→110%）。有效区间 [0.5, 100]，> 0。
+# Zoom button step per click (%pts). Valid [0.5, 100], > 0.
+ZoomButtonStep = 10.0             # 默认 10.0 | default | 区间 [0.5, 100]
 
 
 # ---------------- 收敛阈值（按""屏幕看得见""判定） / Settle thresholds ----------------
 # 残差 ≤ 约 1~2 屏幕像素即落定，消除""看着停了其实还在跑""的拖尾。
 # Settle when residual ≤ ~1-2 on-screen px; kills the ""looks stopped but still running"" tail.
+# 以下四个阈值的有效区间均为 (0, 上限]，必须 > 0：阈值 = 0 时判定要求精确相等，
+# 动画/滚动永远到不了，帧泵空转（吃电池）。/ All four valid (0, cap], must be > 0; =0 never settles.
 
-# 滚动收敛残差(px)。/ Scroll settle residual (px).
-ScrollSettlePx = 1.5              # 默认 1.5 | default
+# 滚动收敛残差(px)。有效区间 (0, 50]。
+# Scroll settle residual (px). Valid (0, 50].
+ScrollSettlePx = 1.5              # 默认 1.5 | default | 区间 (0, 50]
 
-# 滚动收敛速度(px/帧)。/ Scroll settle velocity.
-ScrollSettleVel = 40.0            # 默认 40.0 | default
+# 滚动收敛速度(px/帧)。有效区间 (0, 1000]。
+# Scroll settle velocity (px/frame). Valid (0, 1000].
+ScrollSettleVel = 40.0            # 默认 40.0 | default | 区间 (0, 1000]
 
-# 缩放收敛残差(log 空间)。/ Zoom settle residual (log space).
-ZoomSettleLog = 0.002             # 默认 0.002 | default
+# 缩放收敛残差(log 空间)。有效区间 (0, 0.5]。
+# Zoom settle residual (log space). Valid (0, 0.5].
+ZoomSettleLog = 0.002             # 默认 0.002 | default | 区间 (0, 0.5]
 
-# 缩放收敛速度。/ Zoom settle velocity.
-ZoomSettleVel = 0.08              # 默认 0.08 | default
+# 缩放收敛速度。有效区间 (0, 5]。
+# Zoom settle velocity. Valid (0, 5].
+ZoomSettleVel = 0.08              # 默认 0.08 | default | 区间 (0, 5]
 
 
 # ---------------- 提交落地（ChangeView 异步窗口） / Commit window ----------------
 # 缩放/偏移经 ScrollViewer.ChangeView 异步落地，下面是容差与兜底。
 # Zoom/offset land asynchronously via ChangeView; tolerances & safety net below.
 
-# 缩放提交容差。/ Zoom commit epsilon.
-CommitZoomEps = 0.001             # 默认 0.001 | default
+# 缩放提交容差。有效区间 (0, 0.1]。
+# Zoom commit epsilon. Valid (0, 0.1].
+CommitZoomEps = 0.001             # 默认 0.001 | default | 区间 (0, 0.1]
 
-# 偏移提交容差(px)。夹断造成的偏差几十~几百px，1.5px 足以区分。
-# Offset commit epsilon (px). Clip-induced error is tens~hundreds px; 1.5px tells apart.
-CommitOffsetEps = 1.5             # 默认 1.5 | default
+# 偏移提交容差(px)。有效区间 (0, 50]。
+# Offset commit epsilon (px). Valid (0, 50].
+CommitOffsetEps = 1.5             # 默认 1.5 | default | 区间 (0, 50]
 
-# 最大补发偏移次数。/ Max commit nudges.
-MaxCommitNudges = 4               # 默认 4 | default
+# 最大补发偏移次数（整数）。有效区间 [0, 64]，非负。
+# Max commit nudges (int). Valid [0, 64], non-negative.
+MaxCommitNudges = 4               # 默认 4 | default | 区间 [0, 64]
 
-# 提交落地超时(墙钟兜底 ms)。zoom 通常 <20ms 落地；远超此值才视为真死锁强制关窗。
-# Commit wait deadline (ms wall-clock). Usually <20ms; only past this = real deadlock.
-CommitWaitDeadlineMs = 250.0      # 默认 250.0 | default
+# 提交落地超时(墙钟兜底 ms)。有效区间 (0, 10000]，> 0。
+# Commit wait deadline (ms). Valid (0, 10000], > 0.
+CommitWaitDeadlineMs = 250.0      # 默认 250.0 | default | 区间 (0, 10000]
 
 
 # ---------------- 锚点 / 双击 / Anchor & double-tap ----------------
-# 落定后仍复用锚点的宽限(ms)。/ Anchor reuse grace after settle (ms).
-ZoomReuseAnchorGraceMs = 200.0    # 默认 200.0 | default
+# 落定后仍复用锚点的宽限(ms)。有效区间 [0, 5000]，非负。
+# Anchor reuse grace after settle (ms). Valid [0, 5000], non-negative.
+ZoomReuseAnchorGraceMs = 200.0    # 默认 200.0 | default | 区间 [0, 5000]
 
-# 双击去重窗口(ms)，吃掉手势识别器的重复派发。
-# Double-tap dedupe window (ms) to swallow recognizer double-fire.
-DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default
+# 双击去重窗口(ms)，吃掉手势识别器的重复派发。有效区间 [0, 2000]，非负。
+# Double-tap dedupe window (ms). Valid [0, 2000], non-negative.
+DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default | 区间 [0, 2000]
 
 
 # ---------------- UI / 工具栏 / UI & toolbar ----------------
-# 工具栏滑入滑出时长(ms)。/ Toolbar slide-in/out duration (ms).
-UiTransitionMs = 150              # 默认 150 | default
+# 工具栏滑入滑出时长(ms)。有效区间 [0, 2000]，非负。
+# Toolbar slide-in/out duration (ms). Valid [0, 2000], non-negative.
+UiTransitionMs = 150              # 默认 150 | default | 区间 [0, 2000]
 
-# 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。/ Auto-hide delay after pointer leaves (ms).
-ToolbarHideDelayMs = 180          # 默认 180 | default
+# 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。有效区间 [0, 10000]，非负。
+# Auto-hide delay after pointer leaves (ms). Valid [0, 10000], non-negative.
+ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
 ";
         // ⚠ 上面末尾那个换行是【刻意】的，别删：让本字面量与 src/config.txt 逐字一致（含末尾换行）。
         //   删掉它 => 本字面量会比 src/config.txt 少一个换行，"删文件=恢复出厂"生成的那份就与仓库那份不同。
@@ -273,7 +300,7 @@ ToolbarHideDelayMs = 180          # 默认 180 | default
             {
                 try { if (File.Exists(c)) { path = c; break; } } catch { /* ignore */ }
             }
-            if (path == null) { RegenerateConfigFile(); return; }
+            if (path == null) { RegenerateConfigFile(); Validate(); return; }
 
             try
             {
@@ -302,6 +329,12 @@ ToolbarHideDelayMs = 180          # 默认 180 | default
                 // 解析失败不影响启动，保留默认值。
                 // Parse failure must not break startup; defaults remain.
             }
+
+            // 解析无论成功与否，最后都把所有值钳进安全区间并修好跨字段不变量，
+            // 保证后续 Math.Clamp / 弹簧 / 收敛判定不会因配置异常而崩溃或空转。
+            // Coerce every value into a safe range & fix cross-field invariants so a bad
+            // config can never crash (Math.Clamp throws on min>max) or spin forever.
+            Validate();
         }
 
         /// <summary>
@@ -379,6 +412,72 @@ ToolbarHideDelayMs = 180          # 默认 180 | default
                 case "ToolbarHideDelayMs": ToolbarHideDelayMs = ParseDouble(raw, ToolbarHideDelayMs); break;
                 default: break; // 未知键忽略 / unknown key ignored
             }
+        }
+
+        // ============================ 校验 / 钳制 / Validation ============================
+        // 配置是给"手调手感"的人用的，任何离谱值都不该让程序崩。
+        // 这里把每个字段钳进合理区间，并修正跨字段不变量（MinZoom<MaxZoom、HardCap>=Cap），
+        // 使得无论 config.txt 里写了什么，加载完都一定是【有效且自洽】的设置。
+        // The config is hand-edited for feel; no value should ever crash the app.
+        // We clamp every field and fix cross-field invariants so the result is always valid.
+
+        private static double ClampD(double v, double lo, double hi)
+            => double.IsFinite(v) ? Math.Max(lo, Math.Min(v, hi)) : lo;
+
+        private static int ClampI(int v, int lo, int hi)
+            => v < lo ? lo : (v > hi ? hi : v);
+
+        private static void Validate()
+        {
+            // ---- 缩放范围 / Zoom range ----
+            // 硬性不变量 MinZoom < MaxZoom：否则 GpuPageView 里十几处 Math.Clamp(zoom, MinZoom, MaxZoom)
+            // 直接抛 ArgumentException。下界保证缩放比 > 0（避免除零 / 零尺寸）。
+            MinZoom = ClampD(MinZoom, 0.02, 5.0);
+            MaxZoom = ClampD(MaxZoom, 0.05, 16.0);
+            if (MinZoom >= MaxZoom) MinZoom = Math.Max(0.02, MaxZoom * 0.5);
+
+            // ---- 布局留白 / Layout margins (DIP) ----  负留白无意义（内容被拉出屏幕）。
+            DocMargin = ClampD(DocMargin, 0.0, 256.0);
+            PageGap = ClampD(PageGap, 0.0, 256.0);
+            PageGapHorizontal = ClampD(PageGapHorizontal, 0.0, 256.0);
+            ScrollDirDeadzone = ClampD(ScrollDirDeadzone, 0.0, 256.0);
+
+            // ---- 并发光栅 / Raster concurrency ----
+            // 硬下限 1：PdfRenderService 里 Math.Clamp(..., 1, RenderWorkerCap) 在 Cap<1 时抛异常。
+            // HardCap 必须是绝对上限 => 不低于 Cap，否则 Cap 才是真正上限、注释语义失效。
+            RenderWorkerCap = ClampI(RenderWorkerCap, 1, 1024);
+            RenderWorkerHardCap = ClampI(RenderWorkerHardCap, 1, 1024);
+            if (RenderWorkerHardCap < RenderWorkerCap) RenderWorkerHardCap = RenderWorkerCap;
+
+            // ---- 弹簧角频率 / Spring ω ----  必须 > 0：<=0 在 Motion 里退化为瞬切，负值本应指数发散。
+            ScrollSpringOmega = ClampD(ScrollSpringOmega, 1.0, 200.0);
+            ZoomSpringOmega = ClampD(ZoomSpringOmega, 1.0, 200.0);
+            RightZoomSpringOmega = ClampD(RightZoomSpringOmega, 1.0, 200.0);
+
+            // ---- 滚轮与缩放步进 / Wheel & zoom step ----
+            // 符号保留（负值=前推往回看），仅限幅；缩放强度 / 按钮步进非负。
+            WheelScrollFactor = ClampD(WheelScrollFactor, -50.0, 50.0);
+            CtrlWheelZoomStrength = ClampD(CtrlWheelZoomStrength, 0.0, 5.0);
+            ZoomButtonStep = ClampD(ZoomButtonStep, 0.5, 100.0);
+
+            // ---- 收敛阈值 / Settle thresholds ----  必须 > 0：=0 时 IsSettled 要求精确相等，
+            // 动画永远到不了 => 帧泵空转（永不 idle / 吃电池）。
+            ScrollSettlePx = ClampD(ScrollSettlePx, 0.1, 50.0);
+            ScrollSettleVel = ClampD(ScrollSettleVel, 0.1, 1000.0);
+            ZoomSettleLog = ClampD(ZoomSettleLog, 1e-4, 0.5);
+            ZoomSettleVel = ClampD(ZoomSettleVel, 1e-3, 5.0);
+
+            // ---- 提交落地 / Commit window ----
+            CommitZoomEps = ClampD(CommitZoomEps, 1e-5, 0.1);
+            CommitOffsetEps = ClampD(CommitOffsetEps, 0.1, 50.0);
+            MaxCommitNudges = ClampI(MaxCommitNudges, 0, 64);
+            CommitWaitDeadlineMs = ClampD(CommitWaitDeadlineMs, 1.0, 10000.0);
+
+            // ---- 锚点 / 双击 / UI ----
+            ZoomReuseAnchorGraceMs = ClampD(ZoomReuseAnchorGraceMs, 0.0, 5000.0);
+            DoubleTapIgnoreMs = ClampD(DoubleTapIgnoreMs, 0.0, 2000.0);
+            UiTransitionMs = ClampD(UiTransitionMs, 0.0, 2000.0);
+            ToolbarHideDelayMs = ClampD(ToolbarHideDelayMs, 0.0, 10000.0);
         }
 
         private static double ParseDouble(string raw, double fallback)
