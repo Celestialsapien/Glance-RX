@@ -188,6 +188,13 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         /// 必须参与整页驱动，否则悬浮色残留会立刻回归（10-04）。</para></summary>
         internal virtual bool ExcludeFromPageHoverDrive => false;
 
+        /// <summary>是否<b>只信软件自身主题源</b>、跳过视觉树遍历（默认 false = 走遍历）。
+        /// <para>仅 popup / flyout 独立树需要置 true：该树的 <c>FlyoutPresenter</c> 上挂着 WinUI 自己
+        /// 镜像的 <see cref="FrameworkElement.RequestedTheme"/>，它<b>滞后于</b> app 主题（10-09 日志实证：
+        /// app 已切深色、<c>FlyoutPresenter</c> 仍报 Light）⇒ 遍历命中之即取到浅色档 ⇒ 按钮在深色下变白。
+        /// 直接取 <c>MainWindow.IsDarkTheme</c>（确定性、已含"Default 回落系统"）即可绕开这个滞后镜像。</para></summary>
+        protected virtual bool UseAppThemeSourceOnly => false;
+
         /// <summary>直接设定 hover（供页面/容器级驱动「全灭」或外部指派）；
         /// 同样只在真变化时才置脏重绘。</summary>
         internal void SetHover(bool hover)
@@ -278,6 +285,12 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         {
             try
             {
+                // popup / flyout 独立树：跳过遍历，直接用确定性的软件主题源（见 UseAppThemeSourceOnly 注释）。
+                // 遍历会命中 FlyoutPresenter 上【WinUI 自己镜像的、滞后于 app 主题的】RequestedTheme
+                // （10-09 日志实证：app 已深色、FlyoutPresenter 仍报 Light）⇒ 取到浅色档 ⇒ 深色下按钮变白。
+                if (UseAppThemeSourceOnly && (Application.Current as App)?.MainWindow is MainWindow popupMw)
+                    return popupMw.IsDarkTheme ? "Default" : "Light";
+
                 FrameworkElement? e = _button;
                 while (e != null)
                 {
@@ -286,7 +299,8 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
                     e = VisualTreeHelper.GetParent(e) as FrameworkElement;
                 }
                 // ⚠ 兜底必须用【软件自己的主题设置】，不能直接用 Application.Current.RequestedTheme（系统设置）：
-                //    ① 弹层 / 浮层是【独立 XAML 树】，上面这段向上遍历到 popup 根就断了（父链为 null）⇒ 掉到这里；
+                //    ① 全链都是 Default（跟随系统）时掉到这里（popup 树已在上方 UseAppThemeSourceOnly 分支短路，
+                //       不会走到这里 —— 10-09 前误以为它会因父链断裂而落到此处，实测证明遍历会命中 FlyoutPresenter）；
                 //    ② Application.Current.RequestedTheme 在本 app 里【从未被赋值】，它恒等于 Windows 的
                 //       "默认应用模式"系统设置，与用户在软件里选的主题完全无关 ——
                 //       用户系统应用模式=浅色、软件设为深色时，此处会判成"浅色"⇒ 取到浅色字典的画刷。

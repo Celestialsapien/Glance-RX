@@ -153,6 +153,12 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
         /// （判据是 <c>inPopupTree</c>，不是静止档透明与否 —— 两者正交）。</summary>
         internal override bool ExcludeFromPageHoverDrive => _inPopupTree;
 
+        /// <summary>popup 树按钮（缩放预设浮层 8 颗、操作指南按钮）跳过视觉树遍历、直接用软件主题源：
+        /// 该树的 <c>FlyoutPresenter</c> 挂着 WinUI 自己镜像的 <c>RequestedTheme</c>，它<b>滞后于</b> app 主题
+        /// （10-09 日志实证：app 已深色、<c>FlyoutPresenter</c> 仍报 Light）⇒ 遍历会取到浅色档 #FFFFFFFF，
+        /// 深色下按钮整体变白、鼠标掠过才恢复。判据与 <see cref="ExcludeFromPageHoverDrive"/> 同源（皆 popup 树）。</summary>
+        protected override bool UseAppThemeSourceOnly => _inPopupTree;
+
         /// <summary>浮层强清：仅 transparentAtRest 项才清 hover，避免误清正常功能按钮。</summary>
         protected override void ClearTransparentHoverIfAny()
         {
