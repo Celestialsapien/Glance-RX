@@ -2226,7 +2226,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         LineJoin = Microsoft.Graphics.Canvas.Geometry.CanvasLineJoin.Round,
     };
 
-    /// <summary>设置"页点坐标(DIP) → 屏幕"的变换矩阵。入参 ds 通常为恒等变换的会话。</summary>
+    /// <summary>设置"页点坐标(DIP) → 屏幕"的变换矩阵。
+    /// 【必须以绝对值覆盖，不可与旧变换复合】：同一会话/渲染目标内会连续绘制多页（每页各调一次），
+    /// 若写成 <c>m * ds.Transform</c>，第二页的矩阵会叠加第一页的矩阵 → 该页笔画被二次缩放/平移，
+    /// 表现为「跨页笔画随另一页出现而错位、飞页、缩放错乱」（只在滚动触发整层重建、多页同会话绘制时暴露）。</summary>
     private void ApplyPageTransform(CanvasDrawingSession ds, Rect dest, double z)
     {
         int rot = _rotation;
@@ -2243,14 +2246,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             (float)Math.Round(cy - h / 2.0));
         float s = (float)(z * 96.0 / 72.0); // 页点 → 屏幕像素
 
-        var old = ds.Transform;
+        // 直接以绝对值覆盖会话变换（会话基变换恒为恒等）：多页顺序绘制时互不影响。
         // System.Numerics 是行向量约定（v·M，左矩阵先作用）：页点先 ×s 缩放，再平移到
         // dest 原点，最后绕 dest 中心补旋转 —— 与内核底图绘制 DrawPreviewScene 的放置规则完全一致。
         // 注意勿写成 Translation*Scale：那会把 unrotOrigin 也乘 s，标注随缩放漂移。
         var m = Matrix3x2.CreateScale(s) * Matrix3x2.CreateTranslation(unrotOrigin);
         if (rot != 0)
             m *= Matrix3x2.CreateRotation((float)(rot * Math.PI / 180.0), new Vector2(cx, cy));
-        ds.Transform = m * old;
+        ds.Transform = m;
     }
 
     /// <summary>绘制单条笔画（当前会话须已施加正确的页变换）。几何已缓存则零分配。</summary>
