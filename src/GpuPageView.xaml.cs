@@ -104,6 +104,40 @@ public sealed class GpuAnnotationPointerArgs
 }
 
 /// <summary>
+/// 白板（Canvas 模式）交互事件参数：坐标一律为【页局部未旋转 PDF 点】，与节点存储坐标同源。
+/// 仅按需填字段（拖动/新建填 X/Y，编辑填 Text，删除/编辑仅用 Id）。
+/// </summary>
+public sealed class CanvasNodeEventArgs : EventArgs
+{
+    public string NodeId { get; init; } = "";
+    public int PageIndex { get; init; } = -1;
+    public double X { get; init; }
+    public double Y { get; init; }
+    /// <summary>拖动开始时的原始位置（仅拖动完成事件填充），供 MainPage 组装移动撤销记录。</summary>
+    public double OrigX { get; init; }
+    public double OrigY { get; init; }
+    public string? Text { get; init; }
+    /// <summary>卡片尺寸（仅缩放事件填充，页局部 PDF 点）。</summary>
+    public double Width { get; init; }
+    public double Height { get; init; }
+    /// <summary>缩放前的原始位置与尺寸（仅缩放完成事件填充，供 MainPage 组装撤销记录）。</summary>
+    public double OrigWidth { get; init; }
+    public double OrigHeight { get; init; }
+    /// <summary>连线起始边 top/bottom/left/right（仅连线请求事件填充）。</summary>
+    public string FromSide { get; init; } = "";
+    /// <summary>连线目标节点 id（仅连线请求事件填充）。</summary>
+    public string TargetNodeId { get; init; } = "";
+    /// <summary>连线目标吸附边 top/bottom/left/right（仅连线请求事件填充）。</summary>
+    public string ToSide { get; init; } = "";
+    /// <summary>连线 id（仅连线删除/样式事件填充）。</summary>
+    public string EdgeId { get; init; } = "";
+    /// <summary>箭头样式 none/single/both（仅连线样式事件填充；null = 不变更箭头）。</summary>
+    public string? ArrowStyle { get; init; }
+    /// <summary>连线颜色 "#RRGGBB"（仅连线样式事件填充；null = 不变更颜色；空串 = 恢复默认色）。</summary>
+    public string? EdgeColor { get; init; }
+}
+
+/// <summary>
 /// GPU 阅读器（Phase 2.3：视口画布架构 —— 内存硬上限）。
 ///
 /// 之前"整文档一块 CanvasVirtualControl"的教训：虚拟表面对画过的分块只标脏、不释放分配，
@@ -1423,6 +1457,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             return;
         }
 
+        // 白板：选中态 / 编辑态下指针停在"内容溢出的卡片"上 → 滚轮滚【卡片内容】而非翻页
+        // （阅读态不响应；Shift 保留给交叉轴翻页；Ctrl 已在上面被缩放分支吃掉）。
+        if (CanvasInputActive &&
+            (e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) == 0 &&
+            TryScrollCanvasByWheel(e.GetCurrentPoint(Viewer).Position, delta))
+        {
+            e.Handled = true;
+            return;
+        }
+
         // 普通滚轮 → 并入滚动弹簧目标；缩放动画进行中先停掉。
         if (_isSmoothZooming) StopSmoothZoom();
 
@@ -2007,6 +2051,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             if (_annotationsVisible == value) return;
             _annotationsVisible = value;
+            // G 键隐藏白板层时，选中框/浮动控件/编辑框必须一起收起：否则卡片看不见了，
+            // 浮层还挂在"空气"上，点编辑还能弹出输入框 —— 显隐语义冲突。
+            if (!value) HideCanvasInteraction();
             InvalidateOverlay();
         }
     }
@@ -2232,6 +2279,66 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 表现为「跨页笔画随另一页出现而错位、飞页、缩放错乱」（只在滚动触发整层重建、多页同会话绘制时暴露）。</summary>
     private void ApplyPageTransform(CanvasDrawingSession ds, Rect dest, double z)
     {
+        ds.Transform = MakePageXform(dest, z).ToMatrix();
+    }
+
+    /// <summary>「页局部坐标（PDF 点）→ 屏幕坐标」的一次性变换。卡片用它整体作为会话变换，
+    /// 白板连线用它的 <see cref="PageXform.Map"/> 逐点换算端点/控制点 ——
+    /// 二者必须同源，否则连线端点会与卡片脱节（尤其旋转/缩放时）。</summary>
+    private readonly struct PageXform
+    {
+        public readonly float S;          // 页点 → 屏幕像素
+        public readonly Vector2 Origin;   // 未旋转页左上原点（已取整到设备像素）
+        public readonly float Cx, Cy;     // 旋转枢轴 = dest 中心
+        public readonly float RotRad;
+        public readonly bool HasRot;
+
+        public PageXform(float s, Vector2 origin, float cx, float cy, float rotRad, bool hasRot)
+        {
+            S = s; Origin = origin; Cx = cx; Cy = cy; RotRad = rotRad; HasRot = hasRot;
+        }
+
+        /// <summary>页局部 PDF 点 → 屏幕坐标（DIP）。</summary>
+        public Vector2 Map(double px, double py)
+        {
+            var v = new Vector2((float)(px * S) + Origin.X, (float)(py * S) + Origin.Y);
+            return HasRot ? Rotate(v) : v;
+        }
+
+        /// <summary>页局部方向 → 屏幕方向（仅旋转、保长度）。传单位向量即得单位向量。
+        /// ⚠ 方向向量须绕【原点】旋转，绝不可复用 <see cref="Rotate"/>（那是绕页心转点，
+        /// 会把单位向量减去页心坐标后变成上千像素的巨向量，控制点被推出屏幕）。</summary>
+        public Vector2 MapDirection(double dx, double dy)
+        {
+            if (!HasRot) return new Vector2((float)dx, (float)dy);
+            float cos = MathF.Cos(RotRad), sin = MathF.Sin(RotRad);
+            return new Vector2(
+                (float)(dx * cos - dy * sin),
+                (float)(dx * sin + dy * cos));
+        }
+
+        private Vector2 Rotate(Vector2 v)
+        {
+            float cos = MathF.Cos(RotRad), sin = MathF.Sin(RotRad);
+            float dx = v.X - Cx, dy = v.Y - Cy;
+            return new Vector2(Cx + dx * cos - dy * sin, Cy + dx * sin + dy * cos);
+        }
+
+        public Matrix3x2 ToMatrix()
+        {
+            // 直接以绝对值覆盖会话变换（会话基变换恒为恒等）：多页顺序绘制时互不影响。
+            // System.Numerics 是行向量约定（v·M，左矩阵先作用）：页点先 ×s 缩放，再平移到
+            // dest 原点，最后绕 dest 中心补旋转 —— 与内核底图绘制 DrawPreviewScene 的放置规则完全一致。
+            // 注意勿写成 Translation*Scale：那会把 Origin 也乘 s，几何随缩放漂移。
+            var m = Matrix3x2.CreateScale(S) * Matrix3x2.CreateTranslation(Origin);
+            if (HasRot)
+                m *= Matrix3x2.CreateRotation(RotRad, new Vector2(Cx, Cy));
+            return m;
+        }
+    }
+
+    private PageXform MakePageXform(Rect dest, double z)
+    {
         int rot = _rotation;
         bool swap = rot == 90 || rot == 270;
         double w = swap ? dest.Height : dest.Width;   // 未旋转屏幕宽高
@@ -2245,15 +2352,20 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             (float)Math.Round(cx - w / 2.0),
             (float)Math.Round(cy - h / 2.0));
         float s = (float)(z * 96.0 / 72.0); // 页点 → 屏幕像素
+        return new PageXform(s, unrotOrigin, cx, cy, (float)(rot * Math.PI / 180.0), rot != 0);
+    }
 
-        // 直接以绝对值覆盖会话变换（会话基变换恒为恒等）：多页顺序绘制时互不影响。
-        // System.Numerics 是行向量约定（v·M，左矩阵先作用）：页点先 ×s 缩放，再平移到
-        // dest 原点，最后绕 dest 中心补旋转 —— 与内核底图绘制 DrawPreviewScene 的放置规则完全一致。
-        // 注意勿写成 Translation*Scale：那会把 unrotOrigin 也乘 s，标注随缩放漂移。
-        var m = Matrix3x2.CreateScale(s) * Matrix3x2.CreateTranslation(unrotOrigin);
-        if (rot != 0)
-            m *= Matrix3x2.CreateRotation((float)(rot * Math.PI / 180.0), new Vector2(cx, cy));
-        ds.Transform = m;
+    /// <summary>某页在当前视图下的屏幕目标矩形（DIP，含居中补偿）。卡片/连线/手柄定位共用同一算法，
+    /// 保证三者同源对齐；旧实现把该算法内联在绘制与命中两处，易漂移。</summary>
+    private Rect ComputePageDest(int pageIdx, double z, double hOff, double vOff)
+    {
+        double vpW = _vpW, vpH = _vpH;
+        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
+        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
+        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        var lr = _pages[pageIdx].LayoutRect;
+        return new Rect(centerX + lr.X * z - hOff, centerY + lr.Y * z - vOff,
+            lr.Width * z, lr.Height * z);
     }
 
     /// <summary>绘制单条笔画（当前会话须已施加正确的页变换）。几何已缓存则零分配。</summary>
@@ -2525,6 +2637,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 阻断它零视觉丢失）。阻断器无逻辑、不会与 Viewer 上的逻辑处理器重复处理。
         Viewer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelChanged), true);
         Spacer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelBlocker), true);
+        // 编辑态专用通道：TextBox 会把 PointerPressed 标记 Handled ⇒ Viewer_PointerPressed 收不到，
+        // 于是"编辑态拖滚动条 / 拖四角缩放 / 从四边中点拉连线"全都无法开始。
+        // 用 handledEventsToo=true 在编辑框上补一个处理器，只在命中滚动条或卡片手柄时接管，其余不干预文本编辑。
+        CanvasEditBox.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler(OnCanvasEditBoxPointerPressed), true);
+        // 编辑态滚动条：它在编辑框之上且【可命中】，指针落在条上时不会传给 TextBox
+        // ⇒ ① 能开始拖动 ② 鼠标显示为箭头（而不是文本框的工字光标）。
+        CanvasEditScrollBar.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler(OnCanvasEditScrollBarPointerPressed), true);
         // 关键：手势指针事件订阅在控件自身（this），而非内部 Viewer。
         this.PointerPressed += Viewer_PointerPressed;
         this.PointerMoved += Viewer_PointerMoved;
@@ -2590,11 +2711,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             _gapColor = Windows.UI.Color.FromArgb(255, 32, 32, 32);          // #202020 = SolidBackgroundFillColorBase(Dark)
             _placeholderColor = Windows.UI.Color.FromArgb(255, 42, 42, 42);  // 比背景略亮，暗示页面轮廓，降低白图落地的亮度落差
+            _canvasAccentColor = CanvasAccentDark;                           // 白板强调色：深色档 #A882FF
         }
         else
         {
             _gapColor = Windows.UI.Color.FromArgb(255, 243, 243, 243);       // #F3F3F3 = SolidBackgroundFillColorBase(Light)
             _placeholderColor = Windows.UI.Color.FromArgb(255, 249, 249, 249); // 接近纸面的柔和灰白
+            _canvasAccentColor = CanvasAccentLight;                          // 白板强调色：浅色档 #9873F7
         }
 
         // RootGrid 背景：显式写入主题色，替代 ThemeResource(SolidBackgroundFillColorBaseBrush)，
@@ -3239,6 +3362,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _annoLayer?.Dispose();
         _annoLayer = null;
         _annoLayerNeedsFullRebuild = true;
+        // 白板卡片的文本排版同样绑定该设备：全部作废，下一帧按需重建。
+        foreach (var kv in _canvasTextCache)
+            kv.Value.Layout?.Dispose();
+        _canvasTextCache.Clear();
+        _canvasTextFormat = null;
         // 设备就绪：重新排队可见页瓦片。
         // 修复首开概率性白屏：LoadAsync 排队时若设备未就绪，构建会因设备快照为 null 而退出；
         // 此前 CreateResources 只清不排 → 画面一直空白，直到用户点击触发 ViewChanged。
@@ -3324,6 +3452,2191 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
         }
         if (zoom <= 0) zoom = 1.0;
+    }
+
+    // =====================================================================
+    // 白板层（Canvas 模式）：卡片 + 连线
+    //   · 节点存【页局部未旋转 PDF 点】（与画笔同一坐标空间），跟随页面旋转/缩放；
+    //   · 连线端点在【文档坐标】比较选边，在【屏幕坐标】绘制，跨页与布局重排自动重算；
+    //   · 与页位图/标注绘于【同一交换链】（原子合成），避免双画布相位脱节。
+    // =====================================================================
+
+    private readonly object _canvasLock = new();
+    private CanvasNode[] _canvasNodes = Array.Empty<CanvasNode>();
+    private CanvasEdge[] _canvasEdges = Array.Empty<CanvasEdge>();
+    private Dictionary<string, CanvasNode> _canvasIndex = new(StringComparer.Ordinal);
+
+    private CanvasTextFormat? _canvasTextFormat;
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<CanvasNode, CachedCanvasText>
+        _canvasTextCache = new();
+
+    private const float CanvasCardRadius = 8f;
+    private const float CanvasCardPadX = 10f;       // 卡片左/右内边距（页局部 PDF 点）
+    private const float CanvasCardPadY = 0f;        // 卡片上/下内边距（页局部 PDF 点）—— 对齐 Obsidian：上下完全不留空
+    // 卡片内滚动条（阅读/选中/编辑三态统一，由 Win2D 绘制）：
+    // 位置贴右边缘，但四边都与卡片边框留出间隙 —— 不侵入边框、也不与边框视觉相交。
+    private const float CanvasScrollBarWidth = 8f;    // 条宽（页局部）；比早期 6 略粗，便于后续做拖动交互
+    private const float CanvasScrollBarGap = 2f;      // 条与卡片边框之间的间隙（页局部）
+    private const float CanvasScrollBarMinH = 20f;    // 条最小长度（页局部）
+    private const float CanvasScrollBarHitTol = 3f;   // 滚动条命中容差（屏幕 DIP）：只在其矩形外扩一点点，
+                                                      // 避免把贴着卡片边框的缩放/连线手柄整体抢走
+    private static readonly Windows.UI.Color CanvasScrollBarColor = Windows.UI.Color.FromArgb(51, 0, 0, 0);   // 半透明黑（白卡片上呈灰）
+    // 单行行高（页局部 PDF 点）≈ 1.35 × 字号：用于 Obsidian 式"上方最多留半行"的垂直留白公式（常态与编辑态共用同一值）。
+    // ⚠ 只是【留白/滚动量估算用的标称值】；阅读态（Win2D）与编辑态（XAML）的实际行距由各自引擎决定，行距统一另案处理。
+    private const float CanvasLineHeight = CanvasCardFontSize * 1.35f;
+    private const float CanvasCardFontSize = 12f;   // 字号（页局部 PDF 点）
+    private const float CanvasCardStrokeWidth = 1.0f;
+    private const float CanvasCardSelectedStrokeWidth = 2.0f;  // 选中/悬停时边框加粗
+    private const float CanvasEdgeStrokeWidth = 1.6f;
+    private const float CanvasArrowLen = 9f;
+    private const float CanvasArrowHalfWidth = 3.6f;
+    private static readonly Windows.UI.Color CanvasCardFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
+    private static readonly Windows.UI.Color CanvasCardStroke = Windows.UI.Color.FromArgb(255, 138, 143, 152);
+    private static readonly Windows.UI.Color CanvasCardText = Windows.UI.Color.FromArgb(255, 32, 32, 34);
+    private static readonly Windows.UI.Color CanvasEdgeColor = Windows.UI.Color.FromArgb(255, 96, 102, 112);
+    // 连线悬停提示色（未选中、指针靠近时）。
+    private static readonly Windows.UI.Color CanvasEdgeHoverColor = Windows.UI.Color.FromArgb(255, 132, 166, 236);
+    // 连线命中半径（屏幕 DIP）：指针到贝塞尔曲线的距离阈值。
+    private const float CanvasEdgeHitThreshold = 6f;
+
+    // 强调色（选中边框 / 连线选中 / 手柄）：对齐 App.xaml 的 GlanceAccent（Obsidian 紫），
+    // 深浅主题各一档，由 UpdateThemeColors 按 ActualTheme 切换：深 #A882FF / 浅 #9873F7。
+    private static readonly Windows.UI.Color CanvasAccentDark = Windows.UI.Color.FromArgb(255, 0xA8, 0x82, 0xFF);
+    private static readonly Windows.UI.Color CanvasAccentLight = Windows.UI.Color.FromArgb(255, 0x98, 0x73, 0xF7);
+    private Windows.UI.Color _canvasAccentColor = CanvasAccentLight;
+
+    // 手柄（P3 连线 + P4 缩放）：四边中点=连线起点，四角=缩放。统一为【圆点】，
+    // 恒定屏幕尺寸（页局部半径 = 屏幕半径 ÷ 页缩放），且只显"指针最接近的那一个"。
+    private static readonly string[] CanvasSides = { "top", "bottom", "left", "right" };
+    private static readonly string[] CanvasCorners = { "tl", "tr", "bl", "br" };
+    private const double CanvasMinNodeWidth = 60;        // 缩放下限（页局部 PDF 点）
+    private const double CanvasMinNodeHeight = 40;
+    private static readonly Windows.UI.Color CanvasHandleFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
+    // 手柄尺寸一律用【页局部 PDF 点】（与卡片边框/圆角同一坐标空间）→ 随页面缩放一起放大/缩小，
+    // 与卡片边框保持固定比例。早期按"屏幕恒定 DIP"（÷ 页缩放 反算）实现，放大后控件反比边框细，已废弃。
+    private const float CanvasHandleRadius = 6.0f;        // 连线圆点半径（页局部 PDF 点）
+    private const float CanvasHandleHitRadius = 12.0f;    // 显形/命中半径（页局部 PDF 点）：指针靠近到该距离才显现且可选
+    private const float CanvasCornerGap = 3.0f;           // 四角弧边相对卡片圆角的外扩量（页局部 PDF 点）
+    // 四角弧边线宽直接复用 CanvasCardSelectedStrokeWidth(=2.0)，保证与选中边框同粗细。
+    // 新建卡片的默认尺寸见 CanvasNode.DefaultWidth / DefaultHeight（视图落点与模型建节点共用）。
+    private const double CanvasToolbarGap = 6;       // 浮动控件与卡片间距（视口 DIP）
+
+    /// <summary>卡片文本排版缓存（文本/可用宽度任一变化才重建；其余帧零重建）。</summary>
+    private sealed class CachedCanvasText
+    {
+        public string? Text;
+        public double MaxWidth;
+        public double MaxHeight;
+        public int LineCount;            // 真实行数（不限高，溢出行也计入）——滚动条显隐/长度用
+        public CanvasTextLayout? Layout; // IDisposable
+    }
+
+    /// <summary>安装/替换白板数据（UI 线程调用）。节点数组与 id 索引一起原子换入，绘制侧加锁读取。</summary>
+    public void SetCanvasData(IReadOnlyList<CanvasNode>? nodes, IReadOnlyList<CanvasEdge>? edges)
+    {
+        var n = CopyArray(nodes);
+        var e = CopyArray(edges);
+        var idx = new Dictionary<string, CanvasNode>(n.Length, StringComparer.Ordinal);
+        foreach (var node in n)
+            if (!string.IsNullOrEmpty(node.Id)) idx[node.Id] = node;
+        lock (_canvasLock) { _canvasNodes = n; _canvasEdges = e; _canvasIndex = idx; }
+
+        // 清掉已不存在卡片的滚动偏移（删卡/换文档后避免字典里留垃圾 key）。
+        if (_canvasScrollY.Count > 0)
+        {
+            var keys = new string[_canvasScrollY.Count];
+            _canvasScrollY.Keys.CopyTo(keys, 0);
+            foreach (var k in keys)
+                if (!idx.ContainsKey(k)) _canvasScrollY.Remove(k);
+        }
+
+        // 被删/被撤销掉的节点若正被选中或编辑 → 一并作废，避免浮层挂在空气上。
+        if (_selectedCanvasNodeId != null && !idx.ContainsKey(_selectedCanvasNodeId))
+        {
+            _selectedCanvasNodeId = null;
+            if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        }
+        if (_canvasEditNodeId != null && !idx.ContainsKey(_canvasEditNodeId))
+        {
+            _canvasEditNodeId = null;
+            if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
+        }
+        // 被删/被撤销掉的连线若正被选中或悬停 → 一并作废。
+        if (_selectedCanvasEdgeId != null && !ContainsEdge(e, _selectedCanvasEdgeId))
+        {
+            _selectedCanvasEdgeId = null;
+            if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        }
+        if (_hoverCanvasEdgeId != null && !ContainsEdge(e, _hoverCanvasEdgeId))
+            _hoverCanvasEdgeId = null;
+        if (_hoverCanvasNodeId != null && !idx.ContainsKey(_hoverCanvasNodeId))
+            _hoverCanvasNodeId = null;
+        // 撤销/重做可能改到【正在编辑】卡片的文本 → 同步编辑框内容并把光标移到末尾。
+        // 否则编辑框残留旧文本，用户失焦提交时会用旧文本覆盖掉刚撤销/重做的结果。
+        if (_canvasEditNodeId != null && CanvasEditBox != null &&
+            idx.TryGetValue(_canvasEditNodeId, out var editNode))
+        {
+            string t = editNode.Text ?? "";
+            if (!string.Equals(CanvasEditBox.Text, t, StringComparison.Ordinal))
+            {
+                CanvasEditBox.Text = t;
+                CanvasEditBox.SelectionStart = t.Length;
+            }
+            // 撤销/重做改到的文本即新的"已入史基线"，并撤销挂起中的去抖提交 ——
+            // 否则停顿 400ms 后会把刚撤销掉的文本当成一次新输入又提交回去。
+            _canvasLastCommittedText = t;
+            StopCanvasEditCommitTimer();
+        }
+        if (CanvasOverlay != null && _selectedCanvasNodeId == null && _canvasEditNodeId == null &&
+            _selectedCanvasEdgeId == null)
+            CanvasOverlay.Visibility = Visibility.Collapsed;
+
+        InvalidateOverlay();
+        RequestCanvasOverlaySync();
+    }
+
+    private static bool ContainsEdge(CanvasEdge[] edges, string id)
+    {
+        foreach (var e in edges)
+            if (string.Equals(e.Id, id, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    private static bool IsArrowEnd(string? end) =>
+        !string.IsNullOrEmpty(end) && !string.Equals(end, "none", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>解析 "#RRGGBB" / "#AARRGGBB" 颜色串；失败返回 null。</summary>
+    private static Windows.UI.Color? ParseCanvasColor(string? hex)
+    {
+        if (string.IsNullOrEmpty(hex)) return null;
+        string s = hex.TrimStart('#');
+        try
+        {
+            if (s.Length == 6)
+                return Windows.UI.Color.FromArgb(255,
+                    Convert.ToByte(s.Substring(0, 2), 16),
+                    Convert.ToByte(s.Substring(2, 2), 16),
+                    Convert.ToByte(s.Substring(4, 2), 16));
+            if (s.Length == 8)
+                return Windows.UI.Color.FromArgb(
+                    Convert.ToByte(s.Substring(0, 2), 16),
+                    Convert.ToByte(s.Substring(2, 2), 16),
+                    Convert.ToByte(s.Substring(4, 2), 16),
+                    Convert.ToByte(s.Substring(6, 2), 16));
+        }
+        catch { }
+        return null;
+    }
+
+    private static T[] CopyArray<T>(IReadOnlyList<T>? src)
+    {
+        if (src == null || src.Count == 0) return Array.Empty<T>();
+        var arr = new T[src.Count];
+        for (int i = 0; i < src.Count; i++) arr[i] = src[i];
+        return arr;
+    }
+
+    private bool HasCanvasContent()
+    {
+        lock (_canvasLock) return _canvasNodes.Length > 0 || _canvasEdges.Length > 0;
+    }
+
+    /// <summary>绘制整个白板层。visible 为本次帧的可见页（含 dest），卡片逐页复用页变换。</summary>
+    private void DrawWhiteboardLayer(CanvasDrawingSession ds, double z,
+        List<(GpuPageInfo Page, Rect Dest)> visible)
+    {
+        CanvasNode[] nodes;
+        CanvasEdge[] edges;
+        Dictionary<string, CanvasNode> index;
+        lock (_canvasLock)
+        {
+            nodes = _canvasNodes; edges = _canvasEdges; index = _canvasIndex;
+        }
+        if (nodes.Length == 0 && edges.Length == 0) return;
+
+        var pages = _pages;
+        var savedTransform = ds.Transform;
+
+        // ---- 卡片：逐可见页施加页变换，在页局部空间绘制（随页旋转/缩放）----
+        foreach (var (p, dest) in visible)
+        {
+            bool pageHasCard = false;
+            foreach (var node in nodes)
+                if (node.GlancePage == p.Index) { pageHasCard = true; break; }
+            if (!pageHasCard) continue;
+
+            var pageXf = MakePageXform(dest, z);
+            ds.Transform = pageXf.ToMatrix();
+            string? sel = _selectedCanvasNodeId;
+            string? hov = _hoverCanvasNodeId;
+            // 手势进行中（拖角缩放 / 拖边连线）：只有"正在操作的那张卡"参与手柄绘制 ——
+            // 被操作的控件恒定显示、不随指针漂移，其余卡片（含其他控件）一律不显示、不触发。
+            bool gesturing = _isCanvasResizing || _isCanvasConnecting;
+            string? gestureNodeId = _isCanvasResizing ? _canvasResizeNode?.Id
+                                 : (_isCanvasConnecting ? _connFromNodeId : null);
+            foreach (var node in nodes)
+            {
+                if (node.GlancePage != p.Index) continue;
+                bool selected = sel != null && node.Id == sel;
+                bool hovered = !selected && hov != null && node.Id == hov;
+
+                // 正在编辑的卡片：**本体**交给 XAML 编辑框【原位】呈现（同位置/尺寸/边框/配色，避免文字重影），
+                // 但**边框控件（手柄）照常显示** —— 与 Obsidian 一致：编辑态也能拖四角/四边缩放、从四边中点拉连线；
+                // 滚动条由 XAML 层画（画布会被编辑框遮住）。
+                if (node.Id == _canvasEditNodeId)
+                {
+                    if (gesturing ? node.Id == gestureNodeId : (selected || hovered))
+                        DrawNearestCanvasHandle(ds, node);
+                    continue;
+                }
+
+                // 强调（选中/悬停/正在操作）只作用于【卡片边框本身】。
+                DrawCanvasCard(ds, node, selected || hovered || (gesturing && node.Id == gestureNodeId));
+                DrawCanvasScrollBar(ds, node);
+                if (gesturing)
+                {
+                    if (node.Id == gestureNodeId) DrawNearestCanvasHandle(ds, node);
+                }
+                else if (selected || hovered)
+                {
+                    DrawNearestCanvasHandle(ds, node);
+                }
+            }
+            ds.Transform = savedTransform;
+        }
+
+        // ---- 连线：屏幕坐标绘制（端点/控制点各自经所属页的页变换映射）----
+        if (pages.Count > 0 && (edges.Length > 0 || _isCanvasConnecting))
+        {
+            GetViewState(out _, out double hOff, out double vOff);
+            Rect DestOf(int idx) => ComputePageDest(idx, z, hOff, vOff);
+            // 连线在屏幕坐标绘制：会话变换必须为恒等（卡片循环已还原，此处再兜底一次，防止
+            // 任何上游泄漏的页变换把端点/控制点二次映射 → 连线脱离卡片）。
+            ds.Transform = Matrix3x2.Identity;
+            if (edges.Length > 0)
+                DrawCanvasEdges(ds, z, pages, DestOf, index, edges);
+            if (_isCanvasConnecting)
+                DrawCanvasConnecting(ds);
+            ds.Transform = savedTransform;
+        }
+    }
+
+    /// <summary>画一张卡片。<paramref name="emphasized"/>=true（选中/悬停）时把【边框本身】换成强调色并加粗——
+    /// 不在卡片外另套一层描边（对齐 Obsidian：就是那根边框变色）。</summary>
+    private void DrawCanvasCard(CanvasDrawingSession ds, CanvasNode node, bool emphasized)
+    {
+        double w = Math.Max(12, node.Width);
+        double h = Math.Max(12, node.Height);
+        var rect = new Rect(node.X, node.Y, w, h);
+        ds.FillRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius, CanvasCardFill);
+        var strokeColor = emphasized ? _canvasAccentColor : CanvasCardStroke;
+        float strokeWidth = emphasized ? CanvasCardSelectedStrokeWidth : CanvasCardStrokeWidth;
+        ds.DrawRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius, strokeColor, strokeWidth);
+
+        if (string.IsNullOrEmpty(node.Text)) return;
+        double tw = w - 2 * CanvasCardPadX;
+        double th = h - 2 * CanvasCardPadY;
+        var layout = GetCanvasTextLayout(node, tw, th);
+        if (layout != null)
+        {
+            // Obsidian 式垂直留白：上方【最多留半行】——空间足够时留半行，不够就挤上去（可为 0）；
+            // 内容超出卡片（可滚动）时剩余为负 → 自然为 0。编辑态用同一公式（UpdateCanvasEditPad），进出编辑不跳。
+            // ⚠ 内容高必须用【不限高的真实行数】（缓存里那个），不能用 layout.LineCount —— 后者已被 maxH 截断，
+            //    溢出时会等于 th，导致"可滚动量恒为 0"、拖不动。
+            double realContentH = GetCachedCanvasLineCount(node, tw, th) * CanvasLineHeight;
+            double topPad = Math.Min(0.5 * CanvasLineHeight, Math.Max(0, (th - Math.Min(th, realContentH)) / 2.0));
+            // 非编辑态滚动：按本卡滚动偏移把文字整体上移（内容不足时 maxScroll=0，scrollY 恒 0）。
+            double maxScroll = Math.Max(0, realContentH - th);
+            double scrollY = Math.Clamp(GetCanvasScrollY(node.Id), 0, maxScroll);
+            // CanvasTextLayout 只排版、不裁剪，超长文本会画到卡片外 → 用图层 clip 兜在卡片内边距区域内。
+            var textRect = new Rect(node.X + CanvasCardPadX, node.Y + CanvasCardPadY, tw, th);
+            using (ds.CreateLayer(1f, textRect))
+            {
+                ds.DrawTextLayout(layout,
+                    new Vector2((float)textRect.X, (float)(textRect.Y + topPad - scrollY)), CanvasCardText);
+            }
+        }
+    }
+
+    /// <summary>卡片内滚动条的几何（页局部坐标）；返回是否应当显示，rect 为条的矩形。
+    /// **两条绘制路径共用**：阅读/选中态由 Win2D 画、编辑态由 XAML 层画 —— 该函数保证两者位置/尺寸/圆角口径完全一致。
+    /// 位置：贴右边缘，四边都与卡片边框留隙（不侵入边框、不与边框视觉相交）；长度按 可视高/内容高；位置按 scrollTravel。
+    /// ⚠ 返回的是【页局部坐标】（已含 node.X/node.Y）—— 页变换下的原点仍是页左上角，漏加卡片偏移会画到页原点。</summary>
+    private bool TryGetCanvasScrollBarRect(CanvasNode node, out Rect rect)
+    {
+        rect = default;
+        double w = Math.Max(12, node.Width);
+        double h = Math.Max(12, node.Height);
+
+        // 内容高 / 可视高 / 滚动比例：
+        // · 编辑态 → 直接读 TextBox 内部 ScrollViewer 的 ExtentHeight/ViewportHeight（比值精确、当帧）。
+        //   ⛔ 不要用"Win2D 量出的行数 × 行高"近似：两者换行点不同（字体度量/可用宽度/字距都有差），
+        //     行数会算错 ⇒ 表现为"输入到溢出时出现偏晚、删到不溢出了却迟迟不消失"。
+        // · 其余态 → 真实行数 × 行高 + 本卡内存滚动偏移（非编辑态卡片由 Win2D 绘制，滚动靠该偏移表现）。
+        var sv = _canvasEditScrollViewer;
+        double contentH, bodyH, travel;
+        if (node.Id == _canvasEditNodeId && sv != null && sv.ViewportHeight > 0)
+        {
+            contentH = sv.ExtentHeight;
+            bodyH = sv.ViewportHeight;
+            travel = sv.ScrollableHeight > 0 ? Math.Clamp(sv.VerticalOffset / sv.ScrollableHeight, 0, 1) : 0;
+        }
+        else
+        {
+            bodyH = Math.Max(8, h - 2 * CanvasCardPadY);
+            double contentW = Math.Max(1, w - 2 * CanvasCardPadX);
+            contentH = GetCachedCanvasLineCount(node, contentW, bodyH) * CanvasLineHeight;
+            travel = Math.Clamp(GetCanvasScrollY(node.Id) / Math.Max(0.0001, contentH - bodyH), 0, 1);
+        }
+        if (contentH <= bodyH + 0.5) return false;                      // 未溢出 → 不显示
+
+        double barW = CanvasScrollBarWidth;
+        double inset = CanvasCardSelectedStrokeWidth + CanvasScrollBarGap;
+        double trackTop = CanvasCardPadY + inset;
+        double trackH = (h - CanvasCardPadY - inset) - trackTop;
+        double barRight = w - inset;
+        if (trackH <= 4 || barRight - barW <= 0) return false;          // 卡片太小 → 放弃
+
+        double ratio = Math.Clamp(bodyH / contentH, 0.05, 1.0);
+        double barH = Math.Clamp(trackH * ratio, Math.Min(CanvasScrollBarMinH, trackH), trackH);
+        double x = node.X + barRight - barW;
+        double y = node.Y + trackTop + (trackH - barH) * travel;
+        rect = new Rect(x, y, barW, barH);
+        return true;
+    }
+
+    /// <summary>取卡片文本真实行数（走绘制期缓存）。顺带触发一次 layout 重建以确保缓存不过期。</summary>
+    private int GetCachedCanvasLineCount(CanvasNode node, double contentW, double boxH)
+    {
+        _ = GetCanvasTextLayout(node, contentW, Math.Max(1, boxH));
+        return _canvasTextCache.GetValue(node, _ => new CachedCanvasText()).LineCount;
+    }
+
+    /// <summary>编辑态下的指针按下（handledEventsToo 通道）。TextBox 会吃掉 PointerPressed，
+    /// 所以滚动条拖动 / 四角缩放 / 四边中点连线这三类"卡片控件"交互要在编辑态工作，必须在这里接管；
+    /// 其余情况【不处理】，交给 TextBox 正常定位光标与选择文本。</summary>
+    private void OnCanvasEditBoxPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        if (!e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed) return;
+        var p = e.GetCurrentPoint(Viewer).Position;
+        _canvasPointerPos = p;
+        _canvasPointerValid = true;
+        UpdateCanvasNodeHover(p);
+
+        // ① 滚动条拖动（编辑态也允许，与 Obsidian 一致；拖动期间的失焦由 CanvasEditBox_LostFocus 抑制）。
+        if (TryHitCanvasScrollBar(p, out var sbNode) && sbNode != null && sbNode.Id == _canvasEditNodeId)
+        {
+            StopSmoothZoom();
+            StopWheelScroll();
+            BeginCanvasScrollDrag(sbNode, p);
+            this.CapturePointer(e.Pointer);
+            e.Handled = true;
+            return;
+        }
+        // ② 四角缩放。
+        if (TryHitCanvasCorner(p, out var rNode, out var rCorner) &&
+            CanvasViewportToPage(p, out int rPage, out _, out _))
+        {
+            StopSmoothZoom();
+            StopWheelScroll();
+            BeginCanvasResize(rNode, rCorner, rPage);
+            this.CapturePointer(e.Pointer);
+            e.Handled = true;
+            return;
+        }
+        // ③ 四边中点拉连线。
+        if (TryHitCanvasHandle(p, out var hNode, out var hSide))
+        {
+            StopSmoothZoom();
+            StopWheelScroll();
+            CancelCanvasConnection();
+            BeginCanvasConnection(hNode, hSide, p);
+            this.CapturePointer(e.Pointer);
+            e.Handled = true;
+            return;
+        }
+        // 其余：不动，让 TextBox 照常处理（定位光标 / 选择）。
+    }
+
+    /// <summary>编辑态滚动条的指针按下：直接开始拖动。
+    /// 滚动条是可命中的 XAML 元素且在编辑框之上 ⇒ 指针在条上不会传给 TextBox（光标自然是箭头而非工字），
+    /// 拖动期间 TextBox 的失焦由 CanvasEditBox_LostFocus 抑制、松手后还焦点。</summary>
+    private void OnCanvasEditScrollBarPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var node = _canvasEditNodeRef;
+        if (_canvasEditNodeId == null || node == null) return;
+        if (!e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed) return;
+        var p = e.GetCurrentPoint(Viewer).Position;
+        _canvasPointerPos = p;
+        _canvasPointerValid = true;
+        StopSmoothZoom();
+        StopWheelScroll();
+        BeginCanvasScrollDrag(node, p);
+        this.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    /// <summary>视口坐标 → 命中某张卡的滚动条。命中区 = 滚动条矩形（页局部）外扩一点屏幕容差，
+    /// 只认【真的画了滚动条】的卡片（TryGetCanvasScrollBarRect 为准）⇒ 不会误抢边框手柄。</summary>
+    private bool TryHitCanvasScrollBar(Point vp, out CanvasNode? node)
+    {
+        node = null;
+        if (!_annotationsVisible) return false;
+        if (!CanvasViewportToPage(vp, out int pageIndex, out double px, out double py)) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        var xf = MakePageXform(ComputePageDest(pageIndex, z, hOff, vOff), z);
+        double tol = CanvasScrollBarHitTol / Math.Max(0.0001f, xf.S);   // 屏幕 DIP → 页局部
+
+        CanvasNode[] nodes;
+        lock (_canvasLock) nodes = _canvasNodes;
+        for (int i = nodes.Length - 1; i >= 0; i--)       // 取绘制顺序最上层者
+        {
+            var n = nodes[i];
+            if (n.GlancePage != pageIndex) continue;
+            if (n.Id == _canvasEditNodeId) continue;      // 编辑态滚动条在 XAML 层，不走这里
+            if (!TryGetCanvasScrollBarRect(n, out var r)) continue;
+            if (px >= r.X - tol && px <= r.X + r.Width + tol &&
+                py >= r.Y - tol && py <= r.Y + r.Height + tol)
+            {
+                node = n;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>滚动条轨道几何（页局部，与 TryGetCanvasScrollBarRect 同源）。</summary>
+    private static void GetCanvasScrollTrackGeom(CanvasNode node, out double trackTop, out double trackH)
+    {
+        double h = Math.Max(12, node.Height);
+        double inset = CanvasCardSelectedStrokeWidth + CanvasScrollBarGap;
+        trackTop = CanvasCardPadY + inset;
+        trackH = (h - CanvasCardPadY - inset) - trackTop;
+    }
+
+    /// <summary>开始拖动滚动条：记下按下点（页局部 Y）与起始偏移（编辑态取 TextBox 的，其余态取本卡内存偏移）。</summary>
+    private void BeginCanvasScrollDrag(CanvasNode node, Point vp)
+    {
+        if (!CanvasViewportToPage(vp, out _, out _, out double py)) return;
+        _isCanvasScrollDragging = true;
+        _canvasScrollDragNodeId = node.Id;
+        _canvasScrollDragStartPointerY = py;
+        _canvasScrollDragStartScrollY = node.Id == _canvasEditNodeId
+            ? (_canvasEditScrollViewer?.VerticalOffset ?? 0)
+            : GetCanvasScrollY(node.Id);
+    }
+
+    /// <summary>拖动中：把指针位移按「轨道可移动长度 : 可滚动量」线性映射成滚动偏移变化。
+    /// 编辑态驱动 TextBox 内部的 ScrollViewer，其余态驱动本卡内存偏移。</summary>
+    private void UpdateCanvasScrollDrag(Point vp)
+    {
+        var id = _canvasScrollDragNodeId;
+        if (id == null) return;
+        CanvasNode? node = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(id, out node);
+        if (node == null) return;
+        if (!CanvasViewportToPage(vp, out _, out _, out double py)) return;
+        double delta = py - _canvasScrollDragStartPointerY;
+
+        // 编辑态：直接驱动 TextBox 内部 ScrollViewer（其 Extent/Viewport/Scrollable 就是滚动条长度与位置的口径）。
+        if (id == _canvasEditNodeId)
+        {
+            var sv = _canvasEditScrollViewer;
+            if (sv == null || sv.ScrollableHeight <= 0) return;
+            GetCanvasScrollTrackGeom(node, out _, out double th);
+            double bh = Math.Max(8, sv.ViewportHeight);
+            double ch = Math.Max(bh + 1, sv.ExtentHeight);
+            double bar = Math.Clamp(th * Math.Clamp(bh / ch, 0.05, 1.0), Math.Min(CanvasScrollBarMinH, th), th);
+            double movable = Math.Max(1, th - bar);
+            double next = Math.Clamp(_canvasScrollDragStartScrollY + delta * sv.ScrollableHeight / movable,
+                0, sv.ScrollableHeight);
+            sv.ChangeView(null, next, null, true);
+            return;
+        }
+
+        double h = Math.Max(12, node.Height);
+        double bodyH = Math.Max(8, h - 2 * CanvasCardPadY);
+        double contentW = Math.Max(1, Math.Max(12, node.Width) - 2 * CanvasCardPadX);
+        double contentH = GetCachedCanvasLineCount(node, contentW, bodyH) * CanvasLineHeight;
+        double maxScroll = Math.Max(0, contentH - bodyH);
+        if (maxScroll <= 0) return;
+
+        GetCanvasScrollTrackGeom(node, out _, out double trackH);
+        double barH = Math.Clamp(trackH * Math.Clamp(bodyH / contentH, 0.05, 1.0),
+            Math.Min(CanvasScrollBarMinH, trackH), trackH);
+        double movable2 = Math.Max(1, trackH - barH);
+
+        double newScroll = _canvasScrollDragStartScrollY + delta * maxScroll / movable2;
+        if (SetCanvasScrollY(id, newScroll, maxScroll))
+            InvalidateOverlayThrottled();
+    }
+
+    /// <summary>滚轮滚动卡片内容。**仅在【选中态 / 编辑态】且指针停在内容溢出的卡片上时消费**本次滚轮；
+    /// 阅读态（未选中）返回 false ⇒ 照常翻页 —— 与 Obsidian 一致。
+    /// wheelDelta 用 WinUI 的 MouseWheelDelta（+120 = 远离用户/上滚 ⇒ 内容下移 ⇒ 偏移减小）。</summary>
+    private bool TryScrollCanvasByWheel(Point vp, double wheelDelta)
+    {
+        if (!_annotationsVisible || wheelDelta == 0) return false;
+        if (!CanvasViewportToPage(vp, out int pageIndex, out double px, out double py)) return false;
+
+        CanvasNode? hit = null;
+        CanvasNode[] nodes;
+        lock (_canvasLock) nodes = _canvasNodes;
+        for (int i = nodes.Length - 1; i >= 0; i--)
+        {
+            var n = nodes[i];
+            if (n.GlancePage != pageIndex) continue;
+            if (px >= n.X && px <= n.X + n.Width && py >= n.Y && py <= n.Y + n.Height) { hit = n; break; }
+        }
+        if (hit == null) return false;
+
+        bool editing = hit.Id == _canvasEditNodeId;
+        // 权限：编辑态恒可滚；非编辑态只有【选中卡】可滚（阅读态点它只选中、不滚动）。
+        if (!editing && hit.Id != _selectedCanvasNodeId) return false;
+
+        double step = CanvasLineHeight * 3;      // 一格滚轮 = 3 行
+        if (editing)
+        {
+            var sv = _canvasEditScrollViewer;
+            if (sv == null || sv.ScrollableHeight <= 0) return false;
+            double next = Math.Clamp(sv.VerticalOffset - wheelDelta / 120.0 * step, 0, sv.ScrollableHeight);
+            sv.ChangeView(null, next, null, true);   // 关闭动画：由 ViewChanged 刷新滚动条
+            return true;
+        }
+
+        double h = Math.Max(12, hit.Height);
+        double bodyH = Math.Max(8, h - 2 * CanvasCardPadY);
+        double contentW = Math.Max(1, Math.Max(12, hit.Width) - 2 * CanvasCardPadX);
+        double contentH = GetCachedCanvasLineCount(hit, contentW, bodyH) * CanvasLineHeight;
+        double maxScroll = Math.Max(0, contentH - bodyH);
+        if (maxScroll <= 0) return false;        // 未溢出 → 不消费，交给页面翻页
+        if (SetCanvasScrollY(hit.Id, GetCanvasScrollY(hit.Id) - wheelDelta / 120.0 * step, maxScroll))
+            InvalidateOverlayThrottled();
+        return true;
+    }
+
+    /// <summary>Win2D 侧绘制滚动条 —— 用于【阅读态 / 选中态】（这两种状态下卡片本体就是 Win2D 画的，
+    /// 没有 XAML 元素遮挡）。纯视觉层、不参与命中，故不影响卡片边框/手柄的交互。
+    /// ⚠ 编辑态不走这里：编辑框是不透明白底且盖在画布之上，会把画布内容整体遮住 ⇒ 编辑态必须用 XAML 滚动条
+    /// （见 UpdateCanvasEditScrollBar）。</summary>
+    private void DrawCanvasScrollBar(CanvasDrawingSession ds, CanvasNode node)
+    {
+        if (node.Id == _canvasEditNodeId) return;    // 编辑态由 XAML 层负责（画布会被编辑框遮住）
+        if (!TryGetCanvasScrollBarRect(node, out var rect)) return;
+        float r = (float)(rect.Width / 2);
+        ds.FillRoundedRectangle(rect, r, r, CanvasScrollBarColor);
+    }
+
+    /// <summary>编辑态滚动条（XAML 层，盖在编辑框之上）：几何取共用函数，位置用页变换矩阵摆放，
+    /// 滚动偏移取自 TextBox 内部 ScrollViewer。内容不溢出则不显示。</summary>
+    private void UpdateCanvasEditScrollBar()
+    {
+        if (CanvasEditScrollBar == null) return;
+        var node = _canvasEditNodeRef;
+        if (node == null || _canvasEditNodeId == null)
+        {
+            CanvasEditScrollBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+        // 签名缓存：本函数会被 LayoutUpdated 每帧调用，签名（文本长度 + 卡片尺寸 + 滚动偏移）没变就直接返回，
+        // 避免每帧重建 CanvasTextLayout（MeasureCanvasLineCount 的开销）。
+        string sig = $"{CanvasEditBox.Text?.Length ?? 0}|{node.Width:F1}|{node.Height:F1}|{_canvasEditScrollViewer?.VerticalOffset ?? 0:F1}";
+        if (sig == _canvasEditScrollBarSig) return;
+        _canvasEditScrollBarSig = sig;
+
+        if (!TryGetCanvasScrollBarRect(node, out var rect))
+        {
+            CanvasEditScrollBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var mBase = _canvasEditPageXf.ToMatrix();
+        var p = _canvasEditPageXf.Map(rect.X, rect.Y);
+        CanvasEditScrollBar.Width = rect.Width;
+        CanvasEditScrollBar.Height = rect.Height;
+        CanvasEditScrollBar.CornerRadius = new CornerRadius(rect.Width / 2);
+        CanvasEditScrollBar.Background = new SolidColorBrush(CanvasScrollBarColor);
+        CanvasEditScrollBar.Margin = new Thickness(0);
+        CanvasEditScrollBar.RenderTransform = new MatrixTransform
+        {
+            Matrix = new Matrix
+            {
+                M11 = mBase.M11, M12 = mBase.M12, M21 = mBase.M21, M22 = mBase.M22,
+                OffsetX = p.X, OffsetY = p.Y,
+            }
+        };
+        CanvasEditScrollBar.Visibility = Visibility.Visible;
+    }
+
+    private CanvasTextLayout? GetCanvasTextLayout(CanvasNode node, double maxW, double maxH)
+    {
+        if (maxW <= 0 || maxH <= 0 || string.IsNullOrEmpty(node.Text)) return null;
+        var cache = _canvasTextCache.GetValue(node, _ => new CachedCanvasText());
+        if (cache.Layout != null && cache.Text == node.Text &&
+            Math.Abs(cache.MaxWidth - maxW) < 0.5 && Math.Abs(cache.MaxHeight - maxH) < 0.5)
+            return cache.Layout;
+
+        cache.Layout?.Dispose();
+        _canvasTextFormat ??= CreateCanvasTextFormat();
+        cache.Layout = new CanvasTextLayout(ScreenCanvas, node.Text, _canvasTextFormat, (float)maxW, (float)maxH);
+        // 顺带缓存【真实行数】：用高度不限的 layout 量，溢出的行也计入 —— 滚动条的显隐与长度要用它。
+        // 放在这里可复用同一套"文本或宽度变了才重算"的失效判据，避免每帧重建 layout。
+        try
+        {
+            using var full = new CanvasTextLayout(ScreenCanvas, node.Text, _canvasTextFormat, (float)maxW, 1e5f);
+            cache.LineCount = Math.Max(1, full.LineCount);
+        }
+        catch { cache.LineCount = 1; }
+        cache.Text = node.Text;
+        cache.MaxWidth = maxW;
+        cache.MaxHeight = maxH;
+        return cache.Layout;
+    }
+
+    private void DrawCanvasEdges(CanvasDrawingSession ds, double z,
+        IReadOnlyList<GpuPageInfo> pages, Func<int, Rect> destOf,
+        Dictionary<string, CanvasNode> index, CanvasEdge[] edges)
+    {
+        string? selEdge = _selectedCanvasEdgeId;
+        string? hovEdge = _hoverCanvasEdgeId;
+        foreach (var edge in edges)
+        {
+            if (!ComputeEdgeScreenGeometry(edge, pages, destOf, index, z,
+                    out var a1, out var c1, out var c2, out var a2))
+                continue;
+
+            // 可见段裁剪：跨页连线两端可能都在视口外（如从第 1 页连到第 20 页，用户在第 10 页阅读）。
+            // 用 {a1,c1,c2,a2} 的包围盒做保守剔除 —— 曲线必落在该盒内，盒与视口不相交 ⇒ 整条不可见。
+            // 只跳过多余的 PathBuilder/Geometry 构建与绘制，视觉结果不变。
+            float bbMinX = MathF.Min(MathF.Min(a1.X, a2.X), MathF.Min(c1.X, c2.X));
+            float bbMaxX = MathF.Max(MathF.Max(a1.X, a2.X), MathF.Max(c1.X, c2.X));
+            float bbMinY = MathF.Min(MathF.Min(a1.Y, a2.Y), MathF.Min(c1.Y, c2.Y));
+            float bbMaxY = MathF.Max(MathF.Max(a1.Y, a2.Y), MathF.Max(c1.Y, c2.Y));
+            const float edgeCullMargin = 48f;   // 容纳线宽/箭头头部的少量外扩
+            if (bbMaxX < -edgeCullMargin || bbMinX > _vpW + edgeCullMargin ||
+                bbMaxY < -edgeCullMargin || bbMinY > _vpH + edgeCullMargin)
+                continue;
+
+            // 选中/悬停强调：加粗 + 强调色（选中优先于悬停）。
+            bool selected = edge.Id == selEdge;
+            bool hovered = !selected && edge.Id == hovEdge;
+            var color = selected
+                ? _canvasAccentColor
+                : (hovered ? CanvasEdgeHoverColor : (ParseCanvasColor(edge.Color) ?? CanvasEdgeColor));
+            float width = selected ? CanvasEdgeStrokeWidth + 1.2f
+                : (hovered ? CanvasEdgeStrokeWidth + 0.6f : CanvasEdgeStrokeWidth);
+
+            using (var geo = BuildBezier(a1, c1, c2, a2))
+            {
+                if (geo != null) ds.DrawGeometry(geo, color, width);
+            }
+            if (IsArrowEnd(edge.ToEnd))
+                DrawArrowHead(ds, c2, a2, color);
+            if (IsArrowEnd(edge.FromEnd))
+                DrawArrowHead(ds, c1, a1, color);
+        }
+    }
+
+    /// <summary>计算一条连线在屏幕空间的几何（端点 + 控制点）。命中测试与渲染共用同一套算法，
+    /// 保证"看得到就能点到"。边名/页变换与旧版 DrawCanvasEdges 完全一致。</summary>
+    private bool ComputeEdgeScreenGeometry(CanvasEdge edge, IReadOnlyList<GpuPageInfo> pages,
+        Func<int, Rect> destOf, Dictionary<string, CanvasNode> index, double z,
+        out Vector2 a1, out Vector2 c1, out Vector2 c2, out Vector2 a2)
+    {
+        a1 = c1 = c2 = a2 = default;
+        if (!index.TryGetValue(edge.FromNode, out var fn)) return false;
+        if (!index.TryGetValue(edge.ToNode, out var tn)) return false;
+        if (fn.GlancePage < 0 || fn.GlancePage >= pages.Count) return false;
+        if (tn.GlancePage < 0 || tn.GlancePage >= pages.Count) return false;
+
+        var fPage = pages[fn.GlancePage];
+        var tPage = pages[tn.GlancePage];
+
+        // 文档坐标（未旋转）比较两张卡片中心 → 选边。页局部坐标系与文档坐标系轴向一致
+        // （旋转只在绘制时绕页中心叠加），故 side 名在两坐标系间通用。
+        double fcx = fPage.LayoutRect.X + fn.X + fn.Width / 2.0;
+        double fcy = fPage.LayoutRect.Y + fn.Y + fn.Height / 2.0;
+        double tcx = tPage.LayoutRect.X + tn.X + tn.Width / 2.0;
+        double tcy = tPage.LayoutRect.Y + tn.Y + tn.Height / 2.0;
+        string fSide = edge.FromSide ?? AutoSide(fcx, fcy, tcx, tcy, true);
+        string tSide = edge.ToSide ?? AutoSide(fcx, fcy, tcx, tcy, false);
+
+        var fxf = MakePageXform(destOf(fn.GlancePage), z);
+        var txf = MakePageXform(destOf(tn.GlancePage), z);
+
+        var fp = SideAnchor(fn, fSide);
+        var tp = SideAnchor(tn, tSide);
+        a1 = fxf.Map(fp.X, fp.Y);
+        a2 = txf.Map(tp.X, tp.Y);
+
+        // 控制点：沿各自出边法向（屏幕空间）外推，外推量随两端距离自适应。
+        float dist = Vector2.Distance(a1, a2);
+        float k = Math.Clamp(dist * 0.4f, 24f, 120f);
+        var n1 = fxf.MapDirection(SideNormal(fSide).X, SideNormal(fSide).Y);
+        var n2 = txf.MapDirection(SideNormal(tSide).X, SideNormal(tSide).Y);
+        c1 = a1 + n1 * k;
+        c2 = a2 + n2 * k;
+        return true;
+    }
+
+    /// <summary>三次贝塞尔取点。</summary>
+    private static Vector2 BezierPoint(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t)
+    {
+        float u = 1 - t;
+        float uu = u * u, tt = t * t;
+        return uu * u * p0 + 3 * uu * t * p1 + 3 * u * tt * p2 + tt * t * p3;
+    }
+
+    /// <summary>点到线段的最短距离。</summary>
+    private static float DistancePointSegment(Vector2 p, Vector2 a, Vector2 b)
+    {
+        var ab = b - a;
+        float len2 = ab.LengthSquared();
+        if (len2 < 1e-6f) return Vector2.Distance(p, a);
+        float t = Math.Clamp(Vector2.Dot(p - a, ab) / len2, 0f, 1f);
+        return Vector2.Distance(p, a + ab * t);
+    }
+
+    /// <summary>点到三次贝塞尔曲线的最短距离（采样折线近似，足够做命中判定）。</summary>
+    private static float DistanceToBezier(Vector2 p, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+    {
+        const int steps = 24;
+        float min = float.MaxValue;
+        Vector2 prev = p0;
+        for (int i = 1; i <= steps; i++)
+        {
+            Vector2 cur = BezierPoint(p0, p1, p2, p3, (float)i / steps);
+            min = MathF.Min(min, DistancePointSegment(p, prev, cur));
+            prev = cur;
+        }
+        return min;
+    }
+
+    /// <summary>视口坐标 → 命中的连线 id（取屏幕距离最近且在阈值内者）。</summary>
+    private bool TryHitCanvasEdge(Point vp, out string edgeId)
+    {
+        edgeId = "";
+        if (!_annotationsVisible) return false;
+        var pages = _pages;
+        if (pages.Count == 0) return false;
+        CanvasEdge[] edges;
+        Dictionary<string, CanvasNode> index;
+        lock (_canvasLock) { edges = _canvasEdges; index = _canvasIndex; }
+        if (edges.Length == 0) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        Rect DestOf(int idx) => ComputePageDest(idx, z, hOff, vOff);
+
+        var p = new Vector2((float)vp.X, (float)vp.Y);
+        float best = CanvasEdgeHitThreshold;
+        string bestId = "";
+        // 逆序：后绘制者在上层，重叠时优先命中后绘制的那条。
+        for (int i = edges.Length - 1; i >= 0; i--)
+        {
+            var edge = edges[i];
+            if (!ComputeEdgeScreenGeometry(edge, pages, DestOf, index, z,
+                    out var a1, out var c1, out var c2, out var a2))
+                continue;
+            float d = DistanceToBezier(p, a1, c1, c2, a2);
+            if (d <= best) { best = d; bestId = edge.Id; }
+        }
+        if (bestId.Length == 0) return false;
+        edgeId = bestId;
+        return true;
+    }
+
+    /// <summary>选中连线在贝塞尔中点处的屏幕坐标（用于摆边工具栏）。</summary>
+    private bool TryGetCanvasEdgeMidpointScreen(string edgeId, out Vector2 mid)
+    {
+        mid = default;
+        var pages = _pages;
+        if (pages.Count == 0) return false;
+        CanvasEdge[] edges;
+        Dictionary<string, CanvasNode> index;
+        lock (_canvasLock) { edges = _canvasEdges; index = _canvasIndex; }
+        CanvasEdge? target = null;
+        foreach (var e in edges)
+            if (string.Equals(e.Id, edgeId, StringComparison.Ordinal)) { target = e; break; }
+        if (target == null) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        Rect DestOf(int idx) => ComputePageDest(idx, z, hOff, vOff);
+        if (!ComputeEdgeScreenGeometry(target, pages, DestOf, index, z,
+                out var a1, out var c1, out var c2, out var a2))
+            return false;
+        mid = BezierPoint(a1, c1, c2, a2, 0.5f);
+        return true;
+    }
+
+    /// <summary>无手势时的连线悬停高亮（指针靠近即变强调色）。</summary>
+    private void UpdateCanvasEdgeHover(Point vp)
+    {
+        string? hover = TryHitCanvasEdge(vp, out var id) ? id : null;
+        if (string.Equals(hover, _hoverCanvasEdgeId, StringComparison.Ordinal)) return;
+        _hoverCanvasEdgeId = hover;
+        InvalidateOverlayThrottled();
+    }
+
+    /// <summary>无手势时的卡片悬停判定：指针进入卡片（或其边缘手柄外扩区）即置 <see cref="_hoverCanvasNodeId"/>，
+    /// 渲染侧据此显出四边连线圆点/四角缩放块与淡描边；指针移开即清空。仅在状态变化时重绘。</summary>
+    private void UpdateCanvasNodeHover(Point vp)
+    {
+        string? hover = null;
+        if (_canvasInputActive && _annotationsVisible &&
+            TryHitCanvasNodeForHandles(vp, out var node) && node != null)
+            hover = node.Id;
+        if (string.Equals(hover, _hoverCanvasNodeId, StringComparison.Ordinal)) return;
+        _hoverCanvasNodeId = hover;
+        InvalidateOverlayThrottled();
+    }
+
+    /// <summary>命中"手柄可及"的卡片：卡片矩形在【页局部空间】外扩「手柄命中半径」（页局部点）后再测，
+    /// 使指针靠近卡片边缘（手柄所在处）即视为悬停该卡 —— 手柄因此能"指针一来就出现"，
+    /// 与 Obsidian 一致（悬停边缘即可直接拖连线/缩放，无需先单击）。取绘制顺序最上层者。</summary>
+    private bool TryHitCanvasNodeForHandles(Point vp, out CanvasNode? node)
+    {
+        node = null;
+        if (!CanvasViewportToPage(vp, out int pageIndex, out double px, out double py)) return false;
+        double margin = CanvasHandleHitRadius;
+        CanvasNode[] nodes;
+        lock (_canvasLock) nodes = _canvasNodes;
+        for (int i = nodes.Length - 1; i >= 0; i--)
+        {
+            var n = nodes[i];
+            if (n.GlancePage != pageIndex) continue;
+            if (px >= n.X - margin && px <= n.X + n.Width + margin &&
+                py >= n.Y - margin && py <= n.Y + n.Height + margin)
+            {
+                node = n;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>卡片某条边的中点（页局部 PDF 点）。</summary>
+    private static Vector2 SideAnchor(CanvasNode n, string side) => side switch
+    {
+        "top" => new Vector2((float)(n.X + n.Width / 2), (float)n.Y),
+        "bottom" => new Vector2((float)(n.X + n.Width / 2), (float)(n.Y + n.Height)),
+        "left" => new Vector2((float)n.X, (float)(n.Y + n.Height / 2)),
+        _ => new Vector2((float)(n.X + n.Width), (float)(n.Y + n.Height / 2)),
+    };
+
+    /// <summary>卡片某个角（页局部 PDF 点）。</summary>
+    private static Vector2 CornerAnchor(CanvasNode n, string corner)
+    {
+        double l = n.X, t = n.Y, r = n.X + n.Width, b = n.Y + n.Height;
+        return corner switch
+        {
+            "tl" => new Vector2((float)l, (float)t),
+            "tr" => new Vector2((float)r, (float)t),
+            "bl" => new Vector2((float)l, (float)b),
+            _ => new Vector2((float)r, (float)b),   // br
+        };
+    }
+
+    /// <summary>某条边的外法向（页局部，单位向量）。</summary>
+    private static Vector2 SideNormal(string side) => side switch
+    {
+        "top" => new Vector2(0, -1),
+        "bottom" => new Vector2(0, 1),
+        "left" => new Vector2(-1, 0),
+        _ => new Vector2(1, 0),
+    };
+
+    /// <summary>按两卡片中心的相对位置自动选边（主轴支配）。from=true 取出边，false 取入边。</summary>
+    private static string AutoSide(double fx, double fy, double tx, double ty, bool from)
+    {
+        double dx = tx - fx, dy = ty - fy;
+        bool horizontal = Math.Abs(dx) >= Math.Abs(dy);
+        if (from)
+            return horizontal ? (dx >= 0 ? "right" : "left") : (dy >= 0 ? "bottom" : "top");
+        return horizontal ? (dx >= 0 ? "left" : "right") : (dy >= 0 ? "top" : "bottom");
+    }
+
+    private Microsoft.Graphics.Canvas.Geometry.CanvasGeometry? BuildBezier(
+        Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3)
+    {
+        using var pb = new Microsoft.Graphics.Canvas.Geometry.CanvasPathBuilder(ScreenCanvas);
+        pb.BeginFigure(p0);
+        pb.AddCubicBezier(c1, c2, p3);
+        pb.EndFigure(Microsoft.Graphics.Canvas.Geometry.CanvasFigureLoop.Open);
+        return Microsoft.Graphics.Canvas.Geometry.CanvasGeometry.CreatePath(pb);
+    }
+
+    /// <summary>在 tip 处画指向 tip 的实心箭头（from → tip 为切线方向，屏幕坐标）。</summary>
+    private void DrawArrowHead(CanvasDrawingSession ds, Vector2 from, Vector2 tip)
+        => DrawArrowHead(ds, from, tip, CanvasEdgeColor);
+
+    /// <summary>同上的显式颜色重载（连线预览用强调色）。</summary>
+    private void DrawArrowHead(CanvasDrawingSession ds, Vector2 from, Vector2 tip, Windows.UI.Color color)
+    {
+        var dir = tip - from;
+        float len = dir.Length();
+        if (len < 1e-3f) return;
+        dir /= len;
+        var perp = new Vector2(-dir.Y, dir.X);
+        var baseC = tip - dir * CanvasArrowLen;
+        using var pb = new Microsoft.Graphics.Canvas.Geometry.CanvasPathBuilder(ScreenCanvas);
+        pb.BeginFigure(tip);
+        pb.AddLine(baseC + perp * CanvasArrowHalfWidth);
+        pb.AddLine(baseC - perp * CanvasArrowHalfWidth);
+        pb.EndFigure(Microsoft.Graphics.Canvas.Geometry.CanvasFigureLoop.Closed);
+        using var geo = Microsoft.Graphics.Canvas.Geometry.CanvasGeometry.CreatePath(pb);
+        ds.FillGeometry(geo, color);
+    }
+
+    /// <summary>只绘制【指针最接近】的那一个手柄：靠近某条边中点 → 连线圆点；靠近某个角 → 缩放弧边。
+    /// 其余位置一律不画，画面保持干净（对齐 Obsidian：选中不再全露 8 个点）。
+    /// 全部在页局部空间比较与绘制，尺寸即页局部 PDF 点 → 随页面缩放，与卡片边框保持固定比例。
+    /// 【手势进行中例外】：缩放/连线一旦开始，被操作的那一个控件【恒定显示】且与指针位置解耦
+    /// （指针移开不消失、移到别处也不会点亮其他控件）。</summary>
+    private void DrawNearestCanvasHandle(CanvasDrawingSession ds, CanvasNode node)
+    {
+        // 拖角缩放中：定格在开始时的那个角控件。
+        if (_isCanvasResizing)
+        {
+            if (_canvasResizeCorner.Length > 0) DrawCanvasCornerControl(ds, node, _canvasResizeCorner);
+            return;
+        }
+        // 拖边连线中：定格在开始时的那个边中点圆点。
+        if (_isCanvasConnecting)
+        {
+            if (_connFromSide.Length > 0) DrawCanvasSideHandle(ds, node, _connFromSide);
+            return;
+        }
+
+        if (!_canvasPointerValid) return;
+        if (!CanvasViewportToLockedPage(node.GlancePage, _canvasPointerPos, out double ppx, out double ppy))
+            return;
+
+        double pick = CanvasHandleHitRadius;
+        double bestD2 = double.MaxValue;
+        string bestSide = "";
+        string bestCorner = "";
+
+        foreach (var side in CanvasSides)
+        {
+            var a = SideAnchor(node, side);
+            double dx = a.X - ppx, dy = a.Y - ppy;
+            double d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) { bestD2 = d2; bestSide = side; bestCorner = ""; }
+        }
+        foreach (var corner in CanvasCorners)
+        {
+            var c = CornerAnchor(node, corner);
+            double dx = c.X - ppx, dy = c.Y - ppy;
+            double d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) { bestD2 = d2; bestCorner = corner; bestSide = ""; }
+        }
+        if (bestSide.Length == 0 && bestCorner.Length == 0) return;
+        if (bestD2 > pick * pick) return;
+
+        if (bestCorner.Length > 0) DrawCanvasCornerControl(ds, node, bestCorner);
+        else DrawCanvasSideHandle(ds, node, bestSide);
+    }
+
+    /// <summary>四边中点手柄（连线起点）：强调色实心圆点 + 浅色描边（尺寸为页局部点，随页缩放）。</summary>
+    private void DrawCanvasSideHandle(CanvasDrawingSession ds, CanvasNode node, string side)
+    {
+        var a = SideAnchor(node, side);
+        ds.FillCircle(a, CanvasHandleRadius, _canvasAccentColor);
+        ds.DrawCircle(a, CanvasHandleRadius, CanvasHandleFill, 1.5f);
+    }
+
+    /// <summary>四角缩放控件：贴合卡片圆角、同心的【弧形边】（半径 = 卡片圆角 + 外扩量，覆盖该角 90° 象限），
+    /// 线宽与选中边框一致 → 与"四边中点圆点"形成形状区分。
+    /// 弧用【自算点的折线逼近】而非 CanvasPathBuilder.AddArc：后者角度单位在 Win2D 上与传入的度数不符
+    /// （曾使 90° 的 sweep 绕成整圈圆环），自算点则与任何角度约定无关、结果确定。</summary>
+    private void DrawCanvasCornerControl(CanvasDrawingSession ds, CanvasNode node, string corner)
+    {
+        double w = Math.Max(12, node.Width);
+        double h = Math.Max(12, node.Height);
+        float cr = CanvasCardRadius;                 // 卡片圆角半径（页局部）
+        float arcR = cr + CanvasCornerGap;           // 弧半径：与卡片圆角同心、贴角外侧
+
+        Vector2 c; float startDeg;
+        switch (corner)
+        {
+            case "tl": c = new Vector2((float)(node.X + cr), (float)(node.Y + cr)); startDeg = 180f; break;
+            case "tr": c = new Vector2((float)(node.X + w - cr), (float)(node.Y + cr)); startDeg = 270f; break;
+            case "bl": c = new Vector2((float)(node.X + cr), (float)(node.Y + h - cr)); startDeg = 90f; break;
+            default: c = new Vector2((float)(node.X + w - cr), (float)(node.Y + h - cr)); startDeg = 0f; break;
+        }
+
+        // 折线逼近 90° 圆弧：24 段，弦偏差 ≈ r·(1−cos(1.875°)) ≈ 0.0005·r，远小于线宽，肉眼不可辨。
+        const int Segments = 24;
+        float a0 = startDeg * MathF.PI / 180f;
+        const float Sweep = MathF.PI / 2f;
+        using var pb = new Microsoft.Graphics.Canvas.Geometry.CanvasPathBuilder(ds);
+        pb.BeginFigure(new Vector2(c.X + arcR * MathF.Cos(a0), c.Y + arcR * MathF.Sin(a0)));
+        for (int i = 1; i <= Segments; i++)
+        {
+            float a = a0 + Sweep * i / Segments;
+            pb.AddLine(new Vector2(c.X + arcR * MathF.Cos(a), c.Y + arcR * MathF.Sin(a)));
+        }
+        pb.EndFigure(Microsoft.Graphics.Canvas.Geometry.CanvasFigureLoop.Open);
+        using var geo = Microsoft.Graphics.Canvas.Geometry.CanvasGeometry.CreatePath(pb);
+        ds.DrawGeometry(geo, _canvasAccentColor, CanvasCardSelectedStrokeWidth);
+    }
+
+    /// <summary>绘制连线拖拽的橡皮筋与目标吸附提示（屏幕坐标，会话变换须为恒等）。</summary>
+    private void DrawCanvasConnecting(CanvasDrawingSession ds)
+    {
+        var a1 = _connFromAnchorScreen;
+        Vector2 a2;
+        Vector2 endNormal;
+        bool hasTarget = _connTargetNodeId != null && _connTargetSide.Length > 0;
+        if (hasTarget)
+        {
+            a2 = _connTargetAnchorScreen;
+            endNormal = _connTargetNormalScreen;
+        }
+        else
+        {
+            a2 = new Vector2((float)_connCursorScreen.X, (float)_connCursorScreen.Y);
+            var d = a2 - a1;
+            float dl = d.Length();
+            endNormal = dl > 1e-3f ? d / dl : new Vector2(1, 0);
+        }
+
+        float dist = Vector2.Distance(a1, a2);
+        float k = Math.Clamp(dist * 0.4f, 24f, 120f);
+        var c1 = a1 + _connFromNormalScreen * k;
+        var c2 = hasTarget ? a2 + endNormal * k : a2 - endNormal * k;
+
+        using (var geo = BuildBezier(a1, c1, c2, a2))
+        {
+            if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, CanvasEdgeStrokeWidth);
+        }
+        if (hasTarget)
+        {
+            DrawArrowHead(ds, c2, a2, _canvasAccentColor);
+            // 目标吸附边的提示环，明确"将连到哪条边"。
+            ds.DrawCircle(a2, 7f, _canvasAccentColor, 2f);
+        }
+        else
+        {
+            ds.FillCircle(a2, 3.5f, _canvasAccentColor);
+        }
+    }
+
+    // =====================================================================
+    // 白板交互（Canvas 模式，P2）：命中测试 / 选中 / 拖动移动 / 双击新建 / 浮层控件
+    //   · 命中与拖动全部在【页局部 PDF 点】空间完成，渲染侧与存储侧同源；
+    //   · 拖动只算位置，clamp 到页内；模型与历史留在 MainPage，本视图只发事件。
+    // =====================================================================
+
+    /// <summary>白板输入模式（Canvas 模式为 true）：左键优先命中卡片→选中/拖动；未命中则照常拖动平移。</summary>
+    public bool CanvasInputActive
+    {
+        get => _canvasInputActive;
+        set
+        {
+            if (_canvasInputActive == value) return;
+            _canvasInputActive = value;
+            if (!value) ExitCanvasInteraction();
+        }
+    }
+    private bool _canvasInputActive;
+
+    /// <summary>当前选中的卡片 id（null=未选中）。渲染侧重画选中框并同步浮层控件位置。</summary>
+    private string? _selectedCanvasNodeId;
+
+    /// <summary>指针悬停的卡片 id（null=无）。与选中无关：指针靠近卡片（含边缘手柄外扩区）时置位，
+    /// 渲染侧据此把该卡边框染成强调色；指针移开即清空 → 平时画面保持干净。</summary>
+    private string? _hoverCanvasNodeId;
+
+    /// <summary>指针视口坐标（白板模式下随 PointerMoved 更新）：手柄"按接近度显形"依赖它。</summary>
+    private Point _canvasPointerPos;
+    private bool _canvasPointerValid;
+
+    // ---- 连线选中（P6）：点击选中 + 悬停高亮 + 边工具栏 ----
+    private string? _selectedCanvasEdgeId;   // 与 _selectedCanvasNodeId 互斥
+    private string? _hoverCanvasEdgeId;      // 指针靠近但未选中
+
+    private bool _isCanvasDragging;
+    private CanvasNode? _canvasDragNode;
+    private int _canvasDragPage = -1;
+    private double _canvasDragStartPx, _canvasDragStartPy; // 按下点（页局部 PDF 点）
+    private double _canvasDragOrigX, _canvasDragOrigY;     // 节点原始位置
+
+    // ---- 连线拖拽（P3）：从选中卡片四边中点手柄拖出，落到另一张卡片建立连线 ----
+    private bool _isCanvasConnecting;
+    private string? _connFromNodeId;
+    private string _connFromSide = "";
+    private Vector2 _connFromAnchorScreen;    // 源手柄屏幕坐标（视口 DIP）
+    private Vector2 _connFromNormalScreen;    // 源边外法向（屏幕）
+    private Point _connCursorScreen;          // 当前指针屏幕坐标
+    private string? _connTargetNodeId;        // 悬停命中的目标卡片
+    private string _connTargetSide = "";      // 目标吸附边
+    private Vector2 _connTargetAnchorScreen;  // 目标吸附点屏幕坐标
+    private Vector2 _connTargetNormalScreen;  // 目标边外法向（屏幕）
+
+    // ---- 卡片缩放（P4）：拖四角手柄改尺寸，对角固定 ----
+    private bool _isCanvasResizing;
+    private CanvasNode? _canvasResizeNode;
+    private int _canvasResizePage = -1;
+    private string _canvasResizeCorner = "";
+    private double _canvasResizeOrigX, _canvasResizeOrigY, _canvasResizeOrigW, _canvasResizeOrigH;
+
+    private string? _canvasEditNodeId;                     // 正在文本编辑的卡片 id
+    // 编辑态辅助：编辑卡引用（滚动条/留白复用）+ TextBox 内部 ScrollViewer（取滚动偏移）+ 本次页变换（摆 XAML 滚动条）。
+    private CanvasNode? _canvasEditNodeRef;
+    private PageXform _canvasEditPageXf;
+    private ScrollViewer? _canvasEditScrollViewer;
+    private string? _canvasEditScrollBarSig;   // 编辑态滚动条的刷新签名（避免 LayoutUpdated 每帧重建 layout）
+
+    // 每张卡片的滚动偏移（页局部 PDF 点，0 = 顶部）。**仅内存态**（与 Obsidian 一致，不写进 .canvas）。
+    // 非编辑态卡片由 Win2D 绘制、没有内建滚动，必须靠这个值把文字整体上移来表现滚动。
+    private readonly Dictionary<string, double> _canvasScrollY = new(StringComparer.Ordinal);
+
+    /// <summary>取卡片滚动偏移（页局部点，非负）。</summary>
+    private double GetCanvasScrollY(string nodeId)
+        => _canvasScrollY.TryGetValue(nodeId, out double v) && v > 0 ? v : 0;
+
+    /// <summary>设卡片滚动偏移（clamp 到 [0, maxScroll]）。返回是否真的变化。</summary>
+    private bool SetCanvasScrollY(string nodeId, double value, double maxScroll)
+    {
+        double v = Math.Clamp(value, 0, Math.Max(0, maxScroll));
+        double old = GetCanvasScrollY(nodeId);
+        if (Math.Abs(v - old) < 0.01) return false;
+        if (v <= 0) _canvasScrollY.Remove(nodeId);
+        else _canvasScrollY[nodeId] = v;
+        return true;
+    }
+
+    // ---- 滚动条拖动 ----
+    private bool _isCanvasScrollDragging;
+    private string? _canvasScrollDragNodeId;
+    private double _canvasScrollDragStartPointerY;   // 按下时的页局部 Y
+    private double _canvasScrollDragStartScrollY;    // 按下时的滚动偏移
+
+    private bool _canvasOverlaySyncPending;
+    // 浮动控件缓存：实测尺寸 + 上次写入的位置（避免拖动时每帧重复 Measure / 无效 Margin 写入）。
+    private double _canvasToolbarW, _canvasToolbarH;
+    private double _canvasToolbarLeft, _canvasToolbarTop;
+    private bool _canvasToolbarPlaced;
+    // 边工具栏缓存（同卡片工具栏，避免拖动/缩放时每帧 Measure）。
+    private double _canvasEdgeToolbarW, _canvasEdgeToolbarH;
+    private double _canvasEdgeToolbarLeft, _canvasEdgeToolbarTop;
+    private bool _canvasEdgeToolbarPlaced;
+
+    /// <summary>卡片拖动中（携带 clamp 后的新位置，MainPage 直接写回模型）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeDragged;
+    /// <summary>卡片拖动结束（携带最终位置与拖动前原始位置，供 MainPage 组装撤销记录）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeDragCompleted;
+    /// <summary>双击空白请求新建卡片（携带已 clamp 到页内的左上角坐标）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeCreateRequested;
+    /// <summary>请求删除卡片（浮层控件"删除"）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeDeleteRequested;
+    /// <summary>文本编辑提交（携带新文本）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeTextCommitted;
+    /// <summary>连线建立请求：从 NodeId 的 FromSide 手柄拖到目标卡片 TargetNodeId（ToSide 为吸附边）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeConnectionRequested;
+    /// <summary>卡片缩放中（携带 clamp 后的新位置与尺寸，MainPage 直接写回模型）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeResized;
+    /// <summary>卡片缩放结束（携带最终矩形与缩放前矩形，供 MainPage 组装撤销记录）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeResizeCompleted;
+    /// <summary>请求删除连线（边工具栏"删除"或 Delete 键）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeDeleteRequested;
+    /// <summary>连线样式变更（箭头 ArrowStyle / 颜色 EdgeColor，仅填充变更项）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeStyleChanged;
+    /// <summary>从连线手柄拖到空白处：请求在该处新建卡片并与源节点连成一条线
+    /// （NodeId=源节点、FromSide=源出边、PageIndex/X/Y=落点页与已 clamp 的左上角）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeCreateConnectedRequested;
+    /// <summary>编辑框内请求撤销（Ctrl+Z）：MainPage 统一走撤销栈，避免编辑框原生撤销与全局历史脱节。</summary>
+    public event EventHandler? CanvasUndoRequested;
+    /// <summary>编辑框内请求重做（Ctrl+Y）。</summary>
+    public event EventHandler? CanvasRedoRequested;
+
+    /// <summary>选中/取消选中卡片（null=取消）。命中测试只认页内坐标，跨页卡片各自独立。
+    /// 与连线选中互斥：选中卡片即清掉连线选中。</summary>
+    public void SelectCanvasNode(string? nodeId)
+    {
+        string? id = string.IsNullOrEmpty(nodeId) ? null : nodeId;
+        if (_selectedCanvasNodeId == id && _selectedCanvasEdgeId == null) { SyncCanvasOverlayNow(); return; }
+        _selectedCanvasNodeId = id;
+        _selectedCanvasEdgeId = null;   // 与连线选中互斥
+        InvalidateOverlay();
+        SyncCanvasOverlayNow();
+    }
+
+    // ---- 连线选中（P6）----
+
+    /// <summary>当前是否有选中的连线（供 MainPage 路由 Delete 键）。</summary>
+    public bool HasSelectedCanvasEdge => _selectedCanvasEdgeId != null;
+
+    /// <summary>当前是否有选中的卡片（供 MainPage 路由 Delete 键）。</summary>
+    public bool HasSelectedCanvasNode => _selectedCanvasNodeId != null;
+
+    /// <summary>是否正在文本编辑（编辑框聚焦时 Delete 键应交给文本框，不当成删除卡片/连线）。</summary>
+    public bool IsCanvasEditing => _canvasEditNodeId != null;
+
+    /// <summary>选中/取消选中连线（null=取消）。与卡片选中互斥。</summary>
+    public void SelectCanvasEdge(string? edgeId)
+    {
+        string? id = string.IsNullOrEmpty(edgeId) ? null : edgeId;
+        if (_selectedCanvasEdgeId == id && _selectedCanvasNodeId == null) { SyncCanvasOverlayNow(); return; }
+        _selectedCanvasEdgeId = id;
+        _selectedCanvasNodeId = null;   // 与卡片选中互斥
+        InvalidateOverlay();
+        SyncCanvasOverlayNow();
+    }
+
+    /// <summary>清空连线选中（切换模式/隐藏白板层时调用）。</summary>
+    public void ClearCanvasEdgeSelection()
+    {
+        if (_selectedCanvasEdgeId == null && _hoverCanvasEdgeId == null) return;
+        _selectedCanvasEdgeId = null;
+        _hoverCanvasEdgeId = null;
+        InvalidateOverlay();
+    }
+
+    /// <summary>删除当前选中的连线（边工具栏"删除"按钮 / Delete 键）。返回是否真的发出删除请求。</summary>
+    public bool DeleteSelectedCanvasEdge()
+    {
+        string? id = _selectedCanvasEdgeId;
+        if (string.IsNullOrEmpty(id)) return false;
+        _selectedCanvasEdgeId = null;
+        _hoverCanvasEdgeId = null;
+        if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
+        CanvasEdgeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { EdgeId = id });
+        InvalidateOverlay();
+        return true;
+    }
+
+    /// <summary>删除当前选中的卡片（Delete 键复用卡片工具栏删除路径）。返回是否发出了删除请求。</summary>
+    public bool DeleteSelectedCanvasNode()
+    {
+        string? id = _selectedCanvasNodeId;
+        if (string.IsNullOrEmpty(id)) return false;
+        _selectedCanvasNodeId = null;
+        if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
+        CanvasNodeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });
+        InvalidateOverlay();
+        return true;
+    }
+
+    /// <summary>进入文本编辑：把 XAML 编辑框覆盖到卡片屏幕上并聚焦。</summary>
+    public void BeginCanvasEdit(string nodeId)
+    {
+        CanvasNode? node;
+        lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
+        if (node == null) return;
+        _canvasEditNodeId = nodeId;
+        SelectCanvasNode(nodeId);       // 进入编辑即置为选中 ⇒ 退出编辑后自然回到【选中态】（与 Obsidian 一致）
+        // 记录"已入史的文本基线"：打字过程中按停顿分段提交，未变的段不再产生历史条目。
+        _canvasLastCommittedText = node.Text ?? "";
+        StopCanvasEditCommitTimer();
+        CanvasEditBox.Text = node.Text ?? "";
+        _canvasEditScrollBarSig = null;                                // 进入编辑 → 滚动条刷新签名作废
+        CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 防重复订阅
+        CanvasEditBox.LayoutUpdated += OnCanvasEditBoxLayoutUpdated;   // 每帧兜底：取内部 ScrollViewer + 刷滚动条
+        CanvasEditBox.PointerMoved -= OnCanvasEditBoxPointerMoved;     // 防重复订阅
+        CanvasEditBox.PointerMoved += OnCanvasEditBoxPointerMoved;     // 编辑态下补喂指针位置（见该方法注释）
+        PositionCanvasEditBox();
+        InvalidateOverlay();   // 卡片本体让位给编辑框（DrawWhiteboardLayer 跳过编辑卡）
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            CanvasEditBox.Focus(FocusState.Programmatic);
+            // 光标落在文本末尾（观感=在常态卡片里继续编辑），而非全选。
+            CanvasEditBox.SelectionStart = CanvasEditBox.Text.Length;
+            CanvasEditBox.SelectionLength = 0;
+        });
+    }
+
+    /// <summary>退出（关闭）当前编辑；commit=true 时把文本提交给 MainPage。</summary>
+    private void EndCanvasEdit(bool commit)
+    {
+        if (_canvasEditNodeId == null) return;
+        if (commit) FlushCanvasEditText();   // 提交最后一段尚未入史的文字
+        else StopCanvasEditCommitTimer();
+        _canvasEditNodeId = null;
+        CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 退出编辑即退订重试钩子
+        CanvasEditBox.PointerMoved -= OnCanvasEditBoxPointerMoved;     // 同理退订指针喂给
+        CanvasEditBox.Visibility = Visibility.Collapsed;
+        if (CanvasEditScrollBar != null) CanvasEditScrollBar.Visibility = Visibility.Collapsed;
+        // 折叠的 TextBox 仍会保持键盘焦点（WinUI 已知行为），会吞掉 F/G/Ctrl+Z 这类页面级按键：
+        // 表现为白板模式下快捷键整体失效、字母键进入输入法。必须把焦点显式移回滚动宿主。
+        RestoreViewerFocus();
+        SyncCanvasOverlayNow();
+        InvalidateOverlay();   // 编辑卡本体恢复由 Win2D 绘制
+    }
+
+    /// <summary>把键盘焦点从（已折叠的）编辑框移回视口宿主，恢复页面级快捷键。</summary>
+    private void RestoreViewerFocus()
+    {
+        // 延迟到队列尾部：此刻仍在 KeyDown 分发过程中，立即转焦点可能被后续默认处理夺回。
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_canvasEditNodeId != null) return; // 期间又进入编辑，不抢焦点
+            if (Viewer != null && Viewer.Focus(FocusState.Programmatic)) return;
+            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
+        });
+    }
+
+    /// <summary>G 键隐藏白板层时收起全部白板交互态与浮层（见 AnnotationsVisible setter）。</summary>
+    private void HideCanvasInteraction()
+    {
+        _selectedCanvasNodeId = null;                 // 先清选中，收尾时浮层不会又把控件显出来
+        _selectedCanvasEdgeId = null;
+        _hoverCanvasNodeId = null;
+        _hoverCanvasEdgeId = null;
+        if (_canvasEditNodeId != null) EndCanvasEdit(commit: true); // 正在编辑 → 提交后再退出
+        _isCanvasDragging = false;
+        _canvasDragNode = null;
+        _canvasDragPage = -1;
+        _isCanvasConnecting = false;
+        _connFromNodeId = null;
+        _connTargetNodeId = null;
+        _connTargetSide = "";
+        _isCanvasScrollDragging = false;
+        _canvasScrollDragNodeId = null;
+        CancelCanvasResize();
+        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
+        if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>退出白板交互（切回阅读/画笔模式）：清拖动/选中/编辑并隐藏浮层。</summary>
+    private void ExitCanvasInteraction()
+    {
+        _isCanvasDragging = false;
+        _canvasDragNode = null;
+        _canvasDragPage = -1;
+        _isCanvasConnecting = false;
+        _connFromNodeId = null;
+        _connTargetNodeId = null;
+        _connTargetSide = "";
+        _isCanvasScrollDragging = false;
+        _canvasScrollDragNodeId = null;
+        CancelCanvasResize();
+        _canvasEditNodeId = null;
+        CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 直接清 id 的路径也要退订（否则钩子残留）
+        CanvasEditBox.PointerMoved -= OnCanvasEditBoxPointerMoved;
+        _selectedCanvasNodeId = null;
+        _selectedCanvasEdgeId = null;
+        _hoverCanvasNodeId = null;
+        _hoverCanvasEdgeId = null;
+        _canvasPointerValid = false;
+        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
+        if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
+        if (CanvasEditScrollBar != null) CanvasEditScrollBar.Visibility = Visibility.Collapsed;
+        if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        InvalidateOverlay();
+    }
+
+    /// <summary>视口坐标 → 命中卡片（页内坐标测试，取绘制顺序最上层者）+ 该页局部坐标。</summary>
+    private bool TryHitCanvasNode(Point vp, out CanvasNode? node, out int pageIndex,
+        out double px, out double py)
+    {
+        node = null;
+        // 白板层被 G 键隐藏时不做任何命中：卡片看不见就不该能选中/拖动。
+        if (!_annotationsVisible) { pageIndex = -1; px = 0; py = 0; return false; }
+        if (!CanvasViewportToPage(vp, out pageIndex, out px, out py))
+        {
+            pageIndex = -1; px = 0; py = 0;
+            return false;
+        }
+        CanvasNode[] nodes;
+        lock (_canvasLock) nodes = _canvasNodes;
+        for (int i = nodes.Length - 1; i >= 0; i--)
+        {
+            var n = nodes[i];
+            if (n.GlancePage != pageIndex) continue;
+            if (px >= n.X && px <= n.X + n.Width && py >= n.Y && py <= n.Y + n.Height)
+            {
+                node = n;
+                return true;
+            }
+        }
+        pageIndex = -1; px = 0; py = 0;
+        return false;
+    }
+
+    // ---- 连线（P3）：手柄命中 / 吸附 / 橡皮筋拖拽 ----
+
+    /// <summary>选中卡片某条边中点手柄的屏幕坐标（视口 DIP）。</summary>
+    private bool TryGetCanvasHandleScreen(string nodeId, string side, out Vector2 screen)
+    {
+        screen = default;
+        var pages = _pages;
+        if (pages.Count == 0) return false;
+        CanvasNode? node = null;
+        int pageIdx = -1;
+        lock (_canvasLock)
+        {
+            if (_canvasIndex.TryGetValue(nodeId, out var n)) { node = n; pageIdx = n.GlancePage; }
+        }
+        if (node == null || pageIdx < 0 || pageIdx >= pages.Count) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        var xf = MakePageXform(ComputePageDest(pageIdx, z, hOff, vOff), z);
+        var a = SideAnchor(node, side);
+        screen = xf.Map(a.X, a.Y);
+        return true;
+    }
+
+    /// <summary>视口坐标 → 命中选中卡片的连线手柄。命中则输出卡片 id 与边名。</summary>
+    private bool TryHitCanvasHandle(Point vp, out string nodeId, out string side)
+    {
+        nodeId = ""; side = "";
+        if (!_canvasInputActive || !_annotationsVisible) return false;
+        // 手柄可及的目标卡：优先【指针悬停的卡】（Obsidian 式"悬停边缘即可直接拖"，无需先选中），
+        // 其次回退到选中卡。命中在【页局部空间】比较 —— 与绘制同源，且随页面缩放。
+        string? target = _hoverCanvasNodeId ?? _selectedCanvasNodeId;
+        if (target == null) return false;
+        CanvasNode? node = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(target, out node);
+        if (node == null || node.GlancePage < 0) return false;
+        if (!CanvasViewportToLockedPage(node.GlancePage, vp, out double px, out double py)) return false;
+        double r2 = CanvasHandleHitRadius * CanvasHandleHitRadius;
+        foreach (var s in CanvasSides)
+        {
+            var a = SideAnchor(node, s);
+            double dx = a.X - px, dy = a.Y - py;
+            if (dx * dx + dy * dy <= r2) { nodeId = target; side = s; return true; }
+        }
+        return false;
+    }
+
+    /// <summary>目标卡片中【离指针最近】的边中点 → 吸附边（屏幕距离比较）。
+    /// 不用"卡片中心相对方位"决定：那样用户在卡片任意位置悬停都只吸到同一条边，
+    /// 无法自由选边；按指针到四个中点手柄的屏幕距离取最小，手指在哪就吸哪条边，直观可控。</summary>
+    private string ComputeTargetSide(string toId, Point vp)
+    {
+        string best = "left";
+        double bestD2 = double.MaxValue;
+        foreach (var s in CanvasSides)
+        {
+            if (!TryGetCanvasHandleScreen(toId, s, out var c)) continue;
+            double dx = vp.X - c.X, dy = vp.Y - c.Y;
+            double d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) { bestD2 = d2; best = s; }
+        }
+        return best;
+    }
+
+    /// <summary>开始从某卡片某边手柄拖连线：记录源锚点/法向并进入橡皮筋状态。</summary>
+    private void BeginCanvasConnection(string nodeId, string side, Point vp)
+    {
+        _isCanvasConnecting = true;
+        _connFromNodeId = nodeId;
+        _connFromSide = side;
+        _connTargetNodeId = null;
+        _connTargetSide = "";
+        _connCursorScreen = vp;
+
+        CanvasNode? node = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
+        if (node != null && node.GlancePage >= 0 && node.GlancePage < _pages.Count)
+        {
+            GetViewState(out double z, out double hOff, out double vOff);
+            var xf = MakePageXform(ComputePageDest(node.GlancePage, z, hOff, vOff), z);
+            var a = SideAnchor(node, side);
+            _connFromAnchorScreen = xf.Map(a.X, a.Y);
+            var nrm = SideNormal(side);
+            _connFromNormalScreen = xf.MapDirection(nrm.X, nrm.Y);
+        }
+        UpdateCanvasConnecting(vp);
+        InvalidateOverlayThrottled();
+    }
+
+    /// <summary>连线拖拽中：更新指针位置与目标吸附（命中非源卡片时高亮其吸附边）。</summary>
+    private void UpdateCanvasConnecting(Point vp)
+    {
+        _connCursorScreen = vp;
+        _connTargetNodeId = null;
+        _connTargetSide = "";
+        var pages = _pages;
+        if (TryHitCanvasNode(vp, out var hit, out _, out _, out _) && hit != null &&
+            !string.Equals(hit.Id, _connFromNodeId, StringComparison.Ordinal))
+        {
+            _connTargetNodeId = hit.Id;
+            _connTargetSide = ComputeTargetSide(hit.Id, vp);
+            if (TryGetCanvasHandleScreen(hit.Id, _connTargetSide, out var anchor))
+                _connTargetAnchorScreen = anchor;
+            if (hit.GlancePage >= 0 && hit.GlancePage < pages.Count)
+            {
+                GetViewState(out double z, out double hOff, out double vOff);
+                var xf = MakePageXform(ComputePageDest(hit.GlancePage, z, hOff, vOff), z);
+                var nrm = SideNormal(_connTargetSide);
+                _connTargetNormalScreen = xf.MapDirection(nrm.X, nrm.Y);
+            }
+        }
+        InvalidateOverlayThrottled();
+    }
+
+    /// <summary>取消进行中的连线拖拽（Esc / 模式切换）。返回是否有待取消的连线。</summary>
+    public bool CancelCanvasConnection()
+    {
+        if (!_isCanvasConnecting) return false;
+        _isCanvasConnecting = false;
+        _connFromNodeId = null;
+        _connTargetNodeId = null;
+        _connTargetSide = "";
+        InvalidateOverlay();
+        return true;
+    }
+
+    // ---- 卡片缩放（P4） ----
+
+    /// <summary>视口坐标 → 命中选中卡片的四角手柄。</summary>
+    private bool TryHitCanvasCorner(Point vp, out string nodeId, out string corner)
+    {
+        nodeId = ""; corner = "";
+        if (!_canvasInputActive || !_annotationsVisible) return false;
+        // 与连线手柄同规则：优先指针悬停的卡（悬停四角即可直接缩放），其次回退选中卡；
+        // 同样在【页局部空间】比较命中。
+        string? target = _hoverCanvasNodeId ?? _selectedCanvasNodeId;
+        if (target == null) return false;
+        CanvasNode? node = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(target, out node);
+        if (node == null || node.GlancePage < 0) return false;
+        if (!CanvasViewportToLockedPage(node.GlancePage, vp, out double px, out double py)) return false;
+        double r2 = CanvasHandleHitRadius * CanvasHandleHitRadius;
+        foreach (var c in CanvasCorners)
+        {
+            var a = CornerAnchor(node, c);
+            double dx = a.X - px, dy = a.Y - py;
+            if (dx * dx + dy * dy <= r2) { nodeId = target; corner = c; return true; }
+        }
+        return false;
+    }
+
+    /// <summary>开始缩放：记录原始矩形。</summary>
+    private void BeginCanvasResize(string nodeId, string corner, int pageIndex)
+    {
+        CanvasNode? node = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
+        if (node == null) return;
+        _isCanvasResizing = true;
+        _canvasResizeNode = node;
+        _canvasResizePage = pageIndex;
+        _canvasResizeCorner = corner;
+        _canvasResizeOrigX = node.X;
+        _canvasResizeOrigY = node.Y;
+        _canvasResizeOrigW = node.Width;
+        _canvasResizeOrigH = node.Height;
+    }
+
+    /// <summary>缩放拖拽中：对角固定，移动角跟随指针；按最小尺寸与页边界 clamp（页局部空间）。
+    /// 页局部坐标系与卡片存储坐标同源，旋转态下指针换算已含旋转逆变换，故此处无需感知旋转。</summary>
+    private void UpdateCanvasResize(Point vp)
+    {
+        var node = _canvasResizeNode;
+        if (node == null || _canvasResizePage < 0 || _canvasResizePage >= _pages.Count) return;
+        if (!CanvasViewportToLockedPage(_canvasResizePage, vp, out double px, out double py)) return;
+
+        var page = _pages[_canvasResizePage];
+        double pw = page.WidthPoints, ph = page.HeightPoints;
+        string c = _canvasResizeCorner;
+        bool moveLeft = c == "tl" || c == "bl";
+        bool moveTop = c == "tl" || c == "tr";
+
+        // 对角（固定）与移动角初始值
+        double fixedX = moveLeft ? _canvasResizeOrigX + _canvasResizeOrigW : _canvasResizeOrigX;
+        double fixedY = moveTop ? _canvasResizeOrigY + _canvasResizeOrigH : _canvasResizeOrigY;
+
+        // 移动角坐标：clamp 到页内，且保证与固定角间距 >= 最小尺寸。
+        double moveX = Math.Clamp(px, 0, pw);
+        double moveY = Math.Clamp(py, 0, ph);
+        if (moveLeft) moveX = Math.Clamp(moveX, 0, fixedX - CanvasMinNodeWidth);
+        else moveX = Math.Clamp(moveX, fixedX + CanvasMinNodeWidth, pw);
+        if (moveTop) moveY = Math.Clamp(moveY, 0, fixedY - CanvasMinNodeHeight);
+        else moveY = Math.Clamp(moveY, fixedY + CanvasMinNodeHeight, ph);
+
+        double left = Math.Min(fixedX, moveX), right = Math.Max(fixedX, moveX);
+        double top = Math.Min(fixedY, moveY), bottom = Math.Max(fixedY, moveY);
+        if (right - left < CanvasMinNodeWidth) return;   // 页太小等极端情形：放弃本次更新
+        if (bottom - top < CanvasMinNodeHeight) return;
+
+        CanvasNodeResized?.Invoke(this, new CanvasNodeEventArgs
+        {
+            NodeId = node.Id, PageIndex = _canvasResizePage,
+            X = left, Y = top, Width = right - left, Height = bottom - top
+        });
+        SyncCanvasOverlayNow();
+    }
+
+    /// <summary>结束缩放（Esc/打断）：仅清状态，最终值已实时写回模型。</summary>
+    private void CancelCanvasResize()
+    {
+        _isCanvasResizing = false;
+        _canvasResizeNode = null;
+        _canvasResizePage = -1;
+        _canvasResizeCorner = "";
+    }
+
+    /// <summary>视口坐标 → 命中页 + 页局部 PDF 点（未旋转）。与绘制同源读 _live* 视图镜像。</summary>
+    private bool CanvasViewportToPage(Point vp, out int pageIndex, out double px, out double py)
+    {
+        pageIndex = -1; px = 0; py = 0;
+        var pages = _pages;
+        if (pages.Count == 0) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        double docX, docY;
+        CanvasDocToLocal(vp, z, hOff, vOff, out docX, out docY);
+        foreach (var p in pages)
+        {
+            if (docX >= p.LayoutRect.Left && docX <= p.LayoutRect.Right &&
+                docY >= p.LayoutRect.Top && docY <= p.LayoutRect.Bottom)
+            {
+                pageIndex = p.Index;
+                PageLocalFromDoc(p, docX, docY, out px, out py);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>视口坐标 → 指定页局部 PDF 点（拖动时可越出页边界，交给调用方 clamp）。</summary>
+    private bool CanvasViewportToLockedPage(int pageIndex, Point vp, out double px, out double py)
+    {
+        px = 0; py = 0;
+        var pages = _pages;
+        if (pageIndex < 0 || pageIndex >= pages.Count) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        CanvasDocToLocal(vp, z, hOff, vOff, out double docX, out double docY);
+        PageLocalFromDoc(pages[pageIndex], docX, docY, out px, out py);
+        return true;
+    }
+
+    /// <summary>视口坐标 → 文档坐标（DIP，缩放=1）；扣居中补偿，与 ComputeVisiblePages 同一套算法。</summary>
+    private void CanvasDocToLocal(Point vp, double z, double hOff, double vOff,
+        out double docX, out double docY)
+    {
+        double vpW = _vpW, vpH = _vpH;
+        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
+        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
+        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        docX = (vp.X - centerX + hOff) / z;
+        docY = (vp.Y - centerY + vOff) / z;
+    }
+
+    /// <summary>双击：命中卡片 → 进入编辑；命中空白 → 请求新建（左上角落点，clamp 页内）。</summary>
+    private void HandleCanvasDoubleTap(Point vp)
+    {
+        if (TryHitCanvasNode(vp, out var hit, out _, out _, out _))
+        {
+            if (hit != null) BeginCanvasEdit(hit.Id);
+            return;
+        }
+        if (!CanvasViewportToPage(vp, out int pageIdx, out double px, out double py)) return;
+        var page = _pages[pageIdx];
+        // 落点以鼠标位置为卡片【中心】（对齐 Obsidian），再 clamp 到页内。
+        double w = CanvasNode.DefaultWidth, h = CanvasNode.DefaultHeight;
+        double x = Math.Clamp(px - w / 2.0, 0, Math.Max(0, page.WidthPoints - w));
+        double y = Math.Clamp(py - h / 2.0, 0, Math.Max(0, page.HeightPoints - h));
+        CanvasNodeCreateRequested?.Invoke(this, new CanvasNodeEventArgs
+        {
+            PageIndex = pageIdx, X = x, Y = y
+        });
+    }
+
+    // ---- 浮层控件（浮动控件 + 编辑框）定位：跟随选中卡片/编辑卡片的屏幕矩形 ----
+
+    private void CanvasEditButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasNodeId != null) BeginCanvasEdit(_selectedCanvasNodeId);
+    }
+
+    private void CanvasDeleteButton_Click(object sender, RoutedEventArgs e)
+        => DeleteSelectedCanvasNode();
+
+    // ---- 边工具栏（P6）：删除 / 箭头样式三态 / 颜色 ----
+
+    private void CanvasEdgeDeleteButton_Click(object sender, RoutedEventArgs e)
+        => DeleteSelectedCanvasEdge();
+
+    /// <summary>箭头样式按钮：Tag = none / single / both。</summary>
+    private void CanvasEdgeArrow_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasEdgeId == null) return;
+        string style = (sender as FrameworkElement)?.Tag as string ?? "single";
+        CanvasEdgeStyleChanged?.Invoke(this, new CanvasNodeEventArgs
+        {
+            EdgeId = _selectedCanvasEdgeId,
+            ArrowStyle = style
+        });
+        RefreshEdgeArrowButtons();
+    }
+
+    /// <summary>颜色块按钮：Tag = "#RRGGBB"。</summary>
+    private void CanvasEdgeColor_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasEdgeId == null) return;
+        string hex = (sender as FrameworkElement)?.Tag as string ?? "";
+        CanvasEdgeStyleChanged?.Invoke(this, new CanvasNodeEventArgs
+        {
+            EdgeId = _selectedCanvasEdgeId,
+            EdgeColor = hex
+        });
+        InvalidateOverlay();
+    }
+
+    /// <summary>按选中连线的实际样式刷新三态箭头按钮的强调态（选中态=不透明，未选=半透明）。</summary>
+    private void RefreshEdgeArrowButtons()
+    {
+        if (CanvasEdgeToolbar == null) return;
+        string style = "single";
+        var id = _selectedCanvasEdgeId;
+        if (id != null)
+        {
+            CanvasEdge[] edges;
+            lock (_canvasLock) edges = _canvasEdges;
+            foreach (var e in edges)
+                if (string.Equals(e.Id, id, StringComparison.Ordinal)) { style = EdgeArrowStyleOf(e); break; }
+        }
+        if (CanvasEdgeArrowNoneBtn != null) CanvasEdgeArrowNoneBtn.Opacity = style == "none" ? 1.0 : 0.4;
+        if (CanvasEdgeArrowSingleBtn != null) CanvasEdgeArrowSingleBtn.Opacity = style == "single" ? 1.0 : 0.4;
+        if (CanvasEdgeArrowBothBtn != null) CanvasEdgeArrowBothBtn.Opacity = style == "both" ? 1.0 : 0.4;
+    }
+
+    /// <summary>把一条连线的两端箭头归并成工具栏三态：none / single / both。</summary>
+    private static string EdgeArrowStyleOf(CanvasEdge e)
+    {
+        bool to = IsArrowEnd(e.ToEnd);
+        bool from = IsArrowEnd(e.FromEnd);
+        if (to && from) return "both";
+        if (to || from) return "single";
+        return "none";
+    }
+
+    private void CanvasEditBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        // 拖动滚动条时系统会把焦点从 TextBox 夺走：这**不算**"退出编辑"，
+        // 拖动结束（Viewer_PointerReleased）会把焦点还回来，否则一拍就结束编辑了。
+        if (_isCanvasScrollDragging) return;
+        EndCanvasEdit(commit: true);
+    }
+
+    /// <summary>
+    /// 编辑期间拦截 Ctrl+Z / Ctrl+Y，交给 MainPage 的统一撤销栈（与画笔/白板操作共用同一历史）。
+    /// 必须用 PreviewKeyDown（隧道事件）：TextBox 在 KeyDown 的类处理里就吃掉 Ctrl+Z（原生撤销）
+    /// 并把事件标记为 Handled —— 普通 KeyDown 处理器根本收不到（日志证实无 editbox KeyDown key=Z）。
+    /// </summary>
+    private void CanvasEditBox_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        bool ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)
+                     & Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
+        if (!ctrl) return;
+        if (e.Key == VirtualKey.Z)
+        {
+            e.Handled = true;
+            // 先把编辑框"最后一段尚未入史"的文字提交为一步，再撤销 —— 等价于"撤回到上一段"；
+            // 撤销后 SetCanvasData 会把编辑框文本与光标一起同步到末尾。
+            FlushCanvasEditText();
+            CanvasUndoRequested?.Invoke(this, EventArgs.Empty);
+        }
+        else if (e.Key == VirtualKey.Y)
+        {
+            e.Handled = true;
+            CanvasRedoRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private void CanvasEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        // Esc = 结束编辑（提交当前文本）；Enter 交给 TextBox 原生换行（AcceptsReturn=true）。
+        if (e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            EndCanvasEdit(commit: true);
+        }
+    }
+
+    /// <summary>文本停顿多久视为"一段输入结束"→ 提交为一步撤销记录。</summary>
+    private const int CanvasEditCommitDebounceMs = 400;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _canvasEditCommitTimer;
+    /// <summary>已提交入史的文本基线（与它相同则不再产生历史条目）。</summary>
+    private string _canvasLastCommittedText = "";
+
+    private void CanvasEditBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        UpdateCanvasEditPad();          // 行数变化 → 重算"上方最多半行"的留白
+        UpdateCanvasEditScrollBar();    // 行数变化 → 滚动条【立刻】出现/消失（漏掉这行会慢半拍：
+                                        // 只能等下一次视图/滚动事件才刷新，输入溢出或删到不溢出时都会滞后）
+        // 打字过程中不逐字符入史（否则 Ctrl+Z 变成逐字符退格）：停顿 400ms 视为一段输入结束，
+        // 提交为一步；连续输入仍合并为一步。这样"多次输入"才能分成多步撤销。
+        _canvasEditCommitTimer ??= DispatcherQueue.CreateTimer();
+        _canvasEditCommitTimer.Stop();
+        _canvasEditCommitTimer.Interval = TimeSpan.FromMilliseconds(CanvasEditCommitDebounceMs);
+        _canvasEditCommitTimer.IsRepeating = false;
+        _canvasEditCommitTimer.Tick -= OnCanvasEditCommitTick;
+        _canvasEditCommitTimer.Tick += OnCanvasEditCommitTick;
+        _canvasEditCommitTimer.Start();
+    }
+
+    private void OnCanvasEditCommitTick(object? sender, object e) => FlushCanvasEditText();
+
+    private void StopCanvasEditCommitTimer() => _canvasEditCommitTimer?.Stop();
+
+    /// <summary>把编辑框当前文本作为一步提交（不关闭编辑框）；与上次提交相同则忽略。
+    /// 文本未变时 MainPage 侧也会自动忽略，这里提前判断避免无谓事件。</summary>
+    private void FlushCanvasEditText()
+    {
+        StopCanvasEditCommitTimer();
+        if (_canvasEditNodeId == null) return;
+        string t = CanvasEditBox.Text ?? "";
+        if (string.Equals(t, _canvasLastCommittedText, StringComparison.Ordinal)) return;
+        _canvasLastCommittedText = t;
+        CanvasNodeTextCommitted?.Invoke(this, new CanvasNodeEventArgs
+        {
+            NodeId = _canvasEditNodeId,
+            Text = t
+        });
+    }
+
+    /// <summary>合并式浮层同步：Draw 每帧调用也只排一次 UI 队列任务，避免布局在绘制中重入。</summary>
+    private void RequestCanvasOverlaySync()
+    {
+        if (_canvasOverlaySyncPending) return;
+        _canvasOverlaySyncPending = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _canvasOverlaySyncPending = false;
+            SyncCanvasOverlayNow();
+        });
+    }
+
+    /// <summary>按当前视图状态把浮动控件/编辑框摆到目标卡片或连线上；不可见则整体隐藏。</summary>
+    private void SyncCanvasOverlayNow()
+    {
+        if (CanvasOverlay == null) return;
+
+        if (_canvasEditNodeId != null) { PositionCanvasEditBox(); return; }
+
+        // 连线选中：工具栏摆在连线中点附近，与卡片工具栏互斥。
+        if (_selectedCanvasEdgeId != null)
+        {
+            PositionCanvasEdgeToolbar();
+            return;
+        }
+
+        if (_selectedCanvasNodeId == null ||
+            !TryGetCanvasNodeScreenRect(_selectedCanvasNodeId, out var rect))
+        {
+            CanvasOverlay.Visibility = Visibility.Collapsed;
+            CanvasCardToolbar.Visibility = Visibility.Collapsed;
+            CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        CanvasOverlay.Visibility = Visibility.Visible;
+        CanvasCardToolbar.Visibility = Visibility.Visible;
+        CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        // 浮动控件尺寸固定（两颗按钮），测一次即缓存：拖动时每次指针事件都会走到这里，
+        // 重复 Measure 会白白触发布局。位置未变（<0.5px）也不再写 Margin，进一步省掉无效布局。
+        if (_canvasToolbarW <= 0)
+        {
+            CanvasCardToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var measured = CanvasCardToolbar.DesiredSize;
+            _canvasToolbarW = measured.Width;
+            _canvasToolbarH = measured.Height;
+        }
+        double szW = _canvasToolbarW, szH = _canvasToolbarH;
+        double left = rect.X + rect.Width / 2.0 - szW / 2.0;
+        double top = rect.Y - szH - CanvasToolbarGap;
+        left = Math.Clamp(left, 4, Math.Max(4, _vpW - szW - 4));
+        if (top < 4) top = rect.Bottom + CanvasToolbarGap; // 上方放不下 → 改放卡片下方
+        if (!_canvasToolbarPlaced ||
+            Math.Abs(left - _canvasToolbarLeft) > 0.5 || Math.Abs(top - _canvasToolbarTop) > 0.5)
+        {
+            CanvasCardToolbar.Margin = new Thickness(left, top, 0, 0);
+            _canvasToolbarLeft = left;
+            _canvasToolbarTop = top;
+            _canvasToolbarPlaced = true;
+        }
+    }
+
+    /// <summary>把边工具栏摆到选中连线的贝塞尔中点附近（上方优先，放不下落到下方）。</summary>
+    private void PositionCanvasEdgeToolbar()
+    {
+        if (_selectedCanvasEdgeId == null ||
+            !TryGetCanvasEdgeMidpointScreen(_selectedCanvasEdgeId, out var mid))
+        {
+            CanvasOverlay.Visibility = Visibility.Collapsed;
+            CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+            return;
+        }
+        CanvasOverlay.Visibility = Visibility.Visible;
+        CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        CanvasEdgeToolbar.Visibility = Visibility.Visible;
+        RefreshEdgeArrowButtons();
+        if (_canvasEdgeToolbarW <= 0)
+        {
+            CanvasEdgeToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var m = CanvasEdgeToolbar.DesiredSize;
+            _canvasEdgeToolbarW = m.Width;
+            _canvasEdgeToolbarH = m.Height;
+        }
+        double left = mid.X - _canvasEdgeToolbarW / 2.0;
+        double top = mid.Y - _canvasEdgeToolbarH - CanvasToolbarGap;
+        left = Math.Clamp(left, 4, Math.Max(4, _vpW - _canvasEdgeToolbarW - 4));
+        if (top < 4) top = mid.Y + CanvasToolbarGap;
+        if (!_canvasEdgeToolbarPlaced ||
+            Math.Abs(left - _canvasEdgeToolbarLeft) > 0.5 || Math.Abs(top - _canvasEdgeToolbarTop) > 0.5)
+        {
+            CanvasEdgeToolbar.Margin = new Thickness(left, top, 0, 0);
+            _canvasEdgeToolbarLeft = left;
+            _canvasEdgeToolbarTop = top;
+            _canvasEdgeToolbarPlaced = true;
+        }
+    }
+
+    /// <summary>把编辑框【原位】贴合到卡片上：编辑框自成"页局部空间"（宽高/字号/内边距/圆角/边框/
+    /// 配色全部用页局部值），再用 MatrixTransform 施加页变换 → 与 Win2D 绘制的卡片像素级重合，
+    /// 视觉上"就是卡片本身进入编辑态"，而非另开一个编辑栏。旋转/缩放/布局切换共用同一套页变换，
+    /// 天然贴合；编辑期间卡片本体不再绘制（见 DrawWhiteboardLayer）。</summary>
+    private void PositionCanvasEditBox()
+    {
+        CanvasNode? node = null;
+        int pageIdx = -1;
+        lock (_canvasLock)
+        {
+            if (_canvasEditNodeId != null && _canvasIndex.TryGetValue(_canvasEditNodeId, out var n))
+            {
+                node = n;
+                pageIdx = n.GlancePage;
+            }
+        }
+        var pages = _pages;
+        if (node == null || pageIdx < 0 || pageIdx >= pages.Count)
+        {
+            if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
+            if (CanvasEditScrollBar != null) CanvasEditScrollBar.Visibility = Visibility.Collapsed;
+            CanvasOverlay.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return;
+        var xf = MakePageXform(ComputePageDest(pageIdx, z, hOff, vOff), z);
+        _canvasEditNodeRef = node;      // 滚动条 / 留白重算复用
+        _canvasEditPageXf = xf;         // 摆 XAML 滚动条用（与编辑框同一页变换）
+
+        double w = Math.Max(12, node.Width);
+        double h = Math.Max(12, node.Height);
+        // 编辑框的边框是【内边框】（占据控件边缘内侧），而卡片边框是【居中描边】（骑在矩形边界上）。
+        // 把编辑框整体外扩半个边框宽，并相应减 Padding、加圆角 → 两者的边框外沿与文字起点像素级重合，
+        // 进出编辑时"框"不发生位移（否则高缩放下会看出两根错开的紫框）。
+        double grow = CanvasCardSelectedStrokeWidth / 2.0;
+        double ew = w + 2 * grow;
+        double eh = h + 2 * grow;
+        var p00 = xf.Map(node.X - grow, node.Y - grow);
+        var p10 = xf.Map(node.X - grow + ew, node.Y - grow);
+        var p01 = xf.Map(node.X - grow, node.Y - grow + eh);
+        // 控件局部 (0,0)~(ew,eh) → 屏幕 p00、(p10-p00)、(p01-p00) 的仿射矩阵（含页缩放与旋转）。
+        var m = new Matrix
+        {
+            M11 = (p10.X - p00.X) / ew,
+            M12 = (p10.Y - p00.Y) / ew,
+            M21 = (p01.X - p00.X) / eh,
+            M22 = (p01.Y - p00.Y) / eh,
+            OffsetX = p00.X,
+            OffsetY = p00.Y,
+        };
+
+        // 顺序是关键：先收起其他浮层子元素、并把编辑框的【全部属性】（尺寸/字号/内边距/圆角/
+        // 边框/配色/变换矩阵）设置到位，【最后】才显示覆盖层与编辑框。
+        // 反过来（先 Visible 再设属性）会让 Collapsed→Visible 那一下用上一次的值渲染一帧
+        // （首次进入编辑时更是用 XAML 默认值），表现为"闪一下旧样式的编辑框"。
+        // 重复调用时这两个 Visibility 已是 Visible，赋同值不触发重新布局，无副作用。
+        // 白底与圆角由 TextBox 自己提供（它会把自身 Background 按 CornerRadius 裁剪），
+        // 强调色边框由【上层】的 CanvasEditFrame 画 —— 这样任何来自 TextBox 自带样式的边框线都会被压在下面。
+        // 顺序仍严格：先把两者属性设全，最后才显示。
+        CanvasEditBox.Width = ew;
+        CanvasEditBox.Height = eh;
+        CanvasEditBox.FontSize = CanvasCardFontSize;
+        // 无边框 → 内容起点 = grow + Pad，与卡片文字对齐（左右 PadX、上下 PadY）。
+        CanvasEditBox.Padding = new Thickness(
+            CanvasCardPadX + grow, CanvasCardPadY + grow,
+            CanvasCardPadX + grow, CanvasCardPadY + grow);
+        CanvasEditBox.Background = new SolidColorBrush(CanvasCardFill);
+        CanvasEditBox.CornerRadius = new CornerRadius(CanvasCardRadius + grow);
+        CanvasEditBox.Foreground = new SolidColorBrush(CanvasCardText);
+        CanvasEditBox.Margin = new Thickness(0);
+        CanvasEditBox.RenderTransform = new MatrixTransform { Matrix = m };
+
+        CanvasEditFrame.Width = ew;
+        CanvasEditFrame.Height = eh;
+        CanvasEditFrame.BorderBrush = new SolidColorBrush(_canvasAccentColor);
+        CanvasEditFrame.BorderThickness = new Thickness(CanvasCardSelectedStrokeWidth);
+        CanvasEditFrame.CornerRadius = new CornerRadius(CanvasCardRadius + grow);
+        CanvasEditFrame.Margin = new Thickness(0);
+        CanvasEditFrame.RenderTransform = new MatrixTransform { Matrix = m };
+
+        // 编辑态保留上方卡片工具栏（用户要求：不消失）；只收起边工具栏。
+        CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        CanvasOverlay.Visibility = Visibility.Visible;
+        CanvasEditBox.Visibility = Visibility.Visible;   // CanvasEditFrame 经 Visibility 绑定跟随
+        EnsureCanvasEditScrollHost();
+    }
+
+    /// <summary>确保已拿到 TextBox 内部 ScrollViewer 并挂上 ViewChanged/SizeChanged（幂等）——
+    /// 只用于"编辑态把滚动偏移喂给滚动条绘制"与"留白重算"；滚动条本身已改为 Win2D 统一绘制。
+    /// ⚠ 绝不在这里排队重试：曾用 DispatcherQueue.TryEnqueue 自递归重试，模板未展开时会【无界排任务】→ UI 线程卡死。
+    /// 现在查不到就先返回，由 LayoutUpdated（<see cref="OnCanvasEditBoxLayoutUpdated"/>）在后续布局帧重试，拿到即退订。</summary>
+    private void EnsureCanvasEditScrollHost()
+    {
+        UpdateCanvasEditPad();   // 依赖内部 ScrollViewer 状态（未就绪时用默认留白），放最前
+        // 滚动条【不依赖 sv】—— sv 只提供滚动偏移，所以先无条件刷新一次（否则 sv 未就绪时编辑态就看不到滚动条）。
+        UpdateCanvasEditScrollBar();
+        if (_canvasEditScrollViewer == null)
+        {
+            var sv = FindDescendant<ScrollViewer>(CanvasEditBox);
+            if (sv == null) return;   // 模板还没展开 → 等下一次布局（有界：每帧至多一次）
+            _canvasEditScrollViewer = sv;
+            // 滚动/尺寸变化 → 刷新留白与 XAML 滚动条位置（编辑态滚动条在 XAML 层，无需重绘画布）。
+            _canvasEditScrollViewer.ViewChanged += (_, __) => { UpdateCanvasEditPad(); UpdateCanvasEditScrollBar(); };
+            _canvasEditScrollViewer.SizeChanged += (_, __) => { UpdateCanvasEditPad(); UpdateCanvasEditScrollBar(); };
+            CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 已拿到 → 退订
+        }
+    }
+
+    /// <summary>构造卡片文本排版格式。字体与编辑框（XAML 侧显式 FontFamily="Segoe UI"）保持一致，
+    /// 避免两侧默认字体不同带来的度量差异。
+    /// ⚠ 行距**不设** LineSpacing（用 Win2D 按字体度量的默认行距）—— "实测 XAML 行高写入 LineSpacing 以统一两态"
+    /// 的方案已实测失败并整体回退（实测值偏大 ⇒ 阅读态行距反而被拉大，与编辑态错乱更明显）；行距统一另案处理。</summary>
+    private CanvasTextFormat CreateCanvasTextFormat()
+    {
+        return new CanvasTextFormat
+        {
+            FontFamily = "Segoe UI",
+            FontSize = CanvasCardFontSize,
+            WordWrapping = CanvasWordWrapping.Wrap,
+        };
+    }
+
+    /// <summary>按给定文本与可用宽度测【真实行数】（高度不限，故溢出的行也计入）。</summary>
+    private int MeasureCanvasLineCount(string? text, double maxW)
+    {
+        if (string.IsNullOrEmpty(text) || maxW <= 0) return 1;
+        if (_canvasTextFormat == null) _canvasTextFormat = CreateCanvasTextFormat();
+        try
+        {
+            using var layout = new CanvasTextLayout(ScreenCanvas, text, _canvasTextFormat, (float)maxW, 1e5f);
+            return Math.Max(1, layout.LineCount);
+        }
+        catch { return 1; }
+    }
+
+    /// <summary>按 Obsidian 的垂直留白规则设置编辑框内边距：上方【最多留半行】，空间不足则挤上去（可为 0）、
+    /// 内容溢出（要滚动）时为 0。与卡片常态渲染（DrawCanvasCard）用同一公式、同一行高、同一行数算法
+    /// ⇒ 进出编辑文字不跳位。幂等：值不变时赋同值不触发布局，不会与 LayoutUpdated 形成回环。</summary>
+    private void UpdateCanvasEditPad()
+    {
+        var node = _canvasEditNodeRef;
+        if (node == null || _canvasEditNodeId == null) return;
+        double boxH = Math.Max(8, Math.Max(12, node.Height) - 2 * CanvasCardPadY);
+
+        // 内容高用【真实行数 × 行高】—— 与卡片常态渲染（DrawCanvasCard）同一口径 ⇒ 进出编辑文字不跳位。
+        // ⛔ 不要用 sv.ExtentHeight 来算留白：TextBox 内容不足时 ExtentHeight 会等于 ViewportHeight（内容宿主被拉伸填满），
+        //    于是 contentH 恒等于盒高 ⇒ topPad 恒为 0（表现为"编辑态丢失上方自适应留空"）。
+        //    sv 只用于"是否溢出"的判定（那边比值精确，见 TryGetCanvasScrollBarRect）。
+        double contentW = Math.Max(1, Math.Max(12, node.Width) - 2 * CanvasCardPadX);
+        int lines = MeasureCanvasLineCount(CanvasEditBox.Text, contentW);
+        double contentH = Math.Min(boxH, lines * CanvasLineHeight);
+        double topPad = Math.Min(0.5 * CanvasLineHeight, Math.Max(0, (boxH - contentH) / 2.0));
+        double grow = CanvasCardSelectedStrokeWidth / 2.0;
+        // 只改 top；左右必须保持不变 —— 左右一变就会重排文字、可能触发新一轮布局形成回环。
+        CanvasEditBox.Padding = new Thickness(
+            CanvasCardPadX + grow,
+            CanvasCardPadY + grow + topPad,
+            CanvasCardPadX + grow,
+            CanvasCardPadY + grow);
+    }
+
+    /// <summary>编辑框布局回调 —— 编辑期间【持续】订阅（不再拿到 sv 就退订）：
+    /// ① 模板展开前每帧重试取内部 ScrollViewer（幂等）；② 之后每帧兜底刷新编辑态滚动条。
+    /// 为什么必须兜底：实测仅靠 `TextChanged` 驱动时，滚动条的出现/消失会**慢半拍** ——
+    /// 输入到溢出 / 删到不溢出都不会当帧反映，要等 400ms 防抖提交或下一次视图事件。
+    /// 布局回调是当帧的、可靠的；刷新内部带签名缓存，无变化时零开销。</summary>
+    private void OnCanvasEditBoxLayoutUpdated(object? sender, object e)
+    {
+        if (_canvasEditNodeId == null)
+        {
+            CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 退出编辑 → 退订
+            return;
+        }
+        if (_canvasEditScrollViewer == null) EnsureCanvasEditScrollHost();   // 幂等：拿到 sv 后不再走这里
+        else UpdateCanvasEditScrollBar();                                     // 每帧兜底（签名不变则立即返回）
+    }
+
+    /// <summary>编辑框上的指针移动：编辑框是 XAML 元素、会吃掉 Viewer 的 PointerMoved ⇒ 编辑态下
+    /// `_canvasPointerPos` 不更新，卡片边框手柄（四角/四边）就算不出"指针最近的那一个"、无法显示与命中。
+    /// 这里补喂：把指针位置（统一转成 Viewer 坐标）同步给白板交互层，并重绘让手柄跟着指针走。</summary>
+    private void OnCanvasEditBoxPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        var p = e.GetCurrentPoint(Viewer).Position;
+        _canvasPointerPos = p;
+        _canvasPointerValid = true;
+        UpdateCanvasNodeHover(p);
+        InvalidateOverlayThrottled();
+    }
+
+    /// <summary>在可视化树里深度优先找第一个指定类型后代（用于取 TextBox 模板内的 ScrollViewer）。
+    /// 对未接入视觉树的元素，VisualTreeHelper 可能抛异常 → 一律按"没找到"处理，绝不外抛。</summary>
+    private static T? FindDescendant<T>(DependencyObject? root) where T : DependencyObject
+    {
+        if (root == null) return null;
+        int n;
+        try { n = VisualTreeHelper.GetChildrenCount(root); }
+        catch { return null; }
+        for (int i = 0; i < n; i++)
+        {
+            DependencyObject child;
+            try { child = VisualTreeHelper.GetChild(root, i); }
+            catch { return null; }
+            if (child is T hit) return hit;
+            var deep = FindDescendant<T>(child);
+            if (deep != null) return deep;
+        }
+        return null;
+    }
+
+    /// <summary>卡片在【视口坐标】的轴对齐外接矩形（含旋转页面下的四角包围盒）。</summary>
+    private bool TryGetCanvasNodeScreenRect(string nodeId, out Rect rect)
+    {
+        rect = default;
+        var pages = _pages;
+        if (pages.Count == 0) return false;
+        CanvasNode? node = null;
+        int pageIdx = -1;
+        lock (_canvasLock)
+        {
+            if (_canvasIndex.TryGetValue(nodeId, out var n)) { node = n; pageIdx = n.GlancePage; }
+        }
+        if (node == null || pageIdx < 0 || pageIdx >= pages.Count) return false;
+
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        var dest = ComputePageDest(pageIdx, z, hOff, vOff);
+
+        var xf = MakePageXform(dest, z);
+        var c0 = xf.Map(node.X, node.Y);
+        var c1 = xf.Map(node.X + node.Width, node.Y);
+        var c2 = xf.Map(node.X, node.Y + node.Height);
+        var c3 = xf.Map(node.X + node.Width, node.Y + node.Height);
+        float minX = MathF.Min(MathF.Min(c0.X, c1.X), MathF.Min(c2.X, c3.X));
+        float maxX = MathF.Max(MathF.Max(c0.X, c1.X), MathF.Max(c2.X, c3.X));
+        float minY = MathF.Min(MathF.Min(c0.Y, c1.Y), MathF.Min(c2.Y, c3.Y));
+        float maxY = MathF.Max(MathF.Max(c0.Y, c1.Y), MathF.Max(c2.Y, c3.Y));
+        rect = new Rect(minX, minY, maxX - minX, maxY - minY);
+        return true;
     }
 
     /// <summary>每帧把可见页位图按当前 偏移/缩放 画到视口画布上（纯 GPU 拷贝+缩放）。</summary>
@@ -3434,6 +5747,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
         }
 
+        // ---- 白板层：卡片 + 连线。与页位图/标注绘于同一交换链，随页面旋转/缩放。
+        // 卡片常显（跟随 AnnotationsVisible）。
+        if (AnnotationsVisible && HasCanvasContent())
+            DrawWhiteboardLayer(ds, z, visible);
+
+        // 视图在动 → 选中卡片/编辑框的屏幕位置随之改变，每帧合并排一次浮层重定位。
+        // 放在 Draw 末尾而非直接改布局：避免在绘制回调内触发布局重入。
+        if (_selectedCanvasNodeId != null || _canvasEditNodeId != null)
+            RequestCanvasOverlaySync();
+
     }
 
     /// <summary>缩放/滚动动画是否进行中。此时标注【逐帧随变换改变】，累积层无收益；
@@ -3448,6 +5771,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void DrawAnnotationsOnCanvas(CanvasDrawingSession ds, double z,
         List<(GpuPageInfo Page, Rect Dest)> visible)
     {
+        // 逐页设置的是【绝对】会话变换，绘制后必须还原为恒等：否则最后的页变换会泄漏给
+        // 紧随其后的白板层 —— 连线在屏幕坐标绘制，被泄漏的页变换二次映射后会"脱落"卡片，
+        // 直到视图落定（走 _annoLayer 路径不再改变换）才恢复。这就是"缩放时连线先脱落再回去"的根因。
+        var saved = ds.Transform;
         foreach (var (p, dest) in visible)
         {
             var annos = SafeAnnos(p.Index);
@@ -3461,6 +5788,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 if (a.Type == AnnotationType.Pen)
                     DrawAnnotation(ds, a);
         }
+        ds.Transform = saved;
     }
 
     /// <summary>计算当前视口下所有可见页及其屏幕 dest 矩形。</summary>
@@ -3898,6 +6226,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// <summary>双击切换 适应宽度 ↔ 100%，以双击点为锚，平滑动画过渡。标注模式下禁用。</summary>
     private void Viewer_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
+        // 白板模式：双击卡片=进入编辑，双击空白=新建卡片；不触发缩放切换。
+        if (CanvasInputActive)
+        {
+            HandleCanvasDoubleTap(e.GetPosition(Viewer));
+            e.Handled = true;
+            return;
+        }
         if (AnnotationInputActive) { e.Handled = true; return; }
         // 适应 = 按当前布局主轴适应（纵向=适应宽度 / 横向=适应高度），与 FitWidth 按钮完全一致。
         // 严禁用整份文档的 Spacer.Width 去除：横向布局总宽＝全部页面串接，数值巨大
@@ -4089,6 +6424,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         var pt = e.GetCurrentPoint(Viewer);
 
+        // 白板编辑中：任何落在编辑框之外的按下都结束编辑（Obsidian 行为）。编辑框与浮动控件
+        // 都在覆盖层内，落在其上的按下被它们吃掉、到不了本视图 —— 能到这里的一定是"卡片之外"。
+        if (_canvasEditNodeId != null) EndCanvasEdit(commit: true);
+
         // ── 标注模式：左键交给标注管线，右键仍可拖拽缩放 ──
         if (AnnotationInputActive && pt.Properties.IsLeftButtonPressed)
         {
@@ -4110,6 +6449,94 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (!IsPanZoomEnabled) return;
 
         CancelPendingRestore(); // 用户开始拖拽平移/右键缩放 → 取消未落定的还原，防止回拽
+
+        // ── 白板模式：左键优先命中卡片 → 选中并准备拖动；未命中卡片则取消选中，照常拖动平移 ──
+        if (CanvasInputActive && pt.Properties.IsLeftButtonPressed)
+        {
+            // 手柄"显形/命中"都依据指针位置：按下瞬间先就地刷新一次（不依赖上次 PointerMoved 的残值）。
+            _canvasPointerPos = pt.Position;
+            _canvasPointerValid = true;
+            UpdateCanvasNodeHover(pt.Position);
+            // 滚动条优先：它在卡片内部、意图更明确；命中区仅滚动条矩形（±小容差），
+            // 只对真的画了滚动条的卡片生效 ⇒ 不会把贴着卡片边框的缩放/连线手柄整体抢走。
+            if (TryHitCanvasScrollBar(pt.Position, out var sbNode) && sbNode != null)
+            {
+                StopSmoothZoom();
+                StopWheelScroll();
+                if (sbNode.Id != _selectedCanvasNodeId)
+                {
+                    // 阅读态：按住滚动条【拖动 = 移动卡片】并进入选中态；只是点一下（不移动）则仅选中。
+                    SelectCanvasNode(sbNode.Id);
+                    if (TryHitCanvasNode(pt.Position, out var dragNode, out int dPage, out double dPx, out double dPy)
+                        && dragNode != null)
+                    {
+                        _isCanvasDragging = true;
+                        _canvasDragNode = dragNode;
+                        _canvasDragPage = dPage;
+                        _canvasDragStartPx = dPx;
+                        _canvasDragStartPy = dPy;
+                        _canvasDragOrigX = dragNode.X;
+                        _canvasDragOrigY = dragNode.Y;
+                    }
+                }
+                else
+                {
+                    BeginCanvasScrollDrag(sbNode, pt.Position);   // 已选中 → 拖滚动条滚内容
+                }
+                this.CapturePointer(e.Pointer);
+                e.Handled = true;
+                return;
+            }
+            // 手柄优先级：四角（缩放）> 四边中点（连线）> 卡片本体（移动）。
+            // 手柄都落在卡片边界上，若先测本体必被"移动"抢走；四角与四边手柄在极小卡片上可能重叠，
+            // 故四角最优先。
+            if (TryHitCanvasCorner(pt.Position, out var rNodeId, out var rCorner) &&
+                CanvasViewportToPage(pt.Position, out int rPage, out _, out _))
+            {
+                StopSmoothZoom();
+                StopWheelScroll();
+                BeginCanvasResize(rNodeId, rCorner, rPage);
+                this.CapturePointer(e.Pointer);
+                e.Handled = true;
+                return;
+            }
+            if (TryHitCanvasHandle(pt.Position, out var hNodeId, out var hSide))
+            {
+                StopSmoothZoom();
+                StopWheelScroll();
+                BeginCanvasConnection(hNodeId, hSide, pt.Position);
+                this.CapturePointer(e.Pointer);
+                e.Handled = true;
+                return;
+            }
+            if (TryHitCanvasNode(pt.Position, out var hitNode, out int hitPage, out double hitPx, out double hitPy)
+                && hitNode != null)
+            {
+                StopSmoothZoom();
+                StopWheelScroll();
+                SelectCanvasNode(hitNode.Id);
+                _isCanvasDragging = true;
+                _canvasDragNode = hitNode;
+                _canvasDragPage = hitPage;
+                _canvasDragStartPx = hitPx;
+                _canvasDragStartPy = hitPy;
+                _canvasDragOrigX = hitNode.X;
+                _canvasDragOrigY = hitNode.Y;
+                this.CapturePointer(e.Pointer);
+                e.Handled = true;
+                return;
+            }
+            // 连线命中（在卡片本体之后）：卡片优先，未被卡片占用的区域再判连线。
+            if (TryHitCanvasEdge(pt.Position, out var hitEdgeId))
+            {
+                StopSmoothZoom();
+                StopWheelScroll();
+                SelectCanvasEdge(hitEdgeId);
+                e.Handled = true;
+                return;
+            }
+            SelectCanvasNode(null); // 点空白 → 取消选中（随后按左键继续拖动平移）
+        }
 
         if (pt.Properties.IsLeftButtonPressed)
         {
@@ -4169,6 +6596,75 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         // 命中元素是滚动条(或其子部件)→视为 chrome，交还真实箭头；其余交给下方画笔逻辑。
         // 放在最前：即便下面 _isAnnotating / _isRightZooming / _isDragPanning 提前 return 也要先更新。
+
+        // 白板模式：记录指针视口坐标（手柄"按接近度显形"依赖它），随后各分支照常处理。
+        // ⚠ 手势进行中【不更新】：拖动滚动条 / 缩放 / 连线期间指针位置若跟着变，
+        //    "最近的那个手柄"就会随光标漂移、点亮别的控件 —— 与"手势期间控件定格"的要求冲突。
+        if (_canvasInputActive && !_isCanvasScrollDragging && !_isCanvasResizing &&
+            !_isCanvasConnecting && !_isCanvasDragging)
+        {
+            _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
+            _canvasPointerValid = true;
+        }
+
+        // ── 白板滚动条拖动：把指针位移映射成滚动偏移 ──
+        if (_isCanvasScrollDragging)
+        {
+            UpdateCanvasScrollDrag(e.GetCurrentPoint(Viewer).Position);
+            e.Handled = true;
+            return;
+        }
+
+        // ── 白板卡片缩放：对角固定，移动角跟随指针 ──
+        if (_isCanvasResizing)
+        {
+            UpdateCanvasResize(e.GetCurrentPoint(Viewer).Position);
+            e.Handled = true;
+            return;
+        }
+
+        // ── 白板连线拖拽：更新橡皮筋与目标吸附 ──
+        if (_isCanvasConnecting)
+        {
+            UpdateCanvasConnecting(e.GetCurrentPoint(Viewer).Position);
+            e.Handled = true;
+            return;
+        }
+
+        // ── 白板卡片拖动：按页局部增量更新位置，clamp 到页内（越出边界也只贴边不丢） ──
+        if (_isCanvasDragging && _canvasDragNode != null)
+        {
+            var dpt = e.GetCurrentPoint(Viewer);
+            if (CanvasViewportToLockedPage(_canvasDragPage, dpt.Position, out double mpx, out double mpy))
+            {
+                double nx = _canvasDragOrigX + (mpx - _canvasDragStartPx);
+                double ny = _canvasDragOrigY + (mpy - _canvasDragStartPy);
+                var page = _pages[_canvasDragPage];
+                nx = Math.Clamp(nx, 0, Math.Max(0, page.WidthPoints - _canvasDragNode.Width));
+                ny = Math.Clamp(ny, 0, Math.Max(0, page.HeightPoints - _canvasDragNode.Height));
+                CanvasNodeDragged?.Invoke(this, new CanvasNodeEventArgs
+                {
+                    NodeId = _canvasDragNode.Id, PageIndex = _canvasDragPage, X = nx, Y = ny
+                });
+            }
+            // 同步重定位浮动控件：与卡片同一事件节拍（不走 Draw 尾部的合并队列）——
+            // 队列任务的执行时机在帧内会前后浮动，会让浮层相对卡片滞后/来回跳动。
+            SyncCanvasOverlayNow();
+            e.Handled = true;
+            return;
+        }
+
+        // ── 白板悬停（无任何手势时）：连线靠近变强调色；卡片悬停把边框染色，手柄按指针接近度单独显形 ──
+        if (CanvasInputActive && !_isRightZooming && !_isDragPanning)
+        {
+            var hoverPos = e.GetCurrentPoint(Viewer).Position;
+            UpdateCanvasEdgeHover(hoverPos);
+            UpdateCanvasNodeHover(hoverPos);
+            // 手柄"只显指针最接近的那一个"随指针连续变化：在卡片附近移动时需重绘（8ms 节流，
+            // 代价可忽略），否则手柄会停在上一次显形的位置不动。
+            if (_selectedCanvasNodeId != null || _hoverCanvasNodeId != null)
+                InvalidateOverlayThrottled();
+        }
 
         if (_isAnnotating)
         {
@@ -4284,6 +6780,104 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void Viewer_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (_isCanvasScrollDragging)
+        {
+            // 先清状态再释放捕获（释放会同步触发 CaptureLost，那里也会兜底清一次）。
+            _isCanvasScrollDragging = false;
+            _canvasScrollDragNodeId = null;
+            this.ReleasePointerCapture(e.Pointer);
+            // 拖动期间焦点被系统从编辑框夺走（见 CanvasEditBox_LostFocus）⇒ 这里还回去，保持仍在编辑态。
+            if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
+            e.Handled = true;
+            return;
+        }
+
+        if (_isCanvasResizing)
+        {
+            // 先取状态再 ReleasePointerCapture（释放会同步触发 CaptureLost 清空字段）。
+            var node = _canvasResizeNode;
+            int page = _canvasResizePage;
+            double ox = _canvasResizeOrigX, oy = _canvasResizeOrigY;
+            double ow = _canvasResizeOrigW, oh = _canvasResizeOrigH;
+            double nx = node?.X ?? 0, ny = node?.Y ?? 0;
+            double nw = node?.Width ?? 0, nh = node?.Height ?? 0;
+            CancelCanvasResize();
+            this.ReleasePointerCapture(e.Pointer);
+            if (node != null)
+                CanvasNodeResizeCompleted?.Invoke(this, new CanvasNodeEventArgs
+                {
+                    NodeId = node.Id, PageIndex = page,
+                    X = nx, Y = ny, Width = nw, Height = nh,
+                    OrigX = ox, OrigY = oy, OrigWidth = ow, OrigHeight = oh
+                });
+            e.Handled = true;
+            return;
+        }
+
+        if (_isCanvasConnecting)
+        {
+            // 同拖动：必须先取状态再 ReleasePointerCapture（释放会同步触发 CaptureLost 清空字段）。
+            var from = _connFromNodeId;
+            var fromSide = _connFromSide;
+            var target = _connTargetNodeId;
+            var targetSide = _connTargetSide;
+            var dropPos = e.GetCurrentPoint(Viewer).Position;   // 释放捕获前取落点
+            _isCanvasConnecting = false;
+            _connFromNodeId = null;
+            _connTargetNodeId = null;
+            _connTargetSide = "";
+            this.ReleasePointerCapture(e.Pointer);
+            InvalidateOverlay();
+            // 落在另一张卡片 → 建立连线；落在空白页 → 就地新建卡片并连线；落空/落在自身 → 取消。
+            if (!string.IsNullOrEmpty(from) && !string.IsNullOrEmpty(target) &&
+                !string.Equals(from, target, StringComparison.Ordinal))
+            {
+                CanvasNodeConnectionRequested?.Invoke(this, new CanvasNodeEventArgs
+                {
+                    NodeId = from, FromSide = fromSide,
+                    TargetNodeId = target, ToSide = targetSide
+                });
+            }
+            else if (!string.IsNullOrEmpty(from) &&
+                     !TryHitCanvasNode(dropPos, out _, out _, out _, out _) &&
+                     CanvasViewportToPage(dropPos, out int dropPage, out double dpx, out double dpy))
+            {
+                // 落点在合法页且不在任何卡片上 → 以落点为中心放一张默认尺寸卡片（clamp 页内）。
+                var page = _pages[dropPage];
+                double w = CanvasNode.DefaultWidth, h = CanvasNode.DefaultHeight;
+                double x = Math.Clamp(dpx - w / 2.0, 0, Math.Max(0, page.WidthPoints - w));
+                double y = Math.Clamp(dpy - h / 2.0, 0, Math.Max(0, page.HeightPoints - h));
+                CanvasNodeCreateConnectedRequested?.Invoke(this, new CanvasNodeEventArgs
+                {
+                    NodeId = from, FromSide = fromSide, PageIndex = dropPage, X = x, Y = y
+                });
+            }
+            e.Handled = true;
+            return;
+        }
+
+        if (_isCanvasDragging)
+        {
+            // 必须先取状态再 ReleasePointerCapture：释放捕获会【同步】触发 PointerCaptureLost，
+            // 而后者会把 _canvasDragNode/_canvasDragPage 清空 —— 先释放就会读到 null，
+            // 导致拖动完成事件永远不发（表现为：卡片能拖动，但移动不入撤销历史）。
+            var node = _canvasDragNode;
+            int page = _canvasDragPage;
+            double ox = _canvasDragOrigX, oy = _canvasDragOrigY;
+            _isCanvasDragging = false;
+            _canvasDragNode = null;
+            _canvasDragPage = -1;
+            this.ReleasePointerCapture(e.Pointer);   // CaptureLost 里 _isCanvasDragging 已为 false → 不会再发一次
+            if (node != null)
+                CanvasNodeDragCompleted?.Invoke(this, new CanvasNodeEventArgs
+                {
+                    NodeId = node.Id, PageIndex = page, X = node.X, Y = node.Y,
+                    OrigX = ox, OrigY = oy
+                });
+            e.Handled = true;
+            return;
+        }
+
         if (_isAnnotating)
         {
             var pt = e.GetCurrentPoint(Viewer);
@@ -4327,6 +6921,46 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         _isDragPanning = false;
         _isRightZooming = false;
+        // 滚动条拖动被系统打断：偏移已实时生效，直接清状态即可（无需回滚）。
+        _isCanvasScrollDragging = false;
+        _canvasScrollDragNodeId = null;
+        // 缩放拖拽被系统打断：尺寸已实时写回模型 → 照常发完成事件收尾（MainPage 据此入历史）。
+        if (_isCanvasResizing && _canvasResizeNode != null)
+        {
+            var rn = _canvasResizeNode;
+            int rp = _canvasResizePage;
+            CanvasNodeResizeCompleted?.Invoke(this, new CanvasNodeEventArgs
+            {
+                NodeId = rn.Id, PageIndex = rp,
+                X = rn.X, Y = rn.Y, Width = rn.Width, Height = rn.Height,
+                OrigX = _canvasResizeOrigX, OrigY = _canvasResizeOrigY,
+                OrigWidth = _canvasResizeOrigW, OrigHeight = _canvasResizeOrigH
+            });
+        }
+        CancelCanvasResize();
+        // 连线拖拽被系统打断（窗口失焦等）：直接取消，不建立连线。
+        if (_isCanvasConnecting)
+        {
+            _isCanvasConnecting = false;
+            _connFromNodeId = null;
+            _connTargetNodeId = null;
+            _connTargetSide = "";
+            InvalidateOverlay();
+        }
+        // 白板卡片拖动被系统打断：位置已实时写回模型 → 照常发完成事件收尾（MainPage 据此入历史）。
+        if (_isCanvasDragging && _canvasDragNode != null)
+        {
+            var node = _canvasDragNode;
+            int page = _canvasDragPage;
+            CanvasNodeDragCompleted?.Invoke(this, new CanvasNodeEventArgs
+            {
+                NodeId = node.Id, PageIndex = page, X = node.X, Y = node.Y,
+                OrigX = _canvasDragOrigX, OrigY = _canvasDragOrigY
+            });
+        }
+        _isCanvasDragging = false;
+        _canvasDragNode = null;
+        _canvasDragPage = -1;
         StopWheelScroll(); // 失焦等打断时取消进行中的滚轮滚动
         StopPanApplyTimer(); // 同上：取消进行中的拖拽平移同步定时器
 
@@ -4353,6 +6987,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void Viewer_PointerExited(object sender, PointerRoutedEventArgs e)
     {
         // 左键拖拽平移对指针做了 CapturePointer，离开窗口也能收到事件、由 PointerCaptureLost 收尾，无需在此处理。
+        // 指针离开视图 → 清掉白板悬停与指针位置，避免手柄/染色边框残留在「指针已不在」的卡片上。
+        if (_hoverCanvasNodeId != null || _hoverCanvasEdgeId != null || _canvasPointerValid)
+        {
+            _hoverCanvasNodeId = null;
+            _hoverCanvasEdgeId = null;
+            _canvasPointerValid = false;
+            InvalidateOverlayThrottled();
+        }
         if (_isRightZooming)
         {
             EndRightZoomGesture();

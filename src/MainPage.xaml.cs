@@ -58,7 +58,8 @@ namespace GlanceRX;
 public enum EditMode
 {
     Navigate,
-    Pen
+    Pen,
+    Canvas
 }
 
 public enum AnnotationType
@@ -203,11 +204,27 @@ public sealed partial class MainPage : Page
     }
 
     // Undo/Redo history stack
-    // 撤销栈：本会话所有笔画，后进先出（Ctrl+Z 连续按 = 多步撤销）。从文件读回的批注不入栈。
-    private List<(PdfPageViewModel Page, AnnotationViewModel Annotation)> _annotationHistory = new();
-    // 重做栈：撤销时把条目从历史栈移入此处（Ctrl+Y 重做）；新笔画开始即清空（重做分支失效，
-    // 与 PS 历史记录同逻辑：新操作使 redo 分支作废）。换文档时随历史一并清空。
-    private List<(PdfPageViewModel Page, AnnotationViewModel Annotation)> _annotationRedo = new();
+    // 撤销栈：本会话所有【可撤销编辑操作】（画笔笔画 + 白板卡片增删移动改字），后进先出
+    // （Ctrl+Z 连续按 = 多步撤销）。从文件读回的批注/白板不入栈。
+    private List<EditorHistoryEntry> _annotationHistory = new();
+    // 重做栈：撤销时把条目从历史栈移入此处（Ctrl+Y 重做）；新操作开始即清空（重做分支失效，
+    // 与 PS 历史记录同逻辑）。换文档时随历史一并清空。
+    private List<EditorHistoryEntry> _annotationRedo = new();
+
+    /// <summary>
+    /// 统一撤销/重做条目：把「撤销做什么、重做做什么」封成一对委托。
+    /// 这样画笔笔画（增删 AnnotationViewModel）与白板卡片操作（增删/移动/改字 CanvasNode）
+    /// 可以共用同一个 Ctrl+Z/Y 栈，按时间顺序统一回退，无需各建一套。
+    /// 委托内部自行负责数据变更与该操作对应的落盘/脏标记。
+    /// </summary>
+    private sealed class EditorHistoryEntry
+    {
+        private readonly Action _undo;
+        private readonly Action _redo;
+        public EditorHistoryEntry(Action undo, Action redo) { _undo = undo; _redo = redo; }
+        public void Undo() => _undo();
+        public void Redo() => _redo();
+    }
 
     // Secondary PDF pages (for Split View comparison)
     private ObservableCollection<PdfPageViewModel> _pagesRight = new();
@@ -348,6 +365,25 @@ public sealed partial class MainPage : Page
         GpuViewer.AnnotationPointerPressed += GpuAnnotation_Pressed;
         GpuViewer.AnnotationPointerMoved += GpuAnnotation_Moved;
         GpuViewer.AnnotationPointerReleased += GpuAnnotation_Released;
+
+        // 白板（Canvas 模式）：GpuPageView 负责命中/拖动几何，MainPage 负责模型/历史/落盘。
+        GpuViewer.CanvasNodeDragged += GpuCanvas_Dragged;
+        GpuViewer.CanvasNodeDragCompleted += GpuCanvas_DragCompleted;
+        GpuViewer.CanvasNodeCreateRequested += GpuCanvas_CreateRequested;
+        GpuViewer.CanvasNodeDeleteRequested += GpuCanvas_DeleteRequested;
+        GpuViewer.CanvasNodeTextCommitted += GpuCanvas_TextCommitted;
+        GpuViewer.CanvasNodeConnectionRequested += GpuCanvas_ConnectionRequested;
+        GpuViewer.CanvasNodeResized += GpuCanvas_Resized;
+        GpuViewer.CanvasNodeResizeCompleted += GpuCanvas_ResizeCompleted;
+        GpuViewer.CanvasEdgeDeleteRequested += GpuCanvas_EdgeDeleteRequested;
+        GpuViewer.CanvasEdgeStyleChanged += GpuCanvas_EdgeStyleChanged;
+        GpuViewer.CanvasNodeCreateConnectedRequested += GpuCanvas_CreateConnectedRequested;
+        // 编辑框内的 Ctrl+Z/Y 统一走同一撤销栈（编辑框原生撤销会与全局历史脱节）。
+        GpuViewer.CanvasUndoRequested += (_, __) => RequestUndo();
+        GpuViewer.CanvasRedoRequested += (_, __) => RequestRedo();
+        // Ctrl+Z / Ctrl+Y 不走 Page 加速器（在文本框聚焦时会被吞掉），改为整页 KeyDown 兜底：
+        // handledEventsToo=true 保证无论焦点在阅读视图、工具栏还是输入框都能收到。
+        this.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(UndoRedo_KeyDown), true);
 
         WelcomePanel.Visibility = Visibility.Visible;
         SidebarSplitView.Visibility = Visibility.Collapsed;
@@ -512,6 +548,18 @@ public sealed partial class MainPage : Page
         {
             e.Handled = true;
         }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            // 白板连线拖拽中按 Esc → 取消本次连线（松手落空同样会取消，Esc 只是更快的退出手感）。
+            if (GpuViewer.CancelCanvasConnection()) e.Handled = true;
+        }
+        else if ((e.Key == VirtualKey.Delete || e.Key == VirtualKey.Back) &&
+                 !e.Handled && _currentMode == EditMode.Canvas && !GpuViewer.IsCanvasEditing)
+        {
+            // 白板模式：优先删选中的连线，否则删选中的卡片。编辑文本时交给文本框原生处理。
+            if (GpuViewer.HasSelectedCanvasEdge) { GpuViewer.DeleteSelectedCanvasEdge(); e.Handled = true; }
+            else if (GpuViewer.HasSelectedCanvasNode) { GpuViewer.DeleteSelectedCanvasNode(); e.Handled = true; }
+        }
     }
 
     /// <summary>
@@ -646,6 +694,9 @@ public sealed partial class MainPage : Page
         //   （默认 Visibility=Collapsed，加载 PDF 后设为可见；IsChecked 由 SplitViewToggle_Click /
         //   CloseSecondPdf_Click 程序化变更，接管器订阅 IsCheckedProperty 回调，勾选态即 Obsidian 紫）
         ToggleButtonVisualOverride.Attach(ReadModeButton);
+        // 白板模式按钮：与阅读/画笔同级，采用同一套强调色（accent 紫）checked / hover / pressed
+        // 三态 + 点击光效，避免出现与其它模式按钮不一致的原生外观。
+        ToggleButtonVisualOverride.Attach(CanvasModeButton);
         ToggleButtonVisualOverride.Attach(ModeThumbnailsButton);
         ToggleButtonVisualOverride.Attach(ModeBookmarksButton);
         ToggleButtonVisualOverride.Attach(ModeOutlineButton);
@@ -2090,6 +2141,9 @@ public sealed partial class MainPage : Page
             await LoadAnnotationsAsync(_currentPdfPath);
             GpuViewer.InvalidateOverlay(); // 结构变化 → 整层重建
 
+            // 白板（Canvas 模式）：加载本文件的卡片与连线。
+            LoadCanvasForCurrentDocument();
+
             // 加载用户书签与文档大纲。
             await LoadBookmarksAsync();
             await LoadOutlineAsync();
@@ -3284,6 +3338,19 @@ public sealed partial class MainPage : Page
         }
     }
 
+    /// <summary>白板模式开关（与画笔模式平级）。已在白板模式时连点保持不退出（与画笔按钮一致），
+    /// 退出白板模式由"阅读模式"按钮负责；从其它模式点击则切入白板模式。</summary>
+    private void CanvasMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentMode == EditMode.Canvas)
+        {
+            CanvasModeButton.IsChecked = true;
+            ReadModeButton.IsChecked = false;
+            return;
+        }
+        SetEditMode(EditMode.Canvas);
+    }
+
     /// <summary>
     /// Dismisses the pen-options capsule when the user presses anywhere outside it
     /// (e.g. on the PDF canvas) WITHOUT consuming the click, so drawing still works.
@@ -3410,10 +3477,11 @@ public sealed partial class MainPage : Page
     {
         var vis = welcomeVisible ? Visibility.Collapsed : Visibility.Visible;
         if (PenModeButton != null) PenModeButton.Visibility = vis;
+        if (CanvasModeButton != null) CanvasModeButton.Visibility = vis;
         if (RotateButton != null) RotateButton.Visibility = vis;
         if (LayoutToggleButton != null) LayoutToggleButton.Visibility = vis;
 
-        // 回到欢迎页时若仍停留在画笔模式，按钮已隐藏、用户无法退出 → 主动切回阅读模式
+        // 回到欢迎页时若仍停留在画笔/白板模式，按钮已隐藏、用户无法退出 → 主动切回阅读模式
         if (welcomeVisible && _currentMode != EditMode.Navigate)
             SetEditMode(EditMode.Navigate);
     }
@@ -4033,6 +4101,7 @@ public sealed partial class MainPage : Page
         _currentMode = mode;
         ReadModeButton.IsChecked = (mode == EditMode.Navigate);
         PenModeButton.IsChecked = (mode == EditMode.Pen);
+        CanvasModeButton.IsChecked = (mode == EditMode.Canvas);
 
         // Toggle annotations background to allow clicking notes and scrolling in Navigate mode
         Microsoft.UI.Xaml.Media.Brush? bg = (mode == EditMode.Navigate)
@@ -4044,9 +4113,13 @@ public sealed partial class MainPage : Page
             page.AnnotationsBackground = bg;
         }
 
-        // 标注模式下左键交给标注管线（控件内部禁用拖动平移/双击缩放，右键缩放保留）。
+        // 画笔模式：左键交给标注管线（控件内部禁用拖动平移/双击缩放，右键缩放保留）。
+        // 白板模式：左键优先命中卡片（未命中仍可拖动平移），双击改为新建/编辑。
         if (GpuViewer != null)
-            GpuViewer.AnnotationInputActive = (mode != EditMode.Navigate);
+        {
+            GpuViewer.AnnotationInputActive = (mode == EditMode.Pen);
+            GpuViewer.CanvasInputActive = (mode == EditMode.Canvas);
+        }
 
         // Toggle the floating pen-options capsule (color + thickness) for drawing mode.
         // It lives in a Popup positioned below the Pen button, so it never shifts the toolbar layout.
@@ -5351,7 +5424,20 @@ public sealed partial class MainPage : Page
         pageVm.Annotations.Add(_activeHighlight);
         // 新笔画 = 新的历史操作 → 清空重做分支（与 PS/标准编辑器一致：撤销后画新笔，重做路径作废）。
         _annotationRedo.Clear();
-        _annotationHistory.Add((pageVm, _activeHighlight));
+        var created = _activeHighlight;
+        _annotationHistory.Add(new EditorHistoryEntry(
+            undo: () =>
+            {
+                pageVm.Annotations.Remove(created);
+                HasUnsavedChanges = true;   // 笔画写进 PDF → 需要用户保存
+                _ = SaveAnnotationsAsync();
+            },
+            redo: () =>
+            {
+                if (!pageVm.Annotations.Contains(created)) pageVm.Annotations.Add(created);
+                HasUnsavedChanges = true;
+                _ = SaveAnnotationsAsync();
+            }));
         GpuViewer.InvalidateOverlayThrottled();
     }
 
@@ -5409,18 +5495,47 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // Keyboard Accelerator for Undo (Ctrl+Z)
+    // Ctrl+Z / Ctrl+Y：整页 KeyDown 兜底（见构造函数 AddHandler）。不再用 Page 级加速器 ——
+// 焦点在 CanvasEditBox 等文本输入控件上时，加速器会被文本框吞掉，导致白板操作无法撤销。
+    private void UndoRedo_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        bool ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)
+                     & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+        if (e.Handled) return;
+        if (!ctrl) return;
+        if (e.Key == VirtualKey.Z) { RequestUndo(); e.Handled = true; }
+        else if (e.Key == VirtualKey.Y) { RequestRedo(); e.Handled = true; }
+    }
+
+    // Ctrl+Z / Ctrl+Y 加速器：与兜底 KeyDown 共用幂等入口，避免同一次按键双触发。
     private void Undo_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        UndoLastAnnotation();
+        RequestUndo();
         args.Handled = true;
     }
 
-    // Keyboard Accelerator for Redo (Ctrl+Y)
     private void Redo_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        RedoLastAnnotation();
+        RequestRedo();
         args.Handled = true;
+    }
+
+    private bool _undoRedoGuard;
+
+    private void RequestUndo()
+    {
+        if (_undoRedoGuard) return;
+        _undoRedoGuard = true;
+        UndoLastAnnotation();
+        DispatcherQueue.TryEnqueue(() => _undoRedoGuard = false);
+    }
+
+    private void RequestRedo()
+    {
+        if (_undoRedoGuard) return;
+        _undoRedoGuard = true;
+        RedoLastAnnotation();
+        DispatcherQueue.TryEnqueue(() => _undoRedoGuard = false);
     }
 
     private async void Save_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -5497,33 +5612,27 @@ public sealed partial class MainPage : Page
     {
         if (_annotationHistory.Count > 0)
         {
-            // Remove the last annotation from the history stack and page collection
             var last = _annotationHistory[_annotationHistory.Count - 1];
             _annotationHistory.RemoveAt(_annotationHistory.Count - 1);
-
-            last.Page.Annotations.Remove(last.Annotation);
-            // 压入重做栈，供 Ctrl+Y 恢复（多步重做：连续撤销 N 笔后可连续重做 N 笔）。
+            // 条目自带数据变更 + 落盘（画笔笔画落 PDF、白板操作落 .canvas）。
+            last.Undo();
+            // 压入重做栈，供 Ctrl+Y 恢复（多步重做：连续撤销 N 步后可连续重做 N 步）。
             _annotationRedo.Add(last);
-            HasUnsavedChanges = true;
-            _ = SaveAnnotationsAsync();
-            GpuViewer?.InvalidateOverlay(); // 结构变化 → 整层重建消除被撤销的标注
+            GpuViewer?.InvalidateOverlay(); // 结构变化 → 整层重建消除被撤销的内容
         }
     }
 
-    /// <summary>重做一步（Ctrl+Y）：从重做栈弹回最近一次被撤销的笔画，重新加入页面叠加层。
-    /// 可多步重做直到重做栈空；一旦画了新笔画，重做栈被清空（重做分支失效）。</summary>
+    /// <summary>重做一步（Ctrl+Y）：从重做栈弹回最近一次被撤销的操作。
+    /// 可多步重做直到重做栈空；一旦产生新操作，重做栈被清空（重做分支失效）。</summary>
     private void RedoLastAnnotation()
     {
         if (_annotationRedo.Count > 0)
         {
             var last = _annotationRedo[_annotationRedo.Count - 1];
             _annotationRedo.RemoveAt(_annotationRedo.Count - 1);
-
-            last.Page.Annotations.Add(last.Annotation);
+            last.Redo();
             _annotationHistory.Add(last); // 重做后重新成为可撤销的最近操作
-            HasUnsavedChanges = true;
-            _ = SaveAnnotationsAsync();
-            GpuViewer?.InvalidateOverlay(); // 结构变化 → 整层重建恢复被重做的标注
+            GpuViewer?.InvalidateOverlay(); // 结构变化 → 整层重建恢复被重做的内容
         }
     }
 
@@ -5581,6 +5690,324 @@ public sealed partial class MainPage : Page
         }
         catch { }
         finally { SuppressAnnotationDirty = false; }
+    }
+
+/// <summary>白板（Canvas 模式）：从 &lt;pdf&gt;.canvas 读取卡片与连线，保留模型供交互改写，
+/// 并把当前数组交给 GpuViewer 渲染。模型即唯一真相源，每次操作后由 SaveCanvas 立即落盘。</summary>
+    private void LoadCanvasForCurrentDocument()
+    {
+        CanvasDoc? doc = null;
+        try { doc = CanvasStore.Load(_currentPdfPath); }
+        catch { }
+        _canvasDoc = doc ?? new CanvasDoc();
+        GpuViewer.SetCanvasData(_canvasDoc.Nodes, _canvasDoc.Edges);
+    }
+
+    // ---- 白板模型与交互（P2）：数据/历史留在 MainPage，GpuPageView 只发事件 ----
+    private CanvasDoc? _canvasDoc;
+
+    /// <summary>按 id 找节点（线性查找，卡片数量级很小）。</summary>
+    private CanvasNode? FindCanvasNode(string? id)
+    {
+        if (_canvasDoc == null || string.IsNullOrEmpty(id)) return null;
+        foreach (var n in _canvasDoc.Nodes)
+            if (string.Equals(n.Id, id, StringComparison.Ordinal)) return n;
+        return null;
+    }
+
+    /// <summary>把当前白板数组重新交给渲染侧（增删节点/连线后必须调用，索引需重建）。</summary>
+    private void RefreshCanvas()
+    {
+        GpuViewer?.SetCanvasData(_canvasDoc?.Nodes, _canvasDoc?.Edges);
+    }
+
+    /// <summary>白板立即落盘（&lt;pdf&gt;.canvas 旁挂文件）。白板不写进 PDF，故不置 HasUnsavedChanges
+    /// —— 退出时不会为此弹"保存 PDF"询问，避免误导。</summary>
+    private void SaveCanvas()
+    {
+        if (_canvasDoc == null || string.IsNullOrEmpty(_currentPdfPath)) return;
+        try { CanvasStore.Save(_currentPdfPath, _canvasDoc); } catch { }
+    }
+
+    /// <summary>登记一条白板撤销记录并作废重做分支。</summary>
+    private void PushCanvasHistory(Action undo, Action redo)
+    {
+        _annotationRedo.Clear();
+        _annotationHistory.Add(new EditorHistoryEntry(undo, redo));
+    }
+
+    private static int _canvasIdSeq;
+    private static string NewCanvasId() => "c" + (++_canvasIdSeq).ToString() + "_" + Guid.NewGuid().ToString("N")[..6];
+
+    // 移动撤销/重做记录：起始位置由拖动完成事件携带（OrigX/OrigY）。
+    private void GpuCanvas_Dragged(object? sender, CanvasNodeEventArgs e)
+    {
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null) return;
+        node.X = e.X;
+        node.Y = e.Y;
+        GpuViewer.InvalidateOverlayThrottled();
+    }
+
+    private void GpuCanvas_DragCompleted(object? sender, CanvasNodeEventArgs e)
+    {
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null) return;
+        double nx = node.X, ny = node.Y;
+        double ox = e.OrigX, oy = e.OrigY;
+        // 位置没变（单击未拖动）→ 不入历史。
+        if (Math.Abs(nx - ox) < 0.5 && Math.Abs(ny - oy) < 0.5) return;
+        PushCanvasHistory(
+            undo: () => { node.X = ox; node.Y = oy; RefreshCanvas(); },
+            redo: () => { node.X = nx; node.Y = ny; RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    private void GpuCanvas_CreateRequested(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        if (e.PageIndex < 0 || e.PageIndex >= _pages.Count) return;
+        var doc = _canvasDoc;
+        var node = new CanvasNode
+        {
+            Id = NewCanvasId(),
+            GlancePage = e.PageIndex,
+            X = e.X,
+            Y = e.Y,
+            Width = CanvasNode.DefaultWidth,
+            Height = CanvasNode.DefaultHeight,
+            Text = ""
+        };
+        doc.Nodes.Add(node);
+        PushCanvasHistory(
+            undo: () => { doc.Nodes.Remove(node); RefreshCanvas(); },
+            redo: () => { if (!doc.Nodes.Contains(node)) doc.Nodes.Add(node); RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+        // 双击空白新建后直接进入编辑（与 Obsidian 一致）。
+        GpuViewer.SelectCanvasNode(node.Id);
+        GpuViewer.BeginCanvasEdit(node.Id);
+    }
+
+    private void GpuCanvas_DeleteRequested(object? sender, CanvasNodeEventArgs e)
+    {
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null || _canvasDoc == null) return;
+        var doc = _canvasDoc;
+        int idx = doc.Nodes.IndexOf(node);
+        // 连带删除挂在它身上的连线（撤销时一并还原，避免残留悬空连线）。
+        var removedEdges = new List<CanvasEdge>();
+        for (int i = doc.Edges.Count - 1; i >= 0; i--)
+        {
+            var ed = doc.Edges[i];
+            if (string.Equals(ed.FromNode, node.Id, StringComparison.Ordinal) ||
+                string.Equals(ed.ToNode, node.Id, StringComparison.Ordinal))
+            {
+                removedEdges.Add(ed);
+                doc.Edges.RemoveAt(i);
+            }
+        }
+        doc.Nodes.Remove(node);
+        PushCanvasHistory(
+            undo: () =>
+            {
+                if (!doc.Nodes.Contains(node))
+                    doc.Nodes.Insert(Math.Min(idx, doc.Nodes.Count), node);
+                foreach (var ed in removedEdges)
+                    if (!doc.Edges.Contains(ed)) doc.Edges.Add(ed);
+                RefreshCanvas();
+            },
+            redo: () =>
+            {
+                doc.Nodes.Remove(node);
+                foreach (var ed in removedEdges) doc.Edges.Remove(ed);
+                RefreshCanvas();
+            });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    private void GpuCanvas_TextCommitted(object? sender, CanvasNodeEventArgs e)
+    {
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null) return;
+        string oldText = node.Text ?? "";
+        string newText = e.Text ?? "";
+        if (string.Equals(oldText, newText, StringComparison.Ordinal)) return;
+        node.Text = newText;
+        PushCanvasHistory(
+            undo: () => { node.Text = oldText; RefreshCanvas(); },
+            redo: () => { node.Text = newText; RefreshCanvas(); });
+        SaveCanvas();
+        GpuViewer.InvalidateOverlay();
+    }
+
+    /// <summary>连线建立（P3）：由 GpuViewer 从手柄拖到另一张卡片后发出。
+    /// 源边来自手柄，目标边为吸附结果；两端节点可跨页（渲染侧各自经所属页变换映射）。</summary>
+    private void GpuCanvas_ConnectionRequested(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        var from = FindCanvasNode(e.NodeId);
+        var to = FindCanvasNode(e.TargetNodeId);
+        if (from == null || to == null || ReferenceEquals(from, to)) return;
+        var doc = _canvasDoc;
+        // 去重：同向、同两端、同出边的连线不重复添加（反向视为另一条，与 Obsidian 一致）。
+        foreach (var ex in doc.Edges)
+        {
+            if (string.Equals(ex.FromNode, from.Id, StringComparison.Ordinal) &&
+                string.Equals(ex.ToNode, to.Id, StringComparison.Ordinal) &&
+                string.Equals(ex.FromSide ?? "", e.FromSide, StringComparison.Ordinal))
+                return;
+        }
+        var edge = new CanvasEdge
+        {
+            Id = NewCanvasId(),
+            FromNode = from.Id,
+            FromSide = string.IsNullOrEmpty(e.FromSide) ? null : e.FromSide,
+            ToNode = to.Id,
+            ToSide = string.IsNullOrEmpty(e.ToSide) ? null : e.ToSide,
+            ToEnd = "arrow",
+        };
+        doc.Edges.Add(edge);
+        PushCanvasHistory(
+            undo: () => { doc.Edges.Remove(edge); RefreshCanvas(); },
+            redo: () => { if (!doc.Edges.Contains(edge)) doc.Edges.Add(edge); RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>卡片缩放中（P4）：实时写回矩形并刷新（模型对象与渲染侧共享引用，无需重建数组）。</summary>
+    private void GpuCanvas_Resized(object? sender, CanvasNodeEventArgs e)
+    {
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null) return;
+        node.X = e.X;
+        node.Y = e.Y;
+        node.Width = e.Width;
+        node.Height = e.Height;
+        GpuViewer.InvalidateOverlayThrottled();
+    }
+
+    /// <summary>卡片缩放结束：矩形未变则不入历史；变化则登记一条撤销记录并落盘。</summary>
+    private void GpuCanvas_ResizeCompleted(object? sender, CanvasNodeEventArgs e)
+    {
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null) return;
+        double nx = node.X, ny = node.Y, nw = node.Width, nh = node.Height;
+        double ox = e.OrigX, oy = e.OrigY, ow = e.OrigWidth, oh = e.OrigHeight;
+        // 尺寸与位置都没变（单击未拖动）→ 不入历史。
+        if (Math.Abs(nx - ox) < 0.5 && Math.Abs(ny - oy) < 0.5 &&
+            Math.Abs(nw - ow) < 0.5 && Math.Abs(nh - oh) < 0.5) return;
+        PushCanvasHistory(
+            undo: () => { node.X = ox; node.Y = oy; node.Width = ow; node.Height = oh; RefreshCanvas(); },
+            redo: () => { node.X = nx; node.Y = ny; node.Width = nw; node.Height = nh; RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>连线删除（P6）：边工具栏"删除"或 Delete 键。撤销时按原索引插回。</summary>
+    private void GpuCanvas_EdgeDeleteRequested(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        var doc = _canvasDoc;
+        CanvasEdge? edge = null;
+        foreach (var ed in doc.Edges)
+            if (string.Equals(ed.Id, e.EdgeId, StringComparison.Ordinal)) { edge = ed; break; }
+        if (edge == null) return;
+        int idx = doc.Edges.IndexOf(edge);
+        doc.Edges.Remove(edge);
+        PushCanvasHistory(
+            undo: () => { if (!doc.Edges.Contains(edge)) doc.Edges.Insert(Math.Min(idx, doc.Edges.Count), edge); RefreshCanvas(); },
+            redo: () => { doc.Edges.Remove(edge); RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>连线样式变更（P6）：箭头三态 / 颜色，仅处理事件里实际填充的字段，未变则不入历史。</summary>
+    private void GpuCanvas_EdgeStyleChanged(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        CanvasEdge? edge = null;
+        foreach (var ed in _canvasDoc.Edges)
+            if (string.Equals(ed.Id, e.EdgeId, StringComparison.Ordinal)) { edge = ed; break; }
+        if (edge == null) return;
+
+        string? oldFromEnd = edge.FromEnd, oldToEnd = edge.ToEnd, oldColor = edge.Color;
+        if (e.ArrowStyle != null)
+        {
+            switch (e.ArrowStyle)
+            {
+                case "none": edge.FromEnd = null; edge.ToEnd = "none"; break;
+                case "both": edge.FromEnd = "arrow"; edge.ToEnd = "arrow"; break;
+                default: edge.FromEnd = null; edge.ToEnd = "arrow"; break;   // single
+            }
+        }
+        if (e.EdgeColor != null)
+            edge.Color = string.IsNullOrEmpty(e.EdgeColor) ? null : e.EdgeColor;
+
+        if (string.Equals(oldFromEnd, edge.FromEnd, StringComparison.Ordinal) &&
+            string.Equals(oldToEnd, edge.ToEnd, StringComparison.Ordinal) &&
+            string.Equals(oldColor, edge.Color, StringComparison.Ordinal))
+            return;   // 无实际变化 → 不入历史
+
+        string? nFromEnd = edge.FromEnd, nToEnd = edge.ToEnd, nColor = edge.Color;
+        PushCanvasHistory(
+            undo: () => { edge.FromEnd = oldFromEnd; edge.ToEnd = oldToEnd; edge.Color = oldColor; RefreshCanvas(); },
+            redo: () => { edge.FromEnd = nFromEnd; edge.ToEnd = nToEnd; edge.Color = nColor; RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>从手柄拖到空白处（P6）：新建一张卡片并与源节点连线，两步合并为一条撤销记录。</summary>
+    private void GpuCanvas_CreateConnectedRequested(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        if (e.PageIndex < 0 || e.PageIndex >= _pages.Count) return;
+        var doc = _canvasDoc;
+        var src = FindCanvasNode(e.NodeId);
+        var node = new CanvasNode
+        {
+            Id = NewCanvasId(),
+            GlancePage = e.PageIndex,
+            X = e.X,
+            Y = e.Y,
+            Width = CanvasNode.DefaultWidth,
+            Height = CanvasNode.DefaultHeight,
+            Text = ""
+        };
+        doc.Nodes.Add(node);
+        CanvasEdge? edge = null;
+        if (src != null)
+        {
+            edge = new CanvasEdge
+            {
+                Id = NewCanvasId(),
+                FromNode = src.Id,
+                FromSide = string.IsNullOrEmpty(e.FromSide) ? null : e.FromSide,
+                ToNode = node.Id,
+                ToEnd = "arrow",
+            };
+            doc.Edges.Add(edge);
+        }
+        PushCanvasHistory(
+            undo: () =>
+            {
+                doc.Nodes.Remove(node);
+                if (edge != null) doc.Edges.Remove(edge);
+                RefreshCanvas();
+            },
+            redo: () =>
+            {
+                if (!doc.Nodes.Contains(node)) doc.Nodes.Add(node);
+                if (edge != null && !doc.Edges.Contains(edge)) doc.Edges.Add(edge);
+                RefreshCanvas();
+            });
+        SaveCanvas();
+        RefreshCanvas();
+        // 新建后直接进入编辑（与双击空白新建一致）。
+        GpuViewer.SelectCanvasNode(node.Id);
+        GpuViewer.BeginCanvasEdit(node.Id);
     }
 
     /// <summary>

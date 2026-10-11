@@ -638,6 +638,12 @@
 
                     </ToggleButton>
 
+                    <ToggleButton x:Name="CanvasModeButton" Click="CanvasMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}" ToolTipService.ToolTip="白板模式">
+
+                        <SymbolIcon Symbol="ViewAll"/>
+
+                    </ToggleButton>
+
 
 
                 </StackPanel>

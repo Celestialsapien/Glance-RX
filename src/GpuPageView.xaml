@@ -28,6 +28,7 @@
                               Draw="ScreenCanvas_Draw"/>
 
         <ScrollViewer x:Name="Viewer"
+                      IsTabStop="True"
                       Background="Transparent"
                       HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled"
                       VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled"
@@ -38,6 +39,139 @@
             <!-- 透明占位：撑出文档总尺寸，提供滚动范围；Background=Transparent 保证可命中(手势/滚轮) -->
             <Grid x:Name="Spacer" Background="Transparent"/>
         </ScrollViewer>
+
+        <!-- 白板交互覆盖层（Canvas 模式）：只承载"浮动控件 + 文本编辑框"这类瞬时 XAML 元素。
+             卡片本体与选中框仍由 Win2D 自绘，避免逐帧布局开销；本层无 Background，
+             空白处不拦截命中，只有子元素（按钮/编辑框）可见时才吃指针。 -->
+        <Grid x:Name="CanvasOverlay" Visibility="Collapsed">
+            <Border x:Name="CanvasCardToolbar" Visibility="Collapsed"
+                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="2">
+                <StackPanel Orientation="Horizontal" Spacing="2">
+                    <Button x:Name="CanvasEditButton" Click="CanvasEditButton_Click"
+                            Padding="6,3" Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="编辑文本">
+                        <SymbolIcon Symbol="Edit"/>
+                    </Button>
+                    <Button x:Name="CanvasDeleteButton" Click="CanvasDeleteButton_Click"
+                            Padding="6,3" Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="删除卡片">
+                        <SymbolIcon Symbol="Delete"/>
+                    </Button>
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="CanvasEdgeToolbar" Visibility="Collapsed"
+                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="2">
+                <StackPanel Orientation="Horizontal" Spacing="2">
+                    <Button x:Name="CanvasEdgeDeleteButton" Click="CanvasEdgeDeleteButton_Click"
+                            Padding="6,3" Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="删除连线">
+                        <SymbolIcon Symbol="Delete"/>
+                    </Button>
+                    <Border Width="1" Margin="1,3"
+                            Background="{ThemeResource ControlStrokeColorDefaultBrush}"/>
+                    <Button x:Name="CanvasEdgeArrowNoneBtn" Tag="none" Click="CanvasEdgeArrow_Click"
+                            Padding="6,3" Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="无箭头">
+                        <TextBlock Text="—" FontSize="12"/>
+                    </Button>
+                    <Button x:Name="CanvasEdgeArrowSingleBtn" Tag="single" Click="CanvasEdgeArrow_Click"
+                            Padding="6,3" Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="单向箭头">
+                        <TextBlock Text="→" FontSize="12"/>
+                    </Button>
+                    <Button x:Name="CanvasEdgeArrowBothBtn" Tag="both" Click="CanvasEdgeArrow_Click"
+                            Padding="6,3" Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="双向箭头">
+                        <TextBlock Text="↔" FontSize="12"/>
+                    </Button>
+                    <Border Width="1" Margin="1,3"
+                            Background="{ThemeResource ControlStrokeColorDefaultBrush}"/>
+                    <StackPanel Orientation="Horizontal" Spacing="1" VerticalAlignment="Center">
+                        <Button Tag="#606670" Click="CanvasEdgeColor_Click" Padding="2"
+                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="默认灰">
+                            <Ellipse Width="12" Height="12" Fill="#606670"/>
+                        </Button>
+                        <Button Tag="#3B82F6" Click="CanvasEdgeColor_Click" Padding="2"
+                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="蓝">
+                            <Ellipse Width="12" Height="12" Fill="#3B82F6"/>
+                        </Button>
+                        <Button Tag="#22C55E" Click="CanvasEdgeColor_Click" Padding="2"
+                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="绿">
+                            <Ellipse Width="12" Height="12" Fill="#22C55E"/>
+                        </Button>
+                        <Button Tag="#F59E0B" Click="CanvasEdgeColor_Click" Padding="2"
+                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="橙">
+                            <Ellipse Width="12" Height="12" Fill="#F59E0B"/>
+                        </Button>
+                        <Button Tag="#EF4444" Click="CanvasEdgeColor_Click" Padding="2"
+                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="红">
+                            <Ellipse Width="12" Height="12" Fill="#EF4444"/>
+                        </Button>
+                        <Button Tag="#A855F7" Click="CanvasEdgeColor_Click" Padding="2"
+                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="紫">
+                            <Ellipse Width="12" Height="12" Fill="#A855F7"/>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 卡片文本编辑框：宽高/字号/内边距/圆角/底色在 PositionCanvasEditBox 里按【页局部值】设置，
+                 再用 MatrixTransform 施加页变换 → 与 Win2D 绘制的卡片像素级重合，视觉上"就是卡片本身进入编辑态"。
+                 自身不画边框（BorderThickness=0）—— 边框交给上层 CanvasEditFrame，从而不受 TextBox VisualState 影响。
+                 UseSystemFocusVisuals=False 去掉键盘焦点矩形。
+                 RequestedTheme="Light"：编辑框底色恒为卡片白，局部主题须锁浅色，否则深色主题下 ScrollBar thumb
+                 是半透明白、压在白底上完全看不见。 -->
+            <TextBox x:Name="CanvasEditBox" Visibility="Collapsed"
+                     HorizontalAlignment="Left" VerticalAlignment="Top"
+                     RenderTransformOrigin="0,0"
+                     RequestedTheme="Light"
+                     FontFamily="Segoe UI"
+                     BorderThickness="0"
+                     UseSystemFocusVisuals="False"
+                     AcceptsReturn="True" TextWrapping="Wrap"
+                     VerticalContentAlignment="Top" HorizontalContentAlignment="Left"
+                     IsSpellCheckEnabled="False" IsTextPredictionEnabled="False"
+                     ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     LostFocus="CanvasEditBox_LostFocus"
+                     TextChanged="CanvasEditBox_TextChanged"
+                     PreviewKeyDown="CanvasEditBox_PreviewKeyDown"
+                     KeyDown="CanvasEditBox_KeyDown">
+                <!-- 把 TextBox 聚焦/悬停态的自带"边框厚度"主题值压成 0：Fluent 的 TextBox 聚焦时会临时把
+                     内部 BorderElement 的边框改成【底部 2px】并染成 accent 蓝，即使 BorderThickness=0 也会冒出来
+                     （表现为强调色框底部多出一条蓝线）。局部压平后，边框完全由上层 CanvasEditFrame 负责。 -->
+                <TextBox.Resources>
+                    <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
+                    <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
+                    <Thickness x:Key="TextControlBorderThemeThicknessPointerOver">0</Thickness>
+                </TextBox.Resources>
+            </TextBox>
+
+            <!-- 编辑态的强调色边框：画在编辑框【上层】—— 确保盖住任何来自 TextBox 自带样式漏出的边框线。
+                 只画边框、不画底（白底与圆角由 TextBox 自己提供），IsHitTestVisible=False 不吃指针。 -->
+            <Border x:Name="CanvasEditFrame"
+                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                    RenderTransformOrigin="0,0"
+                    IsHitTestVisible="False"
+                    Visibility="{Binding Visibility, ElementName=CanvasEditBox}"/>
+
+            <!-- 编辑态专用滚动条 —— 【必须在 XAML 层】：编辑框是不透明白底、盖在 Win2D 画布之上，
+                 把滚动条画进 Win2D 会被它完整遮住（这正是"编辑态反而没有滚动条"的根因）。
+                 阅读态 / 选中态没有 XAML 遮挡，滚动条由 Win2D 的 DrawCanvasScrollBar 画。
+                 两处共用同一组常量（宽度/间隙/颜色/圆角/最小长）与同一套位置公式，观感一致。
+                 ⚠ 这里必须【可命中】（不能 IsHitTestVisible=False）：它是编辑框之上的最上层，
+                 可命中才能——① 接住 PointerPressed 开始拖动；② 鼠标在条上显示为箭头而不是 TextBox 的工字光标。 -->
+            <Border x:Name="CanvasEditScrollBar" Visibility="Collapsed"
+                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                    RenderTransformOrigin="0,0"/>
+        </Grid>
 
     </Grid>
 </UserControl>
