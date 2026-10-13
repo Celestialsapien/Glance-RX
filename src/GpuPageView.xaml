@@ -122,13 +122,17 @@
                 </StackPanel>
             </Border>
 
-            <!-- 卡片文本编辑框：宽高/字号/内边距/圆角/底色在 PositionCanvasEditBox 里按【页局部值】设置，
-                 再用 MatrixTransform 施加页变换 → 与 Win2D 绘制的卡片像素级重合，视觉上"就是卡片本身进入编辑态"。
-                 自身不画边框（BorderThickness=0）—— 边框交给上层 CanvasEditFrame，从而不受 TextBox VisualState 影响。
-                 UseSystemFocusVisuals=False 去掉键盘焦点矩形。
-                 RequestedTheme="Light"：编辑框底色恒为卡片白，局部主题须锁浅色，否则深色主题下 ScrollBar thumb
-                 是半透明白、压在白底上完全看不见。 -->
-            <TextBox x:Name="CanvasEditBox" Visibility="Collapsed"
+            <!-- 卡片文本编辑框：【不可见输入宿主】(Opacity=0)。三态（阅读/选中/编辑）文字一律由 Win2D
+                 的 CanvasTextLayout 绘制 ⇒ 不存在"两个引擎排版口径不同"导致的两态偏移（这是此前编辑态字体
+                 小幅位移的根因）。RichEditBox 仅负责接收键盘/指针/IME 输入、维护 TOM 文档与光标选区，
+                 可见文字/光标/选区/滚动条全部由 Win2D 按其自身 layout 绘制。
+                 必须仍是 RichEditBox 而非 TextBox：需要 ITextParagraphFormat.SetLineSpacing 把行距锁到
+                 Win2D 实测值（仅供"点击落光标"的命中映射对齐，不影响可见渲染，因为渲染已交给 Win2D）。
+                 代价是它天生富文本控件，故关闭格式化快捷键、复制/粘贴按纯文本，保持卡片"纯文本"语义。
+                 边框由 Win2D(DrawCanvasCard) 在编辑态按【选中】强调色绘制，不再需要上层 CanvasEditFrame。
+                 RequestedTheme="Light"：局部锁浅色，深色主题下其（虽不可见的）滚动条 thumb 度量不被反转。
+                 Opacity="0" 让它可见性完全交给 Win2D；Visibility 在编辑期切到 Visible、退出编辑 Collapsed。 -->
+            <local:CanvasEditHostBox x:Name="CanvasEditBox" Visibility="Collapsed" Opacity="0"
                      HorizontalAlignment="Left" VerticalAlignment="Top"
                      RenderTransformOrigin="0,0"
                      RequestedTheme="Light"
@@ -138,39 +142,25 @@
                      AcceptsReturn="True" TextWrapping="Wrap"
                      VerticalContentAlignment="Top" HorizontalContentAlignment="Left"
                      IsSpellCheckEnabled="False" IsTextPredictionEnabled="False"
+                     DisabledFormattingAccelerators="All"
+                     ClipboardCopyFormat="PlainText"
                      ScrollViewer.VerticalScrollBarVisibility="Hidden"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                      LostFocus="CanvasEditBox_LostFocus"
                      TextChanged="CanvasEditBox_TextChanged"
                      PreviewKeyDown="CanvasEditBox_PreviewKeyDown"
-                     KeyDown="CanvasEditBox_KeyDown">
-                <!-- 把 TextBox 聚焦/悬停态的自带"边框厚度"主题值压成 0：Fluent 的 TextBox 聚焦时会临时把
-                     内部 BorderElement 的边框改成【底部 2px】并染成 accent 蓝，即使 BorderThickness=0 也会冒出来
-                     （表现为强调色框底部多出一条蓝线）。局部压平后，边框完全由上层 CanvasEditFrame 负责。 -->
-                <TextBox.Resources>
+                     KeyDown="CanvasEditBox_KeyDown"
+                     Paste="CanvasEditBox_Paste">
+                <!-- 把编辑框聚焦/悬停态的自带"边框厚度"主题值压成 0：Fluent 文本框聚焦时会临时把
+                     内部 BorderElement 的边框改成【底部 2px】并染成 accent 蓝。编辑框现已 Opacity=0 不可见，
+                     此压平仅为稳妥，避免任何漏出（虽然不可见，但命中/输入仍由它承担）。 -->
+                <local:CanvasEditHostBox.Resources>
                     <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
                     <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
                     <Thickness x:Key="TextControlBorderThemeThicknessPointerOver">0</Thickness>
-                </TextBox.Resources>
-            </TextBox>
+                </local:CanvasEditHostBox.Resources>
+            </local:CanvasEditHostBox>
 
-            <!-- 编辑态的强调色边框：画在编辑框【上层】—— 确保盖住任何来自 TextBox 自带样式漏出的边框线。
-                 只画边框、不画底（白底与圆角由 TextBox 自己提供），IsHitTestVisible=False 不吃指针。 -->
-            <Border x:Name="CanvasEditFrame"
-                    HorizontalAlignment="Left" VerticalAlignment="Top"
-                    RenderTransformOrigin="0,0"
-                    IsHitTestVisible="False"
-                    Visibility="{Binding Visibility, ElementName=CanvasEditBox}"/>
-
-            <!-- 编辑态专用滚动条 —— 【必须在 XAML 层】：编辑框是不透明白底、盖在 Win2D 画布之上，
-                 把滚动条画进 Win2D 会被它完整遮住（这正是"编辑态反而没有滚动条"的根因）。
-                 阅读态 / 选中态没有 XAML 遮挡，滚动条由 Win2D 的 DrawCanvasScrollBar 画。
-                 两处共用同一组常量（宽度/间隙/颜色/圆角/最小长）与同一套位置公式，观感一致。
-                 ⚠ 这里必须【可命中】（不能 IsHitTestVisible=False）：它是编辑框之上的最上层，
-                 可命中才能——① 接住 PointerPressed 开始拖动；② 鼠标在条上显示为箭头而不是 TextBox 的工字光标。 -->
-            <Border x:Name="CanvasEditScrollBar" Visibility="Collapsed"
-                    HorizontalAlignment="Left" VerticalAlignment="Top"
-                    RenderTransformOrigin="0,0"/>
         </Grid>
 
     </Grid>
