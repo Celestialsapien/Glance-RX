@@ -3769,6 +3769,23 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
             var pageXf = MakePageXform(dest, z);
             ds.Transform = pageXf.ToMatrix();
+
+            // 逐卡片视口裁剪：屏外卡片本就看不见，不必浪费 fill/描边/文字栅格化（高强度多卡片白板的真瓶颈）。
+            // 仿 PDF TileRenderCache 的 IsTileVisible/FreeNotVisible 思路，落到卡片粒度。
+            // 用页变换把卡片外接矩形投到屏幕 DIP 取 AABB，与视口(0,0,_vpW,_vpH)相交测试；
+            // 留 48f 余量（与连线裁剪同值）兜住边框/手柄的少量外扩，保证"贴边卡"不闪。
+            // 连线独立绘制、走自己的包围盒裁剪，本裁剪不影响连线（见 DrawCanvasEdges）。
+            const float nodeCullMargin = 48f;
+            bool CardVisibleOnScreen(CanvasNode n)
+            {
+                var a = pageXf.Map(n.X, n.Y);
+                var b = pageXf.Map(n.X + n.Width, n.Y + n.Height);
+                float minX = MathF.Min(a.X, b.X), maxX = MathF.Max(a.X, b.X);
+                float minY = MathF.Min(a.Y, b.Y), maxY = MathF.Max(a.Y, b.Y);
+                return !(maxX < -nodeCullMargin || minX > _vpW + nodeCullMargin
+                      || maxY < -nodeCullMargin || minY > _vpH + nodeCullMargin);
+            }
+
             string? sel = _selectedCanvasNodeId;
             string? hov = _hoverCanvasNodeId;
             // 手势进行中（拖角缩放 / 拖边连线）：只有"正在操作的那张卡"参与手柄绘制 ——
@@ -3804,6 +3821,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             {
                 if (node.GlancePage != p.Index) continue;
                 if (topId != null && node.Id == topId) continue;   // 置顶卡片留到第二轮绘制
+                if (!CardVisibleOnScreen(node)) continue;          // 屏外卡片跳过（连线独立绘制、不受影响）
                 DrawCardNode(node);
             }
             if (topId != null && index.TryGetValue(topId, out var topNode) && topNode.GlancePage == p.Index)
