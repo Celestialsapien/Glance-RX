@@ -74,6 +74,18 @@
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
                                      Color="{ThemeResource ControlFillColorTertiary}" />
 
+                    <!-- 「…」溢出菜单项：悬浮/按下反馈与工具栏按钮【同款】。generic 默认的
+                         MenuFlyoutItemBackgroundPointerOver/Pressed 走 SubtleFillColor*（比工具栏的 ControlFillColor*
+                         更暗），ForegroundPressed 也不压暗 ⇒ 三键一并改到与 ToggleButton 一致。
+                         模板 VSM 用 {ThemeResource} 运行时查找，故在此主题字典覆盖同名键即生效
+                         （与上面 ToggleButtonBackground* 的覆盖机制相同）。 -->
+                    <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPointerOver"
+                                     Color="{ThemeResource ControlFillColorSecondary}" />
+                    <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPressed"
+                                     Color="{ThemeResource ControlFillColorTertiary}" />
+                    <SolidColorBrush x:Key="MenuFlyoutItemForegroundPressed"
+                                     Color="{ThemeResource TextFillColorSecondary}" />
+
                     <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
                          不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->
 
@@ -165,6 +177,13 @@
                                      Color="#F6F6F6" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPressed"
                                      Color="#ECECEC" />
+
+                    <!-- 「…」溢出菜单项：悬浮/按下与工具栏按钮同款（说明见深色档）。浅色档沿用工具栏的
+                         #F6F6F6 / #ECECEC 字面量，保证同屏观感一致。 -->
+                    <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPointerOver" Color="#F6F6F6" />
+                    <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPressed" Color="#ECECEC" />
+                    <SolidColorBrush x:Key="MenuFlyoutItemForegroundPressed"
+                                     Color="{ThemeResource TextFillColorSecondary}" />
 
                     <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
                          不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->

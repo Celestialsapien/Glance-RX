@@ -132,6 +132,8 @@ public sealed partial class MainPage : Page
     // 文件即唯一真相源，"不保存退出"只需从文件重载即可回到上次保存态，无需任何草稿/副本。
     private bool _canOverwriteOriginal = true;
     private SettingsService _settingsService = new();
+    // 顶部工具栏显示方式：true=常驻显示，false=鼠标移开便收起（默认，原有行为）。
+    private bool _toolbarAlwaysVisible;
     private uint _totalPages = 0;
 
     // 侧边栏：缩略图 / 书签 / 大纲
@@ -716,7 +718,9 @@ public sealed partial class MainPage : Page
         // 接管普通功能按钮（非选中态）的视觉输出 —— 仅推广点击光效、不改颜色，与 ToggleButton 同源。
         // 干掉原生状态机 + 坐标几何 hover，消除「松手后底色跳一档」的闪烁。
         // 范围：仅标准外观按钮；颜色胶囊 / 线宽胶囊 / 透明 pill / 浮层 / 书签模板内按钮 不在此列。
-        ButtonVisualOverride.Attach(ToggleSidebarButton);
+        // 侧边栏开关按钮：改用 ToggleButtonVisualOverride（与对比视图按钮同一套），
+        // 选中态即 Obsidian 紫；IsChecked 由 ToggleSidebar_Click / 还原视图时按 IsPaneOpen 程序化同步。
+        ToggleButtonVisualOverride.Attach(ToggleSidebarButton);
         ButtonVisualOverride.Attach(PrevPageButton);
         ButtonVisualOverride.Attach(NextPageButton);
         ButtonVisualOverride.Attach(RotateButton);
@@ -754,6 +758,11 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(ZoomInButton, transparentAtRest: true);
         ButtonVisualOverride.Attach(ZoomValueButton, transparentAtRest: true);
         ButtonVisualOverride.Attach(FitWidthButton, transparentAtRest: true);
+
+        // 顶部工具栏「…」溢出收纳按钮：与前排功能按钮同一套 hover/pressed 反馈（静止带底、整颗变色）。
+        ButtonVisualOverride.Attach(ToolbarMoreButton);
+        // 初始化工具栏「空间不足收纳」：读 XAML 可见性初值、量「…」按钮自然宽度、挂菜单刷新回调。
+        InitializeToolbarOverflow();
 
         // 缩放预设浮层 8 颗：无 x:Name，按容器遍历接管（见 AttachZoomPresetOverrides）。
         AttachZoomPresetOverrides();
@@ -925,6 +934,11 @@ public sealed partial class MainPage : Page
             if (TwoPageItem != null) TwoPageItem.Content = GlanceRX.Services.LocalizationService.Get("TwoPage");
             if (BookItem != null) BookItem.Content = GlanceRX.Services.LocalizationService.Get("BookView");
 
+            // Toolbar Display selector
+            if (ToolbarDisplayLabel != null) ToolbarDisplayLabel.Text = GlanceRX.Services.LocalizationService.Get("ToolbarDisplay");
+            if (ToolbarAlwaysItem != null) ToolbarAlwaysItem.Content = GlanceRX.Services.LocalizationService.Get("ToolbarAlwaysVisible");
+            if (ToolbarAutoHideItem != null) ToolbarAutoHideItem.Content = GlanceRX.Services.LocalizationService.Get("ToolbarAutoHide");
+
             // Operations guide overlay（按钮标签与浮层标题共用 GuideTitle）
             if (GuideButtonText != null) GuideButtonText.Text = GlanceRX.Services.LocalizationService.Get("GuideTitle");
             if (GuideTitleText != null) GuideTitleText.Text = GlanceRX.Services.LocalizationService.Get("GuideTitle");
@@ -969,6 +983,15 @@ public sealed partial class MainPage : Page
             if (LayoutViewComboBox != null)
             {
                 LayoutViewComboBox.SelectedIndex = 0;
+            }
+
+            // 工具栏显示方式下拉初始选中项：0=常驻显示，1=鼠标移开便收起（默认，与原有行为一致）。
+            // 同样只设代码选中项，不在 XAML 写 SelectedIndex。赋值会同步触发
+            // ToolbarDisplayComboBox_SelectionChanged，由它落地状态并应用。
+            _toolbarAlwaysVisible = _settingsService.ToolbarAlwaysVisible;
+            if (ToolbarDisplayComboBox != null)
+            {
+                ToolbarDisplayComboBox.SelectedIndex = _toolbarAlwaysVisible ? 0 : 1;
             }
 
             // Apply theme
@@ -1039,6 +1062,35 @@ public sealed partial class MainPage : Page
             GpuViewer.Arrangement = (PageArrangement)idx;
             if (GpuViewerRight != null && GpuViewerRight.Visibility == Visibility.Visible)
                 GpuViewerRight.Arrangement = (PageArrangement)idx;
+        }
+    }
+
+        private void ToolbarDisplayComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ToolbarDisplayComboBox == null) return;
+        bool always = ToolbarDisplayComboBox.SelectedIndex == 0;
+        _settingsService.ToolbarAlwaysVisible = always;
+        ApplyToolbarAlwaysVisible(always);
+    }
+
+    /// <summary>
+    /// 应用「工具栏显示方式」设置。
+    ///   常驻显示：取消待收起计时并强制展开工具栏，后续所有收起请求被守卫拦截。
+    ///   鼠标移开便收起：恢复原有自动收起行为（立即请求一次收起，指针仍在本身上时不收）。
+    /// </summary>
+    private void ApplyToolbarAlwaysVisible(bool always)
+    {
+        _toolbarAlwaysVisible = always;
+        if (TopToolbar == null) return;
+
+        if (always)
+        {
+            CancelToolbarHide();
+            ShowTopToolbar();
+        }
+        else if (TopToolbar.IsHitTestVisible)
+        {
+            RequestHideTopToolbar();
         }
     }
 
@@ -2033,6 +2085,7 @@ public sealed partial class MainPage : Page
             _currentPageIndex = 0;
             PageNumberInput.Text = "1";
             TotalPagesText.Text = "/ 0";
+            QueueToolbarOverflowUpdate();   // 总页数文本宽度变化会影响工具栏可用宽度，重算收纳
 
             // 切换文档前，先保存旧 PDF 的阅读位置/缩放（此时 GpuViewer 仍显示旧文档）。
             SaveCurrentViewState();
@@ -2059,9 +2112,11 @@ public sealed partial class MainPage : Page
             // 若挪到 LoadAsync 之后再翻，会先按"收起"的宽度还原、再展开侧边栏触发一次多余的重锚。
             var savedVs = ViewStateStore.Load(_currentPdfPath);
             SidebarSplitView.IsPaneOpen = savedVs?.SidebarOpen == true;
-            SaveButton.Visibility = Visibility.Visible;
-            if (PrintButton != null) PrintButton.Visibility = Visibility.Visible;
-            if (SplitViewToggleButton != null) SplitViewToggleButton.Visibility = Visibility.Visible;
+            if (ToggleSidebarButton != null) ToggleSidebarButton.IsChecked = SidebarSplitView.IsPaneOpen;
+            // 走「应用可见性」通道设置显隐，由收纳系统按窗口宽度决定是否收进「…」菜单。
+            SetToolbarItemAppVisible(SaveButton, true);
+            if (PrintButton != null) SetToolbarItemAppVisible(PrintButton, true);
+            if (SplitViewToggleButton != null) SetToolbarItemAppVisible(SplitViewToggleButton, true);
 
             // Initialize Rust PDF engine (only rendering backend), retrying when
             // the PDF is password-protected until the user supplies the correct
@@ -2103,6 +2158,7 @@ public sealed partial class MainPage : Page
             // 左视图由 GpuPageView 承载：自建页列表 + 按需 GPU 光栅，滚动/缩放由 GPU 变换。
             _totalPages = await _pdfRenderService!.GetPageCountAsync();
             TotalPagesText.Text = $"/ {_totalPages}";
+            QueueToolbarOverflowUpdate();   // 总页数文本宽度变化会影响工具栏可用宽度，重算收纳
             GpuViewer.Visibility = Visibility.Visible;
             // 还原上次关闭时的阅读位置与缩放：必须在 LoadAsync 时就传入 restoreView——
             // 否则 GpuPageView 内部 TryInitialFit 会先做"适应宽度"（ChangeView(0,0,fit)）把
@@ -2248,13 +2304,23 @@ public sealed partial class MainPage : Page
         // 这类路径上会被 SaveCurrentViewState 连同视图一起写进某个文件的记录（那里 _currentPdfPath
         // 已切到新路径、GpuViewer 还留着旧文档），导致下次打开该文件时侧边栏开/关错乱。
         // 正式阅读时 SidebarSplitView 恒为 Visible，故正常开关不受此守卫影响。
-        if (SidebarSplitView == null || SidebarSplitView.Visibility != Visibility.Visible) return;
+        if (SidebarSplitView == null || SidebarSplitView.Visibility != Visibility.Visible)
+        {
+            // 欢迎页：按钮可见但点击完全无效（见上方注释）。该按钮已是 ToggleButton，点击会自动翻
+            // IsChecked → ToggleButtonVisualOverride 会渲染成主题紫，可实际没有任何动作，变色反直觉。
+            // 这里把选中态同步回 SidebarSplitView 的真实开合（欢迎页恒为 false），且同一次点击内同步改回，
+            // 在下一帧渲染前已落回常态，不会闪一下紫再消失。
+            if (ToggleSidebarButton != null) ToggleSidebarButton.IsChecked = SidebarSplitView?.IsPaneOpen ?? false;
+            return;
+        }
 
         // 【翻转前】同步冻结"阅读位置不变量"：SplitView 的列宽在过渡起点(KeyTime=0)即变，翻转后读不到旧几何。
         // 这里只取快照、不改视图；随后 PaneOpening/PaneClosing（过渡起点）会排队一次重锚，
         // 由 GpuPageView 用弹簧把 zoom 推到目标值，且全程保持视口左右边线切到的内容不变。
         GpuViewer?.CaptureHostResizeAnchor();
         SidebarSplitView.IsPaneOpen = !SidebarSplitView.IsPaneOpen;
+        // 侧边栏开关按钮的选中态跟随 Pane 开合，由 ToggleButtonVisualOverride 渲染成 Obsidian 紫。
+        if (ToggleSidebarButton != null) ToggleSidebarButton.IsChecked = SidebarSplitView.IsPaneOpen;
     }
 
     private void SidebarMode_Click(object sender, RoutedEventArgs e)
@@ -3475,11 +3541,12 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void ApplyWelcomeChrome(bool welcomeVisible)
     {
-        var vis = welcomeVisible ? Visibility.Collapsed : Visibility.Visible;
-        if (PenModeButton != null) PenModeButton.Visibility = vis;
-        if (CanvasModeButton != null) CanvasModeButton.Visibility = vis;
-        if (RotateButton != null) RotateButton.Visibility = vis;
-        if (LayoutToggleButton != null) LayoutToggleButton.Visibility = vis;
+        // 走「应用可见性」通道（而非直接写 Visibility），由收纳系统统一决定实际显隐，避免两者打架。
+        bool show = !welcomeVisible;
+        if (PenModeButton != null) SetToolbarItemAppVisible(PenModeButton, show);
+        if (CanvasModeButton != null) SetToolbarItemAppVisible(CanvasModeButton, show);
+        if (RotateButton != null) SetToolbarItemAppVisible(RotateButton, show);
+        if (LayoutToggleButton != null) SetToolbarItemAppVisible(LayoutToggleButton, show);
 
         // 回到欢迎页时若仍停留在画笔/白板模式，按钮已隐藏、用户无法退出 → 主动切回阅读模式
         if (welcomeVisible && _currentMode != EditMode.Navigate)
@@ -4291,6 +4358,7 @@ public sealed partial class MainPage : Page
     private void HideTopToolbar()
     {
         if (TopToolbar == null) return;
+        if (_toolbarAlwaysVisible) return;   // 常驻显示：忽略一切收起请求
         CancelToolbarHide();
         TopToolbar.IsHitTestVisible = false;
         _pointerInTopToolbar = false;
@@ -4337,6 +4405,7 @@ public sealed partial class MainPage : Page
     private void RequestHideTopToolbar()
     {
         if (TopToolbar == null || !TopToolbar.IsHitTestVisible) return;
+        if (_toolbarAlwaysVisible) return;   // 常驻显示：不排收起计时
 
         if (_toolbarHideTimer == null)
         {
@@ -4610,6 +4679,7 @@ public sealed partial class MainPage : Page
         _pointerInTopToolbar = false;
         _pointerInPenCapsule = false;
         _pointerInTitleBar = false;
+        if (_toolbarAlwaysVisible) return;   // 常驻显示：失焦/最小化也不收起，避免恢复时闪动
         HideTopToolbar();
     }
 
@@ -4627,6 +4697,8 @@ public sealed partial class MainPage : Page
 
     internal void OnAppActivated()
     {
+        // 常驻显示：窗口重新激活时确保工具栏是展开的（失焦期间可能被其它路径收起）。
+        if (_toolbarAlwaysVisible) ShowTopToolbar();
     }
 
     /// <summary>
@@ -4678,6 +4750,426 @@ public sealed partial class MainPage : Page
     {
         UpdateTopToolbarClip();
         UpdateSecondaryPillTopOffset();
+        QueueToolbarOverflowUpdate();
+    }
+
+    // ======================= 顶部工具栏「空间不足收纳」 =======================
+    // 目标：窗口变窄时，左右两组绝不互相重叠，也不被窗口裁切（含极端窄窗口）。
+    // 做法：按优先级把放不下的元素收进右侧「…」菜单（可动作的仍可正常点击），宽度恢复后自动放回。
+    // 优先级（先收 → 后收）：右侧次要功能键（打印 / 保存 / 对比视图 / 布局 / 旋转）→ 左侧翻页键 →
+    // 页码输入+总页数 → 分隔线 → 侧边栏开关 → 未激活的模式键（阅读 / 画笔 / 白板）。
+    // 唯一恒定保留：当前「激活」的模式键（模式指示 + 退出入口，画笔胶囊还按它定位）、设置键、
+    // 以及「…」按钮本身 —— 这三者宽度极小，Windows 最小窗口宽度下也放得下。
+
+    private bool _toolbarOverflowInit;
+    private bool _toolbarOverflowQueued;
+
+    /// <summary>收纳候选：越靠前越先被收进「…」菜单。</summary>
+    private FrameworkElement[] _toolbarOverflowCandidates = Array.Empty<FrameworkElement>();
+
+    /// <summary>「…」菜单内条目的排列顺序 = 工具栏「从左到右」的顺序（越靠左越常用 ⇒ 菜单越靠上）。
+    /// 与 _toolbarOverflowCandidates（收纳优先序）分开维护：后者决定「先收谁」，前者只决定「菜单里怎么排」，
+    /// 两者集合（是否参与）与顺序都不同。</summary>
+    private FrameworkElement[] _toolbarMenuOrder = Array.Empty<FrameworkElement>();
+
+    /// <summary>「应用层希望的可见性」——XAML 初值 + 应用逻辑的显隐。与「是否被收纳」正交：
+    /// 实际 Visibility = 应用可见 && 未被收纳。否则会出现「应用收起 → 收纳放回 → 又冒出来」的打架。</summary>
+    private readonly Dictionary<FrameworkElement, bool> _toolbarAppVisible = new();
+
+    /// <summary>当前被收进「…」菜单的工具项。</summary>
+    private readonly HashSet<FrameworkElement> _toolbarOverflowed = new();
+
+    /// <summary>「必须同进同出」的成对元素（页码输入框 ↔ 总页数）：收其中一个时一并收起。</summary>
+    private readonly Dictionary<FrameworkElement, FrameworkElement> _toolbarCompanions = new();
+
+    /// <summary>各工具项的自然宽度缓存（按钮尺寸固定，量一次即可；被收起后 ActualWidth=0，靠缓存回算）。</summary>
+    private readonly Dictionary<FrameworkElement, double> _toolbarItemWidth = new();
+
+    private double _toolbarSpacing = 8;
+
+    /// <summary>宽度试算时左右两组之间至少留出的呼吸空隙。取偏大值让收纳触发更「敏感」——
+    /// 左右两组一接近就先把右侧收起来，而不是等到几乎贴住/重叠才收。</summary>
+    private const double ToolbarMinCenterGap = 28;
+
+    private FrameworkElement[] LeftToolbarItems() => new FrameworkElement[]
+    {
+        ToggleSidebarButton, PrevPageButton, PageNumberInput, TotalPagesText, NextPageButton,
+        ToolbarModeSeparator, ReadModeButton, PenModeButton, CanvasModeButton
+    };
+
+    private FrameworkElement[] RightToolbarItems() => new FrameworkElement[]
+    {
+        RotateButton, LayoutToggleButton, SplitViewToggleButton, SaveButton, PrintButton,
+        SettingsButton, ToolbarMoreButton
+    };
+
+    /// <summary>Loaded 后初始化：读 XAML 可见性初值、量「…」按钮自然宽度、挂菜单刷新回调。</summary>
+    private void InitializeToolbarOverflow()
+    {
+        _toolbarSpacing = TopLeftPanel?.Spacing ?? 8;
+
+        // 先保留「初始化前」已由应用逻辑写入的可见性意图（如欢迎页 ApplyWelcomeChrome 早于本方法）；
+        // 只有未记录过的项才回退读 XAML 初值。
+        foreach (var el in LeftToolbarItems()) if (!_toolbarAppVisible.ContainsKey(el)) _toolbarAppVisible[el] = el.Visibility != Visibility.Collapsed;
+        foreach (var el in RightToolbarItems()) if (!_toolbarAppVisible.ContainsKey(el)) _toolbarAppVisible[el] = el.Visibility != Visibility.Collapsed;
+        _toolbarAppVisible[ToolbarMoreButton] = true;
+
+        // 「…」平时 Collapsed：先量一次自然宽度缓存起来，之后按宽度试算时才能把它自己算进去。
+        if (ToolbarMoreButton != null)
+        {
+            ToolbarMoreButton.Visibility = Visibility.Visible;
+            ToolbarMoreButton.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (ToolbarMoreButton.DesiredSize.Width > 0) _toolbarItemWidth[ToolbarMoreButton] = ToolbarMoreButton.DesiredSize.Width;
+            ToolbarMoreButton.Visibility = Visibility.Collapsed;
+        }
+
+        _toolbarOverflowCandidates = new FrameworkElement[]
+        {
+            PrintButton, SaveButton, SplitViewToggleButton, LayoutToggleButton, RotateButton,
+            NextPageButton, PrevPageButton,
+            TotalPagesText, PageNumberInput, ToolbarModeSeparator, ToggleSidebarButton,
+            CanvasModeButton, PenModeButton, ReadModeButton,
+            SettingsButton,
+        };
+
+        // 菜单内排列序 = 工具栏从左到右（仅「可执行动作」项；页码输入/总页数/分隔线本就不上菜单）。
+        _toolbarMenuOrder = new FrameworkElement[]
+        {
+            ToggleSidebarButton, PrevPageButton, NextPageButton, ReadModeButton, PenModeButton,
+            CanvasModeButton, RotateButton, LayoutToggleButton, SplitViewToggleButton,
+            SaveButton, PrintButton, SettingsButton,
+        };
+
+        // 页码输入框与总页数是「一个整体」：窗口变窄时要么都留、要么一起收，避免只剩孤零零的「/ 12」或「1」。
+        _toolbarCompanions[TotalPagesText] = PageNumberInput;
+        _toolbarCompanions[PageNumberInput] = TotalPagesText;
+
+        if (ToolbarMoreFlyout != null)
+            ToolbarMoreFlyout.Opening += (s, e) => UpdateToolbarOverflow();
+
+        _toolbarOverflowInit = true;
+        QueueToolbarOverflowUpdate();   // 首帧按实际宽度落一次收纳结果
+    }
+
+    /// <summary>应用层改工具项显隐的唯一入口（保持「应用可见性」与「收纳状态」不打架）。</summary>
+    private void SetToolbarItemAppVisible(FrameworkElement el, bool visible)
+    {
+        if (el == null) return;
+        _toolbarAppVisible[el] = visible;
+        if (!_toolbarOverflowInit)
+        {
+            // 收纳系统尚未初始化（如欢迎页在 Loaded 之前就设置显隐）：先直接落地到 Visibility，
+            // 避免这些本应隐藏的按钮在首帧闪出。待 InitializeToolbarOverflow 后再交由收纳系统统一接管。
+            el.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            return;
+        }
+        QueueToolbarOverflowUpdate();
+    }
+
+    private void QueueToolbarOverflowUpdate()
+    {
+        if (!_toolbarOverflowInit || _toolbarOverflowQueued) return;
+        _toolbarOverflowQueued = true;
+        // 延迟到本轮布局之后：SizeChanged 里直接量 ActualWidth 可能取到旧值，且避免测量引起的布局重入。
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _toolbarOverflowQueued = false;
+            UpdateToolbarOverflow();
+            UpdateMinWindowClientWidth();   // 与收纳同拍重算最小窗口宽度（同一套实测宽度口径）
+        });
+    }
+
+    /// <summary>按当前可用宽度重算「哪些按钮收进「…」菜单」，并同步显隐与菜单内容。</summary>
+    private void UpdateToolbarOverflow()
+    {
+        if (!_toolbarOverflowInit || TopToolbar == null) return;
+
+        double available = TopToolbar.ActualWidth - TopToolbar.Padding.Left - TopToolbar.Padding.Right;
+        if (!(available > 0)) return;   // 尚未布局，等下一次 SizeChanged / 排队回调
+
+        _toolbarOverflowed.Clear();
+
+        // 依次把「下一个可收的候选」收进菜单，直到左右两组能并排放下。
+        int guard = _toolbarOverflowCandidates.Length + 1;
+        while (!ToolbarFits(available) && guard-- > 0)
+        {
+            var next = NextToolbarOverflowCandidate();
+            if (next == null) break;      // 可收的都收完了（窗口已到极限），剩下的只能挤一挤
+            _toolbarOverflowed.Add(next);
+            if (_toolbarCompanions.TryGetValue(next, out var companion)) _toolbarOverflowed.Add(companion);
+        }
+
+        ApplyToolbarVisibility();
+        RebuildToolbarMoreMenu();
+    }
+
+    private bool ToolbarFits(double available)
+        => ToolbarPanelWidth(LeftToolbarItems()) + ToolbarPanelWidth(RightToolbarItems()) + ToolbarMinCenterGap <= available;
+
+    private double ToolbarPanelWidth(FrameworkElement[] items)
+    {
+        double w = 0; int n = 0;
+        foreach (var el in items)
+        {
+            if (!IsToolbarItemShown(el)) continue;
+            w += ToolbarItemWidth(el);
+            n++;
+        }
+        return n > 1 ? w + _toolbarSpacing * (n - 1) : w;
+    }
+
+    // ======================= 最小窗口尺寸（DIP；MainWindow 换算成物理像素后经 WM_GETMINMAXINFO 施加）=======================
+    // 设计目标（用户拍板）：
+    //   · 宽度 —— 展开工具栏时「侧边栏 / 阅读 / 画笔 / 白板 / 设置 / …」这一组必须能并排放下且互不重叠。
+    //     即取「收纳链条刚好停在该状态」所需的最小可用宽度：左组 + 右组 + 中间净空 + Border 左右 padding。
+    //   · 高度 —— 该宽度下视口（= 客户区高 − 标题栏高）正好容纳一页 A4：纵向连续布局「适应宽度」时整页可见。
+    // 宽度取自工具栏自身的实测宽度（与收纳判定同源口径）⇒ 随 DPI / 语言 / 主题自适应，不写死像素。
+    private const double A4ShortEdgePt = 595.276;   // A4 短边 210mm（pt）
+    private const double A4LongEdgePt = 841.89;     // A4 长边 297mm（pt）
+
+    private double _minWindowClientWidthDip;
+
+    /// <summary>最小窗口「客户区宽度」(DIP)。MainWindow 在 WM_GETMINMAXINFO / 钳制里读取该值。
+    /// <para>未测出时返回 0（= 暂无下限），调用方一律跳过钳制。这里刻意【不】给"安全回退值"：
+    /// 回退值必然大于实测下限（常驻组实测约 341 DIP，任何回退值都只能更大），而首帧后的兜底
+    /// ClampWindowToMinSize 跑在一次工具栏布局之前 → 会把"按保存几何还原的最小尺寸窗口"
+    /// 顶到回退值上，长宽同时变大（这正是"最小尺寸关闭 PDF、重开后尺寸被撑大"的根因）。</para></summary>
+    internal double MinWindowClientWidthDip => _minWindowClientWidthDip;
+
+    /// <summary>最小宽度下视口（= 客户区高 − 标题栏高）所需高度：适应宽度时整页 A4 恰好可见。
+    /// 「适应宽度」把页宽缩到 (视口宽 − 2×DocMargin)，页高按 A4 长/短边比随之缩放，上下再补 DocMargin
+    /// ⇒ 从文档顶部起可完整看到一页 A4。DocMargin 是不随缩放变的固定留白，故须在这里单独相加。
+    /// 下限未测出时返回 0（= 不约束高度）。</summary>
+    internal double MinViewportHeightDip
+    {
+        get
+        {
+            if (_minWindowClientWidthDip <= 0) return 0;
+            double pageW = Math.Max(1.0, _minWindowClientWidthDip - 2 * Tuning.DocMargin);
+            return pageW * (A4LongEdgePt / A4ShortEdgePt) + 2 * Tuning.DocMargin;
+        }
+    }
+
+    /// <summary>最小尺寸下工具栏必须常驻的那组项（其余都可进「…」菜单）：与收纳优先级链条的末端一致。</summary>
+    private FrameworkElement[] MinSizeLeftToolbarItems()
+        => new FrameworkElement[] { ToggleSidebarButton, ToolbarModeSeparator, ReadModeButton, PenModeButton, CanvasModeButton };
+
+    private FrameworkElement[] MinSizeRightToolbarItems()
+        => new FrameworkElement[] { SettingsButton, ToolbarMoreButton };
+
+    /// <summary>重算最小客户区宽度：一组常驻项的自然宽度 + 中间净空 + Border 左右 padding。</summary>
+    private void UpdateMinWindowClientWidth()
+    {
+        if (TopToolbar == null || !_toolbarOverflowInit) return;
+
+        double left = RequiredToolbarPanelWidth(MinSizeLeftToolbarItems());
+        double right = RequiredToolbarPanelWidth(MinSizeRightToolbarItems());
+        if (!(left > 0) || !(right > 0)) return;
+
+        double w = left + right + ToolbarMinCenterGap
+                 + TopToolbar.Padding.Left + TopToolbar.Padding.Right;
+        if (!(w > _minWindowClientWidthDip)) return;   // 只增不减：避免某一次偏小的测量把下限压低
+
+        _minWindowClientWidthDip = w;
+        // 已存在的窗口可能仍停在保存的旧几何上，立刻顶到新下限。
+        ((Application.Current as App)?.MainWindow as MainWindow)?.ClampWindowToMinSize();
+    }
+
+    /// <summary>一组工具项的自然总宽（含各 item 的 Margin 与 StackPanel Spacing），【不看】当前收纳状态。
+    /// 每项向上取整：XAML 布局按整像素落位，实际占宽可能比测量值大最多 1 DIP/项；
+    /// 取整后求和可保证「按此值施加的最小宽度」在实际布局下仍能整体放下（不会因零头把分隔线挤进「…」）。</summary>
+    private double RequiredToolbarPanelWidth(FrameworkElement[] items)
+    {
+        double w = 0; int n = 0;
+        foreach (var el in items)
+        {
+            if (el == null) continue;
+            w += Math.Ceiling(ToolbarItemWidth(el));
+            n++;
+        }
+        return n > 1 ? w + _toolbarSpacing * (n - 1) : w;
+    }
+
+    private bool ToolbarItemIsAppVisible(FrameworkElement el)
+        => _toolbarAppVisible.TryGetValue(el, out bool v) ? v : el.Visibility != Visibility.Collapsed;
+
+    private bool HasVisibleOverflowedItems()
+    {
+        foreach (var el in _toolbarOverflowed) if (ToolbarItemIsAppVisible(el)) return true;
+        return false;
+    }
+
+    private bool IsToolbarItemShown(FrameworkElement el)
+    {
+        // 「…」只在确有可见项被收起时才出现。
+        if (el == ToolbarMoreButton) return HasVisibleOverflowedItems();
+        return ToolbarItemIsAppVisible(el) && !_toolbarOverflowed.Contains(el);
+    }
+
+    /// <summary>工具项在工具栏中占用的宽度（含左右外边距）。ActualWidth 不含 Margin，必须补上 ——
+    /// 否则带 Margin 的项（总页数 12px、分隔线 8px）会被低估，导致收纳触发过晚、左右两组先贴住甚至重叠。</summary>
+    private double ToolbarItemWidth(FrameworkElement el)
+    {
+        double raw;
+        if (el.Visibility == Visibility.Visible && el.ActualWidth > 0)
+        {
+            raw = el.ActualWidth;
+            _toolbarItemWidth[el] = raw;
+        }
+        else if (_toolbarItemWidth.TryGetValue(el, out double cached) && cached > 0)
+        {
+            raw = cached;
+        }
+        else
+        {
+            // 尚未布局过（如加载文档后 / 从欢迎页返回后才显形的保存、打印、对比键）：临时置为可见量一次
+            // 自然宽度并缓存。此调用发生在 DispatcherQueue 延迟回调里（布局之外），且立刻还原可见性，
+            // 同一拍内不会渲染，故无闪烁。
+            var old = el.Visibility;
+            el.Visibility = Visibility.Visible;
+            el.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            raw = el.DesiredSize.Width;
+            el.Visibility = old;
+            if (raw > 0) _toolbarItemWidth[el] = raw;
+        }
+        return raw + el.Margin.Left + el.Margin.Right;
+    }
+
+    /// <summary>当前处于「激活」态的模式键（阅读 / 画笔 / 白板）恒定保留：它既是当前模式的唯一指示、
+/// 又是退出该模式的入口，画笔模式下颜色胶囊还按它的位置定位。故只有「未激活」的模式键可被收纳。</summary>
+    private bool IsToolbarItemActiveMode(FrameworkElement el)
+    {
+        if (el == ReadModeButton) return ReadModeButton.IsChecked == true;
+        if (el == PenModeButton) return PenModeButton.IsChecked == true;
+        if (el == CanvasModeButton) return CanvasModeButton.IsChecked == true;
+        return false;
+    }
+
+    /// <summary>「…」按钮承载溢出菜单本身，绝不能被收纳。</summary>
+    private bool IsToolbarItemPinned(FrameworkElement el)
+        => el == ToolbarMoreButton;
+
+    private FrameworkElement? NextToolbarOverflowCandidate()
+    {
+        foreach (var el in _toolbarOverflowCandidates)
+        {
+            if (el == null || !ToolbarItemIsAppVisible(el)) continue;
+            if (_toolbarOverflowed.Contains(el) || IsToolbarItemActiveMode(el) || IsToolbarItemPinned(el)) continue;
+            return el;
+        }
+        return null;
+    }
+
+    private void ApplyToolbarVisibility()
+    {
+        foreach (var el in LeftToolbarItems()) el.Visibility = IsToolbarItemShown(el) ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var el in RightToolbarItems()) el.Visibility = IsToolbarItemShown(el) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void RebuildToolbarMoreMenu()
+    {
+        if (ToolbarMoreFlyout == null) return;
+        ToolbarMoreFlyout.Items.Clear();
+        foreach (var el in _toolbarMenuOrder)
+        {
+            if (el == null || !_toolbarOverflowed.Contains(el) || !ToolbarItemIsAppVisible(el)) continue;
+            if (!IsToolbarItemActionable(el)) continue;   // 页码输入/总页数/分隔线无动作，只收纳不上菜单
+            ToolbarMoreFlyout.Items.Add(CreateToolbarMoreItem(el));
+        }
+    }
+
+    /// <summary>是否为「可执行动作」的工具项（非动作类：页码输入框、总页数文本、分隔线）。</summary>
+    private bool IsToolbarItemActionable(FrameworkElement el)
+        => el != TotalPagesText && el != PageNumberInput && el != ToolbarModeSeparator;
+
+    private MenuFlyoutItemBase CreateToolbarMoreItem(FrameworkElement el)
+    {
+        string label = Loc(ToolbarItemLabelKey(el));
+        var icon = CreateToolbarItemIcon(el);
+
+        // 一律用 MenuFlyoutItem：菜单里只要混入一个 ToggleMenuFlyoutItem，WinUI 就会对【所有】条目
+        // 施加 CheckAndIconPlaceholder（图标 +28、文字 +56），整张菜单右缩进一列空白。
+        // 分屏视图的开关状态在工具栏按钮上已可见，菜单内不再重复显示勾选。
+        var item = new MenuFlyoutItem { Text = label, Icon = icon };
+        item.Click += (s, e) => InvokeToolbarItemFromOverflow(el);
+        return item;
+    }
+
+    private string ToolbarItemLabelKey(FrameworkElement el)
+    {
+        if (el == PrintButton) return "Print";
+        if (el == SaveButton) return "Save";
+        if (el == SplitViewToggleButton) return "SplitView";
+        if (el == LayoutToggleButton) return "LayoutToggle";
+        if (el == RotateButton) return "Rotate";
+        if (el == NextPageButton) return "NextPage";
+        if (el == PrevPageButton) return "PrevPage";
+        if (el == ToggleSidebarButton) return "ToggleSidebar";
+        if (el == ReadModeButton) return "ReadMode";
+        if (el == PenModeButton) return "PenMode";
+        if (el == CanvasModeButton) return "CanvasMode";
+        if (el == SettingsButton) return "Settings";
+        return "MoreTools";
+    }
+
+    private IconElement CreateToolbarItemIcon(FrameworkElement el)
+    {
+        if (el == PrintButton) return FluentFontIcon("\uE749");
+        if (el == SaveButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Save);
+        if (el == SplitViewToggleButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.TwoPage);
+        if (el == LayoutToggleButton) return FluentFontIcon("\uE8AB");
+        if (el == RotateButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Rotate);
+        if (el == NextPageButton) return FluentFontIcon("\uE70D");
+        if (el == PrevPageButton) return FluentFontIcon("\uE70E");
+        if (el == ToggleSidebarButton) return FluentFontIcon("\uE90C");
+        if (el == ReadModeButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Read);
+        if (el == PenModeButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Edit);
+        if (el == CanvasModeButton) return FluentFontIcon("\uECA5");
+        if (el == SettingsButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Setting);
+        return FluentFontIcon("\uE712");
+    }
+
+    /// <summary>与工具栏图标同源的字体回退链（Win11 用 Segoe Fluent Icons，Win10 回退 Segoe MDL2 Assets）。</summary>
+    private static FontIcon FluentFontIcon(string glyph) => new FontIcon
+    {
+        Glyph = glyph,
+        FontFamily = new FontFamily("Segoe Fluent Icons,Segoe MDL2 Assets"),
+    };
+
+    /// <summary>菜单项被点击：先把该项放回工具栏（模式键需先可见，画笔胶囊才定位得对），
+    /// 再执行与点击按钮完全相同的处理逻辑，最后按新宽度重新试算收纳。</summary>
+    private void InvokeToolbarItemFromOverflow(FrameworkElement el)
+    {
+        _toolbarOverflowed.Remove(el);
+        ApplyToolbarVisibility();
+
+        if (el == PrintButton) Print_Click(this, new RoutedEventArgs());
+        else if (el == SaveButton) SavePdf_Click(this, new RoutedEventArgs());
+        else if (el == SplitViewToggleButton)
+        {
+            if (SplitViewToggleButton != null)
+                SplitViewToggleButton.IsChecked = !(SplitViewToggleButton.IsChecked == true);
+            SplitViewToggle_Click(this, new RoutedEventArgs());
+        }
+        else if (el == LayoutToggleButton) LayoutToggle_Click(this, new RoutedEventArgs());
+        else if (el == RotateButton) Rotate_Click(this, new RoutedEventArgs());
+        else if (el == NextPageButton) NextPage_Click(this, new RoutedEventArgs());
+        else if (el == PrevPageButton) PrevPage_Click(this, new RoutedEventArgs());
+        else if (el == ToggleSidebarButton) ToggleSidebar_Click(this, new RoutedEventArgs());
+        else if (el == ReadModeButton) ReadMode_Click(this, new RoutedEventArgs());
+        else if (el == PenModeButton) PenMode_Click(this, new RoutedEventArgs());
+        else if (el == CanvasModeButton) CanvasMode_Click(this, new RoutedEventArgs());
+        else if (el == SettingsButton)
+        {
+            // 设置键被收进菜单时，其浮出层改挂到「…」按钮上弹出。延迟一拍，等「…」菜单先关闭，
+            // 否则新浮出层可能被菜单的 light-dismiss 顺手关掉。
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (SettingsFlyout != null) SettingsFlyout.ShowAt(ToolbarMoreButton);
+            });
+        }
+
+        UpdateToolbarOverflow();
     }
 
     // 对比视图圆按钮的外层 Grid 内边距（与 MainPage.xaml 中 SecondaryOpen/ClosePill 的 Padding 一致）。
@@ -5852,12 +6344,15 @@ public sealed partial class MainPage : Page
         var to = FindCanvasNode(e.TargetNodeId);
         if (from == null || to == null || ReferenceEquals(from, to)) return;
         var doc = _canvasDoc;
-        // 去重：同向、同两端、同出边的连线不重复添加（反向视为另一条，与 Obsidian 一致）。
+        // 去重：仅当【四元组】(fromNode, fromSide, toNode, toSide) 完全相同才视为重复，与 Obsidian 一致。
+        // 同一个圆点可连出/连入任意多条连线（同一源圆点落到同一张卡片的另一个目标圆点也应新建），
+        // 故不能只比 fromSide，必须把 toSide 一并纳入判据。
         foreach (var ex in doc.Edges)
         {
             if (string.Equals(ex.FromNode, from.Id, StringComparison.Ordinal) &&
                 string.Equals(ex.ToNode, to.Id, StringComparison.Ordinal) &&
-                string.Equals(ex.FromSide ?? "", e.FromSide, StringComparison.Ordinal))
+                string.Equals(ex.FromSide ?? "", e.FromSide ?? "", StringComparison.Ordinal) &&
+                string.Equals(ex.ToSide ?? "", e.ToSide ?? "", StringComparison.Ordinal))
                 return;
         }
         var edge = new CanvasEdge

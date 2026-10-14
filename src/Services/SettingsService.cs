@@ -56,6 +56,20 @@ public class SettingsService
         }
     }
 
+    /// <summary>顶部工具栏是否「常驻显示」。false（默认）= 鼠标移开便收起（原有行为）。</summary>
+    public bool ToolbarAlwaysVisible
+    {
+        get => _data.ToolbarAlwaysVisible;
+        set
+        {
+            if (_data.ToolbarAlwaysVisible != value)
+            {
+                _data.ToolbarAlwaysVisible = value;
+                Save();
+            }
+        }
+    }
+
     public void Load()
     {
         try
@@ -84,5 +98,8 @@ public class SettingsService
     private class SettingsData
     {
         public string AppTheme { get; set; } = "Default";
+
+        /// <summary>顶部工具栏常驻显示（false = 鼠标移开便收起）。</summary>
+        public bool ToolbarAlwaysVisible { get; set; }
     }
 }

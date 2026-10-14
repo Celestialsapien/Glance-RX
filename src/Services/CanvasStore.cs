@@ -31,10 +31,12 @@ namespace GlanceRX.Services;
 public sealed class CanvasNode
 {
     /// <summary>新建卡片的默认尺寸（页局部 PDF 点）：高约「2 行文字」，对齐 Obsidian 新建卡片的观感
-    /// （行高见 GpuPageView.CanvasLineHeight = 字号 × 1.35 ≈ 16.2，故 2 行 ≈ 32）。
+    /// （行高见 GpuPageView.CanvasLineHeight = 字号 × 1.35 ≈ 16.2，故 2 行标称 ≈ 32.4）。
+    /// ⚠ 不能取 32：32 &lt; 32.4，两行恰好临界，输入到第二行的当帧内容高会越过可视高、滚动条闪一帧，
+    /// 落定后才又塞回去（用户报告）。这里留出约 3.6 的余量取 36，使两行有真实富余、不再临界。
     /// 视图侧（双击落点按中心对齐）与模型侧（建节点）共用同一常量，避免两处硬编码漂移。</summary>
     public const double DefaultWidth = 180;
-    public const double DefaultHeight = 32;
+    public const double DefaultHeight = 36;
 
     [JsonPropertyName("id")] public string Id { get; set; } = "";
     [JsonPropertyName("type")] public string Type { get; set; } = "text";

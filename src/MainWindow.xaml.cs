@@ -159,11 +159,124 @@ public sealed partial class MainWindow : Window
         // Navigate the root frame to the main page on startup.
         RootFrame.Navigate(typeof(MainPage), fileToOpen);
 
+        // 限制最小窗口尺寸（阈值由 MainPage 实测工具栏宽度 + A4 视口比例给出）。
+        InstallMinSizeLimit();
+
         // Subscribe to closing event to check for unsaved changes
         this.AppWindow.Closing += AppWindow_Closing;
         this.VisibilityChanged += MainWindow_VisibilityChanged;
         this.Activated += MainWindow_Activated;
         this.Closed += MainWindow_Closed;
+
+        // 兜底：任何路径（含系统"最小化→任务栏还原"）使外框尺寸落到下限之下时立刻顶回。
+        this.AppWindow.Changed += AppWindow_Changed;
+
+        // 标题过长时自行省略，避免与系统 caption 按钮（最小化/还原/关闭）重叠：
+        // TitleBar 控件模板里标题所在的列是按内容取宽的 Auto 列 —— 长文件名会把该列撑到
+        // caption 区之下，且这类文本不截断。故需给标题文本显式限定可用宽度（见
+        // UpdateTitleBarTitleConstraint），窗口尺寸变化时重算。
+        AppTitleBar.Loaded += (s, e) => UpdateTitleBarTitleConstraint();
+        AppTitleBar.SizeChanged += (s, e) => UpdateTitleBarTitleConstraint();
+    }
+
+    /// <summary>
+    /// 外框尺寸变化时收口：低于下限（且非最大化/最小化）就顶回下限。ClampWindowToMinSize 只在
+    /// 确实偏小时才 MoveAndResize，复位后尺寸已等于下限 → 自然终止，不会与 Changed 形成回环。
+    /// </summary>
+    private void AppWindow_Changed(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
+    {
+        if (!args.DidSizeChange) return;
+        try { ClampWindowToMinSize(); } catch { }
+    }
+
+    /// <summary>
+    /// 平台 caption 按钮区宽度（DIP）。优先取 AppWindowTitleBar.RightInset；该值可能缺失（为 0）
+    /// 或单位口径不同，故把"DIP 解释"和"物理像素换算成 DIP"两种可能都收敛到 caption 区的
+    /// 标准宽度（Windows 11 三个按钮各 46 DIP）附近，取更接近者，超界则退回标准值。
+    /// </summary>
+    private double GetCaptionButtonReserveDip()
+    {
+        const double Nominal = 138.0;   // 46 × 3
+        try
+        {
+            var tb = AppWindow?.TitleBar;
+            if (tb != null && Microsoft.UI.Windowing.AppWindowTitleBar.IsCustomizationSupported() && tb.RightInset > 0)
+            {
+                var hwnd = GetWindowHandleSafely();
+                double scale = hwnd != IntPtr.Zero ? GetDpiForWindow(hwnd) / 96.0 : 1.0;
+                if (!(scale > 0)) scale = 1.0;
+                double asDip = tb.RightInset;             // 解释一：本身就是 DIP
+                double asPxToDip = tb.RightInset / scale; // 解释二：是物理像素
+                double best = Math.Abs(asDip - Nominal) <= Math.Abs(asPxToDip - Nominal) ? asDip : asPxToDip;
+                if (best >= 90 && best <= 220) return best;
+            }
+        }
+        catch { }
+        return Nominal;
+    }
+
+    /// <summary>
+    /// 限定 TitleBar 控件内标题文本的可用宽度：给模板里的标题 TextBlock 装上 MaxWidth +
+    /// CharacterEllipsis，使其在 caption 区之前收尾成 "…"。
+    /// 可用宽度 = 控件宽度 − 标题起点 x − caption 区预留宽度。
+    /// </summary>
+    private void UpdateTitleBarTitleConstraint()
+    {
+        try
+        {
+            if (AppTitleBar == null || AppTitleBar.ActualWidth <= 0) return;
+            var tb = FindTitleTextBlock();
+            if (tb == null) return;
+
+            double x = 0;
+            try
+            {
+                x = tb.TransformToVisual(AppTitleBar).TransformPoint(new Windows.Foundation.Point(0, 0)).X;
+            }
+            catch { }
+            if (!(x > 0) || x > AppTitleBar.ActualWidth) x = 0;
+
+            double available = AppTitleBar.ActualWidth - x - GetCaptionButtonReserveDip() - 4;
+
+            // 窗口很宽时可用宽度自然大于文本本身 → MaxWidth 不起限制作用，标题完整显示。
+            // 下限保护：绝不为 0（0 宽度会让标题整条消失），极端窄时留一点再靠省略号收尾。
+            if (available < 24) available = 24;
+
+            tb.TextTrimming = TextTrimming.CharacterEllipsis;
+            tb.TextWrapping = TextWrapping.NoWrap;
+            tb.MaxLines = 1;
+            tb.MaxWidth = available;
+        }
+        catch { }
+    }
+
+    /// <summary>在标题栏可视树中找标题文本：优先 Text 与 Title 完全一致的 TextBlock，退而取首个非空者。</summary>
+    private TextBlock? FindTitleTextBlock()
+    {
+        var all = new System.Collections.Generic.List<TextBlock>();
+        CollectTextBlocks(AppTitleBar, all);
+        if (all.Count == 0) return null;
+
+        string wanted = AppTitleBar?.Title ?? string.Empty;
+        if (!string.IsNullOrEmpty(wanted))
+        {
+            foreach (var t in all)
+                if (t.Text == wanted) return t;
+        }
+        foreach (var t in all)
+            if (!string.IsNullOrEmpty(t.Text)) return t;
+        return all[0];
+    }
+
+    private static void CollectTextBlocks(DependencyObject node, System.Collections.Generic.List<TextBlock> sink)
+    {
+        int count = VisualTreeHelper.GetChildrenCount(node);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(node, i);
+            if (child is TextBlock t) sink.Add(t);
+            else CollectTextBlocks(child, sink);
+        }
     }
 
     /// <summary>
@@ -332,6 +445,16 @@ public sealed partial class MainWindow : Window
         {
             ApplyExactSizeWindowIcons(_exactIconPath);
         }
+
+        // 缩放率变化（改系统缩放 / 拖到另一块不同缩放的显示器）后，窗口的 DIP 尺寸可能落到下限之下。
+        // 下限本身是 DIP 口径、与 DPI 无关，但 ptMinTrackSize 只在用户下次拖拽时重新生效，
+        // 故这里主动顶一次；延到 DPI 切换结算之后再执行，避免用到过渡中的中间几何。
+        this.DispatcherQueue.TryEnqueue(() =>
+        {
+            try { ClampWindowToMinSize(); } catch { }
+            // caption 区宽度按 DPI 解释 → 缩放率变化后标题可用宽度也需重算。
+            try { UpdateTitleBarTitleConstraint(); } catch { }
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -456,6 +579,10 @@ public sealed partial class MainWindow : Window
             _uncloakSafetyTimer = null;
         }
         DisarmColdStartCloak();
+        // 构造期若 HWND 尚未就绪会安装失败，此处重试一次（幂等）。
+        InstallMinSizeLimit();
+        // 揭盖时 MainPage 已完成首次布局：按实测下限顶一次窗口（恢复的旧几何可能小于新下限）。
+        ClampWindowToMinSize();
     }
 
     /// <summary>取窗口 HWND：AppWindow 在构造期即已创建，Id 恒可用。</summary>
@@ -527,6 +654,218 @@ public sealed partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 最小窗口尺寸下限（WM_GETMINMAXINFO 子类化）
+    // WinUI 3 没有公开的"最小尺寸"API，只能挂窗口子类改写 WM_GETMINMAXINFO 的 ptMinTrackSize。
+    // 下限 = MainPage 实测的"工具栏常驻组所需客户区宽度"（展开时仍剩 侧边栏/阅读/画笔/白板/设置/…）
+    //      + 高度按 A4 比例反解（视口正好一页 A4），再按当前 DPI 与窗口外框差量换算成物理像素
+    //      ⇒ 多显示器 / 缩放变化自动适配，不写死像素。
+    // ─────────────────────────────────────────────────────────────────────
+    private const uint WM_GETMINMAXINFO = 0x0024;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MINMAXINFO
+    {
+        public POINT ptReserved;
+        public POINT ptMaxSize;
+        public POINT ptMaxPosition;
+        public POINT ptMinTrackSize;
+        public POINT ptMaxTrackSize;
+    }
+
+    private delegate IntPtr SubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, IntPtr uIdSubclass, IntPtr dwRefData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    private static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, IntPtr uIdSubclass, IntPtr dwRefData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    /// <summary>标题栏尚未布局时的回退高度（WinUI TitleBar 控件的标准高度）。</summary>
+    private const double TitleBarFallbackHeightDip = 48;
+
+    /// <summary>保活子类委托（字段持有 → 委托与目标实例都不会被 GC 回收，否则回调成野指针）。</summary>
+    private SubclassProc? _minSizeSubclassProc;
+    private bool _minSizeLimitInstalled;
+
+    /// <summary>缓存的非客户区（边框）差量，物理像素。-1 = 尚未测得可信值。见 GetNonClientFramePx。</summary>
+    private int _cachedFrameW = -1;
+    private int _cachedFrameH = -1;
+
+    /// <summary>挂窗口子类以限制最小尺寸。构造期（HWND 已可用）调用一次即可。</summary>
+    private void InstallMinSizeLimit()
+    {
+        if (_minSizeLimitInstalled) return;
+        var hwnd = GetWindowHandleSafely();
+        if (hwnd == IntPtr.Zero) return;
+        _minSizeSubclassProc = MinSizeSubclassProc;
+        if (SetWindowSubclass(hwnd, _minSizeSubclassProc, (IntPtr)1, IntPtr.Zero))
+            _minSizeLimitInstalled = true;
+    }
+
+    private IntPtr MinSizeSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, IntPtr uIdSubclass, IntPtr dwRefData)
+    {
+        if (uMsg == WM_GETMINMAXINFO && lParam != IntPtr.Zero)
+        {
+            try
+            {
+                GetMinWindowSizePx(out int minW, out int minH);
+                if (minW > 0 && minH > 0)
+                {
+                    var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
+                    if (minW > mmi.ptMinTrackSize.X) mmi.ptMinTrackSize.X = minW;
+                    if (minH > mmi.ptMinTrackSize.Y) mmi.ptMinTrackSize.Y = minH;
+                    Marshal.StructureToPtr(mmi, lParam, false);
+                }
+            }
+            catch { }
+        }
+        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+    }
+
+    /// <summary>
+    /// 非客户区（边框）差量 = GetWindowRect − GetClientRect，物理像素，带缓存与合理性校验。
+    /// <para>为什么不每次现算：最小化→还原的过渡中，WM_GETMINMAXINFO 会在几何尚未稳定时发出——
+    /// 此时 GetWindowRect 仍是"最小化矩形"（约 160×28 的占位），而 GetClientRect 已是 0×0，
+    /// 两者相减就得到一个虚高的"边框厚度"（~160×28）。它一旦混进 ptMinTrackSize，系统在还原
+    /// 时会把窗口强行撑到那个被污染的尺寸——这正是"最小化再还原后窗口自动变宽"的根因。</para>
+    /// <para>故只在【正常态】（非最小化、非最大化）、客户区有效、且差量落在合理区间时才刷新缓存；
+    /// 其余时刻一律沿用上次可信值。窗口边框厚度与 DPI 相关但与窗口尺寸/状态无关，缓存是安全的。</para>
+    /// </summary>
+    private void GetNonClientFramePx(IntPtr hwnd, out int frameW, out int frameH)
+    {
+        try
+        {
+            if (GetWindowRect(hwnd, out var wr) && GetClientRect(hwnd, out var cr))
+            {
+                int cw = cr.Right - cr.Left;
+                int ch = cr.Bottom - cr.Top;
+                int fw = (wr.Right - wr.Left) - cw;
+                int fh = (wr.Bottom - wr.Top) - ch;
+                // 正常态 + 客户区非空 + 差量为正值且不超过 64px（远超任何主题/DPI 的真实边框），才可信。
+                bool sane = !IsIconic(hwnd) && !IsZoomed(hwnd)
+                            && cw > 0 && ch > 0
+                            && fw >= 0 && fw <= 64 && fh >= 0 && fh <= 64;
+                if (sane)
+                {
+                    _cachedFrameW = fw;
+                    _cachedFrameH = fh;
+                }
+            }
+        }
+        catch { }
+
+        // 尚未测到可信值（理论上只在窗口还没进入正常态时发生）→ 以 0 兜底：宁可下限略小，也不虚高撑窗。
+        frameW = _cachedFrameW >= 0 ? _cachedFrameW : 0;
+        frameH = _cachedFrameH >= 0 ? _cachedFrameH : 0;
+    }
+
+    /// <summary>最小窗户外框尺寸（物理像素）：客户区下限按当前 DPI 换算，再加实测的外框（非客户区）差量。</summary>
+    private void GetMinWindowSizePx(out int widthPx, out int heightPx)
+    {
+        widthPx = 0; heightPx = 0;
+        var hwnd = GetWindowHandleSafely();
+        if (hwnd == IntPtr.Zero) return;
+
+        double scale = GetDpiForWindow(hwnd) / 96.0;
+        if (!(scale > 0)) scale = 1.0;
+
+        var mainPage = RootFrame.Content as MainPage;
+        double clientWDip = mainPage?.MinWindowClientWidthDip ?? 0;
+        // 下限尚未测出（工具栏未完成首次布局）→ 不施加任何最小尺寸。绝不能拿一个"回退值"顶替：
+        // 回退值只会大于实测下限，会把按保存几何还原的最小尺寸窗口在首帧后顶大（长宽同时变大）。
+        if (!(clientWDip > 0)) return;
+
+        double titleDip = (AppTitleBar != null && AppTitleBar.ActualHeight > 0)
+            ? AppTitleBar.ActualHeight
+            : TitleBarFallbackHeightDip;
+        // 视口高度 = 适应宽度下整页 A4 恰好可见所需高度（由 MainPage 按最小宽度反解）。
+        double clientHDip = titleDip + (mainPage?.MinViewportHeightDip ?? 0);
+        if (!(clientHDip > 0)) return;
+
+        GetNonClientFramePx(hwnd, out int frameW, out int frameH);
+
+        widthPx = (int)Math.Ceiling(clientWDip * scale) + frameW;
+        heightPx = (int)Math.Ceiling(clientHDip * scale) + frameH;
+
+        // 小屏 + 高缩放时（如 1366×768 @150%），下限可能比工作区还大 —— 那样窗口会大到无法
+        // 完整显示、标题栏按钮够不着。此时以工作区为准收口：工具栏收纳会自动多收几个按钮，
+        // 好过留一个用不了的窗口。工作区是当前显示器的物理像素，与上面的换算同口径。
+        if (TryGetMonitorWorkAreaPx(hwnd, out int workW, out int workH))
+        {
+            if (workW > 0) widthPx = Math.Min(widthPx, workW);
+            if (workH > 0) heightPx = Math.Min(heightPx, workH);
+        }
+    }
+
+    /// <summary>当前窗口所在显示器的工作区（物理像素，已扣任务栏）。</summary>
+    private bool TryGetMonitorWorkAreaPx(IntPtr hwnd, out int widthPx, out int heightPx)
+    {
+        widthPx = 0; heightPx = 0;
+        try
+        {
+            var hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (hMon == IntPtr.Zero) return false;
+            var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+            if (!GetMonitorInfo(hMon, ref mi)) return false;
+            widthPx = Math.Max(0, mi.rcWork.Right - mi.rcWork.Left);
+            heightPx = Math.Max(0, mi.rcWork.Bottom - mi.rcWork.Top);
+            return widthPx > 0 && heightPx > 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>把当前窗口顶到最小尺寸（仅在非最大化 / 非最小化时）。MainPage 算出下限后回调，或首帧后兜底调用。</summary>
+    internal void ClampWindowToMinSize()
+    {
+        try
+        {
+            var hwnd = GetWindowHandleSafely();
+            if (hwnd == IntPtr.Zero || IsZoomed(hwnd) || IsIconic(hwnd)) return;
+
+            GetMinWindowSizePx(out int minW, out int minH);
+            if (minW <= 0 || minH <= 0) return;
+
+            var size = AppWindow.Size;
+            int w = Math.Max(size.Width, minW);
+            int h = Math.Max(size.Height, minH);
+            if (w == size.Width && h == size.Height) return;
+
+            var pos = AppWindow.Position;
+            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32 { X = pos.X, Y = pos.Y, Width = w, Height = h });
+        }
+        catch { }
+    }
 
     /// <summary>按该 PDF 记录的几何摆放窗口。只在【新建窗口】时调用——进程内打开另一个 PDF 不动
     /// 窗口（Sumatra 语义：per-document windowPos 仅 CreateMainWindow 生效）。未命中记录时用
@@ -698,6 +1037,8 @@ public sealed partial class MainWindow : Window
         try
         {
             AppTitleBar.Title = title;
+            // 标题变化后重算可用宽度（模板若被重建，TextBlock 引用也会随之更新）。
+            UpdateTitleBarTitleConstraint();
         }
         catch { }
     }

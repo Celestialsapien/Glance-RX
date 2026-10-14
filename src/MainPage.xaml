@@ -566,11 +566,11 @@
 
                     <!-- Sidebar Toggle Button -->
 
-                    <Button x:Name="ToggleSidebarButton" Click="ToggleSidebar_Click" Padding="8,6" Style="{StaticResource ButtonNoStateMachineStyle}">
+                    <ToggleButton x:Name="ToggleSidebarButton" Click="ToggleSidebar_Click" Padding="8,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
 
-                        <SymbolIcon Symbol="AllApps"/>
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE90C;"/>
 
-                    </Button>
+                    </ToggleButton>
 
 
 
@@ -620,7 +620,7 @@
 
                     <!-- Vertical Separator Line -->
 
-                    <AppBarSeparator Margin="4,0"/>
+                    <AppBarSeparator x:Name="ToolbarModeSeparator" Margin="4,0"/>
 
 
 
@@ -638,9 +638,11 @@
 
                     </ToggleButton>
 
-                    <ToggleButton x:Name="CanvasModeButton" Click="CanvasMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}" ToolTipService.ToolTip="白板模式">
+                    <ToggleButton x:Name="CanvasModeButton" Click="CanvasMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
 
-                        <SymbolIcon Symbol="ViewAll"/>
+                        <!-- 与阅读/画笔键对齐：不加 ToolTip。图标用字体回退链自适应 Win11/Win10（U+ECA5 两字体均映射为同一布局图标）。 -->
+
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xECA5;"/>
 
                     </ToggleButton>
 
@@ -714,13 +716,12 @@
 
                             <Flyout x:Name="SettingsFlyout" Placement="BottomEdgeAlignedRight" FlyoutPresenterStyle="{StaticResource SettingsFlyoutPresenterStyle}">
 
-                                <!-- 底部预留大留白：以「卡片顶 → 第一个下拉框顶」为顶部参考（实测 ≈70 DIP，含标题行盒与上方 padding），
-                                     底部同步留出 ≈69 DIP（4 presenter + 1 border + 64 panel），使上下留空对应。
-                                     这块空间按用户要求预留；后续往里放内容时，把 64 收掉即可。 -->
+                                <!-- 底部预留大留白（特地为平衡上方大片留白而设计，也为日后加"作者主页"等内容留位）：
+                                     以「卡片顶 → 第一个下拉框顶」为顶部参考（实测 ≈70 DIP，含标题行盒与上方 padding），
+                                     底部同步留出 ≈69 DIP（4 presenter + 1 border + 64 panel），使上下留空对应。 -->
                                 <StackPanel x:Name="SettingsFlyoutPanel" Spacing="16" Width="260" Padding="4,4,4,64" KeyDown="SettingsFlyout_KeyDown">
 
-                                    <!-- 标题行：标题(左) + 「操作指南」按钮(右, 同行右上角)。
-                                         按钮移到此处后，下方布局分组与底部预留大留白(Panel Padding 底部 64)保持不变。 -->
+                                    <!-- 标题行：标题(左) + 「操作指南」按钮(右, 同行右上角)。 -->
                                     <Grid VerticalAlignment="Center">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
@@ -788,9 +789,41 @@
 
                                     </StackPanel>
 
+
+
+                                    <!-- Toolbar Display Selector：常驻显示 / 自动收起（默认后者，与原有行为一致） -->
+
+                                    <StackPanel Spacing="6">
+
+                                        <TextBlock x:Name="ToolbarDisplayLabel" Text="Toolbar display" FontSize="12" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+
+                                        <ComboBox x:Name="ToolbarDisplayComboBox" SelectionChanged="ToolbarDisplayComboBox_SelectionChanged" HorizontalAlignment="Stretch" IsTabStop="False">
+
+                                            <ComboBoxItem x:Name="ToolbarAlwaysItem" Content="Always visible" Tag="Always"/>
+
+                                            <ComboBoxItem x:Name="ToolbarAutoHideItem" Content="Auto-hide" Tag="AutoHide"/>
+
+                                        </ComboBox>
+
+                                    </StackPanel>
+
                                 </StackPanel>
 
                             </Flyout>
+
+                        </Button.Flyout>
+
+                    </Button>
+
+                    <!-- 溢出收纳按钮「…」：窗口过窄时，放不下的工具栏按钮收进它的菜单（收起的仍可正常点击）。
+                         平时 Collapsed；由 UpdateToolbarOverflow() 按可用宽度决定是否显示，以及收纳哪些项。 -->
+                    <Button x:Name="ToolbarMoreButton" Padding="8,6" Visibility="Collapsed" Style="{StaticResource ButtonNoStateMachineStyle}">
+
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE712;"/>
+
+                        <Button.Flyout>
+
+                            <MenuFlyout x:Name="ToolbarMoreFlyout" Placement="BottomEdgeAlignedRight"/>
 
                         </Button.Flyout>
 
