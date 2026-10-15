@@ -380,6 +380,7 @@ public sealed partial class MainPage : Page
         GpuViewer.CanvasEdgeDeleteRequested += GpuCanvas_EdgeDeleteRequested;
         GpuViewer.CanvasEdgeStyleChanged += GpuCanvas_EdgeStyleChanged;
         GpuViewer.CanvasNodeCreateConnectedRequested += GpuCanvas_CreateConnectedRequested;
+        GpuViewer.CanvasNodeBringToFrontRequested += GpuCanvas_BringToFront;
         // 编辑框内的 Ctrl+Z/Y 统一走同一撤销栈（编辑框原生撤销会与全局历史脱节）。
         GpuViewer.CanvasUndoRequested += (_, __) => RequestUndo();
         GpuViewer.CanvasRedoRequested += (_, __) => RequestRedo();
@@ -6252,6 +6253,22 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { node.X = ox; node.Y = oy; RefreshCanvas(); },
             redo: () => { node.X = nx; node.Y = ny; RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>选中卡片 = 提升到叠放顶层。jsoncanvas 无独立 z 字段，nodes 数组顺序即 z 序，
+    /// 故"置顶"就是把该节点移到数组末尾。写回模型并落盘 ⇒ 取消选中后层级保持，不会掉回出生顺序。
+    /// 不入撤销栈：选中是高频操作，入栈会淹没真正可撤销的编辑。</summary>
+    private void GpuCanvas_BringToFront(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        var nodes = _canvasDoc.Nodes;
+        int i = nodes.FindIndex(n => string.Equals(n.Id, e.NodeId, StringComparison.Ordinal));
+        if (i < 0 || i == nodes.Count - 1) return;   // 不存在或已在顶层 → 不动、不落盘
+        var node = nodes[i];
+        nodes.RemoveAt(i);
+        nodes.Add(node);
         SaveCanvas();
         RefreshCanvas();
     }

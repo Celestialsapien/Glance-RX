@@ -3793,8 +3793,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             bool gesturing = _isCanvasResizing || _isCanvasConnecting;
             string? gestureNodeId = _isCanvasResizing ? _canvasResizeNode?.Id
                                  : (_isCanvasConnecting ? _connFromNodeId : null);
-            // 叠放层级：卡片进入选中态即提升至顶层（对齐 Obsidian —— 用选中态即可调整叠放层级）；
-            // 拖角缩放/拖边连线进行中则改为"正在操作的那张卡"置顶，保证被操作的卡片不被邻居盖住。
+            // 叠放层级：z 序 = _canvasNodes 数组顺序（jsoncanvas 无独立 z 字段）。选中卡片的【永久】置顶
+            // 由 MainPage 重排模型数组并落盘完成（见 CanvasNodeBringToFrontRequested）—— 取消选中后仍保持。
+            // 此处 topId 第二轮绘制是绘制期兜底：手势中把"正在操作的那张卡"置顶，不被邻居盖住。
             string? topId = gesturing ? gestureNodeId : sel;
             void DrawCardNode(CanvasNode node)
             {
@@ -4651,10 +4652,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return true;
     }
 
-    /// <summary>选中连线在贝塞尔中点处的屏幕坐标（用于摆边工具栏）。</summary>
-    private bool TryGetCanvasEdgeMidpointScreen(string edgeId, out Vector2 mid)
+    /// <summary>选中连线【边工具栏锚点】的屏幕坐标（仿 Obsidian Canvas）：
+    /// X 取连线贝塞尔中点 X，Y 取靠上方的那张卡片连接点 Y（即两连接点中较小者）。
+    /// 位置出厂在视口外时由调用方双向钳制到视口边缘。</summary>
+    private bool TryGetCanvasEdgeToolbarAnchorScreen(string edgeId, out Vector2 anchor)
     {
-        mid = default;
+        anchor = default;
         var pages = _pages;
         if (pages.Count == 0) return false;
         CanvasEdge[] edges;
@@ -4670,7 +4673,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (!ComputeEdgeScreenGeometry(target, pages, DestOf, index, z,
                 out var a1, out var c1, out var c2, out var a2))
             return false;
-        mid = BezierPoint(a1, c1, c2, a2, 0.5f);
+        float midX = BezierPoint(a1, c1, c2, a2, 0.5f).X;
+        float upperY = MathF.Min(a1.Y, a2.Y);   // 靠上方的连接点 Y
+        anchor = new Vector2(midX, upperY);
         return true;
     }
 
@@ -5103,6 +5108,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// <summary>从连线手柄拖到空白处：请求在该处新建卡片并与源节点连成一条线
     /// （NodeId=源节点、FromSide=源出边、PageIndex/X/Y=落点页与已 clamp 的左上角）。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeCreateConnectedRequested;
+    /// <summary>选中卡片 = 请求提升到叠放顶层（jsoncanvas 无独立 z 字段，nodes 数组顺序即 z 序）。
+    /// MainPage 收到后重排模型数组并落盘 ⇒ 取消选中后层级保持，不再只是绘制期临时置顶。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeBringToFrontRequested;
     /// <summary>编辑框内请求撤销（Ctrl+Z）：MainPage 统一走撤销栈，避免编辑框原生撤销与全局历史脱节。</summary>
     public event EventHandler? CanvasUndoRequested;
     /// <summary>编辑框内请求重做（Ctrl+Y）。</summary>
@@ -5116,6 +5124,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_selectedCanvasNodeId == id && _selectedCanvasEdgeId == null) { SyncCanvasOverlayNow(); return; }
         _selectedCanvasNodeId = id;
         _selectedCanvasEdgeId = null;   // 与连线选中互斥
+        // 选中即置顶，且必须是【永久】的：这里只发请求，真正的重排与落盘由 MainPage 改模型数组完成
+        // （jsoncanvas 的 z 序 = nodes 数组顺序）。否则取消选中后 topId 失效，卡片会掉回出生层级。
+        if (id != null)
+            CanvasNodeBringToFrontRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });
         InvalidateOverlay();
         SyncCanvasOverlayNow();
     }
@@ -6117,7 +6129,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double left = rect.X + rect.Width / 2.0 - szW / 2.0;
         double top = rect.Y - szH - CanvasToolbarGap;
         left = Math.Clamp(left, 4, Math.Max(4, _vpW - szW - 4));
-        if (top < 4) top = rect.Bottom + CanvasToolbarGap; // 上方放不下 → 改放卡片下方
+        // 双向钳制：上方空间不够时【不再翻到卡片下方】（避免一步跳变），而是停在视口上缘、允许侵入卡片内部；
+        // 向下滚→钉上缘、向右滚→钉左缘，移出视口即停在对应边缘。
+        top = Math.Clamp(top, 4, Math.Max(4, _vpH - szH - 4));
         if (!_canvasToolbarPlaced ||
             Math.Abs(left - _canvasToolbarLeft) > 0.5 || Math.Abs(top - _canvasToolbarTop) > 0.5)
         {
@@ -6128,11 +6142,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
-    /// <summary>把边工具栏摆到选中连线的贝塞尔中点附近（上方优先，放不下落到下方）。</summary>
+    /// <summary>把边工具栏摆到选中连线锚点附近（仿 Obsidian Canvas）：
+    /// X=连线贝塞尔中点 X，Y=靠上方卡片连接点 Y；出厂在视口外时【双向钳制】到视口边缘，
+    /// 并尽可能满足原 XY（向下滚→钉视口上缘，向右滚→钉视口左缘，皆不够则停最近角）。</summary>
     private void PositionCanvasEdgeToolbar()
     {
         if (_selectedCanvasEdgeId == null ||
-            !TryGetCanvasEdgeMidpointScreen(_selectedCanvasEdgeId, out var mid))
+            !TryGetCanvasEdgeToolbarAnchorScreen(_selectedCanvasEdgeId, out var anchor))
         {
             CanvasOverlay.Visibility = Visibility.Collapsed;
             CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
@@ -6149,10 +6165,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _canvasEdgeToolbarW = m.Width;
             _canvasEdgeToolbarH = m.Height;
         }
-        double left = mid.X - _canvasEdgeToolbarW / 2.0;
-        double top = mid.Y - _canvasEdgeToolbarH - CanvasToolbarGap;
+        // 锚点在工具栏上方留出间隙；双向各自钳制到 [4, 视口 - 工具栏尺寸 - 4]
+        double left = anchor.X - _canvasEdgeToolbarW / 2.0;
+        double top = anchor.Y - _canvasEdgeToolbarH - CanvasToolbarGap;
         left = Math.Clamp(left, 4, Math.Max(4, _vpW - _canvasEdgeToolbarW - 4));
-        if (top < 4) top = mid.Y + CanvasToolbarGap;
+        top = Math.Clamp(top, 4, Math.Max(4, _vpH - _canvasEdgeToolbarH - 4));
         if (!_canvasEdgeToolbarPlaced ||
             Math.Abs(left - _canvasEdgeToolbarLeft) > 0.5 || Math.Abs(top - _canvasEdgeToolbarTop) > 0.5)
         {
@@ -6507,9 +6524,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (AnnotationsVisible && HasCanvasContent())
             DrawWhiteboardLayer(ds, z, visible);
 
-        // 视图在动 → 选中卡片/编辑框的屏幕位置随之改变，每帧合并排一次浮层重定位。
+        // 视图在动 → 选中卡片 / 编辑框 / 选中连线的屏幕位置随之改变，每帧合并排一次浮层重定位。
         // 放在 Draw 末尾而非直接改布局：避免在绘制回调内触发布局重入。
-        if (_selectedCanvasNodeId != null || _canvasEditNodeId != null)
+        // ⚠ 三个条件缺一不可：漏掉 _selectedCanvasEdgeId 时，选中连线后滚动/缩放不会重排边工具栏，
+        //    它会被钉死在首次选中时的视口位置（连线走了、工具栏不动）。
+        if (_selectedCanvasNodeId != null || _canvasEditNodeId != null || _selectedCanvasEdgeId != null)
             RequestCanvasOverlaySync();
 
     }
