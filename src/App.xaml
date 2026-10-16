@@ -44,8 +44,10 @@
 
                 <!-- ══ 深色（WinUI 的 "Default" 档，不是 "Dark"）══ -->
                 <ResourceDictionary x:Key="Default">
-                    <!-- GlanceAccent (Obsidian 紫) 直接内联为画刷 Color 字面量，避免 <Color> 资源元素触发
-                         WMC0001 "Unknown type 'Color'"。深色未选中底走 ControlFillColor*，原深色的
+                    <!-- GlanceAccent (Obsidian 紫) 内联为画刷 Color 字面量：本档是 Brush，因为欢迎页按钮样式 /
+                         画笔按钮亮起等消费方按 Brush 引用。注：早先注释称 <Color> 资源元素会触发 WMC0001，
+                         但本 SDK(WinAppSDK 2.2.1)实测 <Color x:Key="GlanceAccentColor"> 正常编译（见下方画笔色板首位），
+                         该警告已过时——纯 Color 资源可用。深色未选中底走 ControlFillColor*，原深色的
                          GlanceFillNeutral* 纵深防御三档已无引用方（根因在 a265ad4 移除），随本修复一并删除。 -->
 
                     <!-- 欢迎页"打开文件"按钮专用画刷（第 12 轮）。
@@ -57,6 +59,11 @@
                     <SolidColorBrush x:Key="GlanceAccentBrush" Color="#A882FF" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="#A882FF" Opacity="0.9" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="#A882FF" Opacity="0.8" />
+
+                    <!-- 画笔色板首位（主题强调紫）专用的【纯 Color】资源：让 ColorAccentButton 的
+                         hover/press（SolidColorBrush.Color）与后 6 个圆点【同一套结构】（后 6 个是字面量 Color，
+                         首位是本主题 Color），hover/press 无色变、随主题切换。与 GlanceAccentBrush 同色同源、仅类型不同。 -->
+                    <Color x:Key="GlanceAccentColor">#A882FF</Color>
 
                     <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：不依赖 WinUI 自适应的
                          TextOnAccentFillColorPrimary（它会随系统强调色 / 主题错位，曾导致深色调悬浮态文字错变白、
@@ -160,6 +167,9 @@
                     <SolidColorBrush x:Key="GlanceAccentBrush" Color="#9873F7" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPointerOver" Color="#9873F7" Opacity="0.9" />
                     <SolidColorBrush x:Key="GlanceAccentBrushPressed" Color="#9873F7" Opacity="0.8" />
+
+                    <!-- 画笔色板首位专用【纯 Color】资源（说明见深色档）：浅色档 #9873F7。 -->
+                    <Color x:Key="GlanceAccentColor">#9873F7</Color>
 
                     <!-- 欢迎页打开 PDF 按钮（accent 模式）的【显式】文字画刷：与深色档同键、同语义（说明见深色档注释）。
                          浅色调紫(#9873F7)偏亮 ⇒ 文字白会跌破 AA(3.4:1)；若要保持可读应改黑(6.1:1)。

@@ -155,10 +155,16 @@ public sealed partial class MainPage : Page
     private EditMode _currentMode = EditMode.Navigate;
     private bool _isDrawingHighlight = false;
     private AnnotationViewModel? _activeHighlight;
-    private string _activeColorHex = "#F2C200"; // Default Yellow
+    // 画笔色板第 1 位 = 主题强调紫（Obsidian 紫）：浅色 #9873F7 / 深色 #A882FF，
+    // 跟随深浅主题切换。存储为哨兵 "Accent"，由 ResolveActiveColorHex() 按需解析为当前主题紫；
+    // 其余 6 色为固定 hex，仅顺序调动（见 MainPage.xaml ColorSelectorPanel）。
+    private const string AccentColorTag = "Accent";
+
+    private string _activeColorHex = AccentColorTag; // 默认 = 主题强调紫
 
     // Live highlight brushes for the Pen mode ToggleButton: the checked-state background
     // and foreground are overridden to follow the currently selected pen color.
+    // 初始值仅为占位，构造期 ApplyPenHighlight() 会按默认（主题强调紫）即时重算。
     private readonly Microsoft.UI.Xaml.Media.SolidColorBrush _penHighlightBrush =
         new(Microsoft.UI.Colors.Yellow);
     // 悬停/按下态底色 = 画笔色向白色提亮，制造点击反馈（否则三态同色、点击无反馈）。
@@ -459,6 +465,7 @@ public sealed partial class MainPage : Page
     private void RefreshPenOptionThemeHighlights()
     {
         ApplyPenOptionThemeBrushes();
+        ApplyPenHighlight();   // 主题切换时重算画笔按钮亮起色：强调紫随深浅主题解析为新档
         SyncColorSwatchHighlight();
         SelectThicknessPreset(_activeThickness);
     }
@@ -4062,7 +4069,7 @@ public sealed partial class MainPage : Page
             //   ① 正交方向掩码边呈像素级平台 = 发平；② 边缘半透明像素的预乘暗色被按不透明显示 = 黑边。
             // 改为【掩码全 0 + 32bpp 预乘 alpha】→ 系统走 alpha 混合：边缘解析 AA 平滑、透明区 alpha=0 真透明。
             int diameter = (int)Math.Clamp(_activeThickness * 3.0, 14, 20);
-            string colorHex = _activeColorHex ?? "#F2C200";
+            string colorHex = ResolveActiveColorHex();
             if (_hRingCursor != IntPtr.Zero && _ringDiameter == diameter && _ringColorHex == colorHex)
                 return;
             DestroyRingCursor();
@@ -5226,10 +5233,21 @@ public sealed partial class MainPage : Page
     }
 
 
+    /// <summary>
+    /// 把当前画笔色解析为可绘制的 6 位 hex（含 alpha 前缀由调用方处理）。
+    /// 哨兵 "Accent" = 主题强调紫，按当前 <see cref="ElementTheme"/> 解析（浅 #9873F7 / 深 #A882FF），
+    /// 使其随深浅主题切换；其余色号为固定值、仅顺序调动。
+    /// </summary>
+    private string ResolveActiveColorHex()
+    {
+        if (_activeColorHex == AccentColorTag)
+            return this.ActualTheme == ElementTheme.Dark ? "#A882FF" : "#9873F7";
+        return _activeColorHex ?? "#F2C200";
+    }
+
     private string GetActiveColorHexWithOpacity()
     {
-        string color = _activeColorHex;
-        if (string.IsNullOrEmpty(color)) color = "#F2C200";
+        string color = ResolveActiveColorHex();
         
         string clean = color.Replace("#", "");
         if (clean.Length == 8)
@@ -5247,7 +5265,7 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void ApplyPenHighlight()
     {
-        string clean = (_activeColorHex ?? "#F2C200").Replace("#", "");
+        string clean = ResolveActiveColorHex().Replace("#", "");
         if (clean.Length == 8) clean = clean.Substring(2); // strip alpha
         if (clean.Length != 6) clean = "F2C200";
 
