@@ -57,6 +57,10 @@ internal static class CursorInterop
     //   我们的手势光标，零滞后、不会被回退。仅手势进行中替换，结束用 SPI_SETCURSORS 一次性恢复全部系统光标。
     private const int IDC_ARROW = 32512;
     private const int IDC_IBEAM = 32513;
+
+    /// <summary>系统标准 I 形（文本）光标的 IDC 值，供外部 LoadSystemCursor 使用（编辑态强制固定工字）。</summary>
+    public const int IdcIbeam = IDC_IBEAM;
+
     private const uint SPI_SETCURSORS = 0x0057;
 
     [DllImport("user32.dll")]
@@ -68,24 +72,75 @@ internal static class CursorInterop
     /// <summary>取系统标准光标句柄（IDC_* 常量）。</summary>
     public static IntPtr LoadSystemCursor(int id) => LoadCursor(IntPtr.Zero, id);
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr CopyIcon(IntPtr hIcon);
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetSystemCursor(IntPtr hcur, uint id);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 
-    /// <summary>把"系统箭头 + 系统 I 形"资源替换为指定标准光标（hCursor 为标准光标句柄；内部 CopyIcon 副本，原件保留）。
-    /// 用于画布手势期间，让框架每帧 SetCursor(箭头/I形) 画出我们的手势光标。SetSystemCursor 会销毁传入副本。</summary>
-    public static void OverrideSystemCursorTo(IntPtr hCursor)
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ICONINFO
     {
-        if (hCursor == IntPtr.Zero) return;
+        public bool fIcon;      // true = icon；false = cursor
+        public int xHotspot;
+        public int yHotspot;
+        public IntPtr hbmMask;
+        public IntPtr hbmColor;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr CreateIconIndirect(ref ICONINFO piconinfo);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    /// <summary>把【系统共享光标】复制成"调用方拥有"的 HCURSOR 副本（GetIconInfo + CreateIconIndirect）。
+    ///
+    /// 【为何不能用 CopyIcon —— 这就是此前资源替换静默失效的根因】：
+    /// <c>LoadCursor(NULL, IDC_*)</c> 返回的是【系统共享句柄】，<c>CopyIcon</c> 对它并不适用（会失败返回 0），
+    /// 于是 <c>SetSystemCursor</c> 拿到的是零句柄而被静默跳过 —— 替换从未真正发生，编辑框内按下仍显示默认箭头。
+    /// 画笔圆环之所以成功，是因为它的 HCURSOR 是【自己创建】的（归调用方所有），CopyIcon 有效。
+    /// 此处改用 GetIconInfo 取出位图【副本】+ CreateIconIndirect 造出归属调用方的新光标（SetSystemCursor 可安全销毁）。
+    /// 任一步失败返回 Zero —— 绝不触碰系统共享句柄本身。</summary>
+    public static IntPtr CloneSystemCursor(int idcId)
+    {
+        IntPtr src = LoadCursor(IntPtr.Zero, idcId);
+        if (src == IntPtr.Zero) return IntPtr.Zero;
         try
         {
-            IntPtr a = CopyIcon(hCursor); if (a != IntPtr.Zero) SetSystemCursor(a, IDC_ARROW);
-            IntPtr b = CopyIcon(hCursor); if (b != IntPtr.Zero) SetSystemCursor(b, IDC_IBEAM);
+            if (!GetIconInfo(src, out ICONINFO ii)) return IntPtr.Zero;
+            try
+            {
+                return CreateIconIndirect(ref ii);
+            }
+            finally
+            {
+                // GetIconInfo 取出的位图是本进程副本，必须释放（光标本体由 CreateIconIndirect 持有）。
+                if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
+                if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
+            }
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    /// <summary>把"系统箭头（+可选系统 I 形）"资源替换为指定 IDC 形状的系统光标。
+    /// 副本由 <see cref="CloneSystemCursor"/> 生成（不再用对共享句柄失效的 CopyIcon）。
+    /// keepIBeam=true 时【只替换箭头槽】：编辑态下文本区仍走系统 I 形槽（本就是工字），
+    /// 而框架若按箭头槽求值也会画出工字 —— 两头都是工字，且不牵连其他文本区域。</summary>
+    public static void OverrideSystemCursorTo(int idcId, bool keepIBeam = false)
+    {
+        try
+        {
+            IntPtr a = CloneSystemCursor(idcId);
+            if (a != IntPtr.Zero) SetSystemCursor(a, IDC_ARROW);
+            if (!keepIBeam)
+            {
+                IntPtr b = CloneSystemCursor(idcId);
+                if (b != IntPtr.Zero) SetSystemCursor(b, IDC_IBEAM);
+            }
         }
         catch { }
     }

@@ -154,6 +154,7 @@
                      TextChanged="CanvasEditBox_TextChanged"
                      PreviewKeyDown="CanvasEditBox_PreviewKeyDown"
                      KeyDown="CanvasEditBox_KeyDown"
+                     PointerExited="CanvasEditBox_PointerExited"
                      Paste="CanvasEditBox_Paste">
                 <!-- 把编辑框聚焦/悬停态的自带"边框厚度"主题值压成 0：Fluent 文本框聚焦时会临时把
                      内部 BorderElement 的边框改成【底部 2px】并染成 accent 蓝。编辑框现已 Opacity=0 不可见，
