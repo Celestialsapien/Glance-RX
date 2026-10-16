@@ -528,6 +528,13 @@ public sealed partial class SelfDrawnTextBox : UserControl
     {
         if (Visibility != Visibility.Visible) return;
         FocusHost();
+        // ⚠ 光标必须在这里【无条件】起表，不能只靠 Host_GotFocus：
+        // 焦点若【已经在】宿主上（例如点 √/× 结束编辑时，按钮被调用方的 GettingFocus 拦截挡下、
+        // 焦点自始至终没离开宿主），Host.Focus() 是空操作 ⇒ GotFocus 不会来 ⇒ 光标常亮不闪
+        // （10-17 实测）。反之"点别处失焦退出"时焦点真丢了，GotFocus 会来，所以那条路一直正常 ——
+        // 同一段代码两条表现，正是"把状态迁移挂在会漏的事件上"的典型症状。
+        // 无条件起表是安全的：OnBlinkTick 自带自愈（控件不可见 / 宿主未聚焦 ⇒ 下一拍停表并收起光标）。
+        StartBlink();
         int len = Host.Text?.Length ?? 0;
         Host.SelectionStart = len;
         Host.SelectionLength = 0;

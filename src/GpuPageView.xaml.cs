@@ -3582,8 +3582,39 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private static readonly Windows.UI.Color CanvasCardFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
     private static readonly Windows.UI.Color CanvasCardStroke = Windows.UI.Color.FromArgb(255, 138, 143, 152);
     private static readonly Windows.UI.Color CanvasCardText = Windows.UI.Color.FromArgb(255, 32, 32, 34);
-    // 编辑态选区高亮（Win2D 自绘）：半透明蓝，叠在白底上呈浅蓝、不挡黑字。
-    private static readonly Windows.UI.Color CanvasSelectionColor = Windows.UI.Color.FromArgb(64, 0, 120, 215);
+    // 编辑态选区高亮（Win2D 自绘）。10-17 改：原为写死的半透明蓝 FromArgb(64,0,120,215)，
+    // 与工具栏页码框 / 书签编辑框（SelfDrawnTextBox 的 SelRect）不是一回事 ⇒ 三处拖选颜色不统一。
+    // 现改为与它们【同源】：取 App.xaml 主题字典里的 GlanceAccentBrush（Obsidian 紫，
+    // 深 #A882FF / 浅 #9873F7），alpha 与 SelRect 的 Opacity=0.35 对齐（89/255）。
+    // ⚠ 必须走主题字典取：该键【只】定义在 ThemeDictionaries 里、顶层字典没有
+    // （与 ToggleButton* / GlanceAccent* 同一类坑，见 VisualOverrideBase.Resource 的注释）。
+    // ⚠ 主题键用 MainWindow.IsDarkTheme 这个【确定性同步】源（暗色值在 "Default" 档、顶层无 "Dark"），
+    //   绝不用 ActualTheme —— 它在 RequestedTheme 设置后经布局通道异步传播，切换瞬间会读到旧字典。
+    private static Windows.UI.Color GetCanvasSelectionColor()
+    {
+        const byte Alpha = 89;   // 0.35 × 255，与 SelfDrawnTextBox 的 SelRect Opacity 一致
+        try
+        {
+            var resources = Application.Current?.Resources;
+            if (resources != null)
+            {
+                string themeKey = ((Application.Current as App)?.MainWindow is MainWindow mw && !mw.IsDarkTheme)
+                    ? "Light" : "Default";
+                foreach (var kv in resources.ThemeDictionaries)
+                {
+                    if (kv.Key is not string k || k != themeKey || kv.Value is not ResourceDictionary rd) continue;
+                    if (rd.TryGetValue("GlanceAccentBrush", out var v)
+                        && v is Microsoft.UI.Xaml.Media.SolidColorBrush b)
+                    {
+                        return Windows.UI.Color.FromArgb(Alpha, b.Color.R, b.Color.G, b.Color.B);
+                    }
+                    break;
+                }
+            }
+        }
+        catch { }
+        return Windows.UI.Color.FromArgb(Alpha, 0xA8, 0x82, 0xFF);   // 兜底：深色档 Obsidian 紫
+    }
     private static readonly Windows.UI.Color CanvasEdgeColor = Windows.UI.Color.FromArgb(255, 96, 102, 112);
     // 连线命中半径（屏幕 DIP）【下限】：实际阈值 = max(此值, 悬浮态光晕半宽 2×CanvasArrowLen·z/√3)，
     // 见 TryHitCanvasEdge —— 指针进入描边区域即命中，且缩小时仍保有最小可命中范围。
@@ -3929,6 +3960,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (AnyCanvasGestureActive) return;   // 编辑态手势期间抑制选区绘制（RichEditBox 会顺手选中文字，收尾还原）
         try
         {
+            var selColor = GetCanvasSelectionColor();   // 循环外取一次（主题字典查找，不必每行重取）
             int len = _canvasEditText.Length;
             var sel = CanvasEditBox.Document.Selection;
             int a = Math.Clamp(Math.Min(sel.StartPosition, sel.EndPosition), 0, len);
@@ -3967,10 +3999,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 {
                     pR = layout.GetCaretPosition(b - 1, true);   // 行内结束：末选中字符的 trailing
                 }
-                // 零宽段（选区恰好只含换行符等）不画：Math.Max(1f,…) 会把它强画成 1px 蓝色竖条残留（用户报告）。
+                // 零宽段（选区恰好只含换行符等）不画：Math.Max(1f,…) 会把它强画成 1px 的选色竖条残留（用户报告）。
                 float segW = pR.X - pL.X;
                 if (segW > 0.05f)
-                    ds.FillRectangle(new Rect(textRect.X + pL.X, dTop + rowTop, segW, hgt), CanvasSelectionColor);
+                    ds.FillRectangle(new Rect(textRect.X + pL.X, dTop + rowTop, segW, hgt), selColor);
                 lineStart = lineEnd;
                 rowTop += hgt;
             }

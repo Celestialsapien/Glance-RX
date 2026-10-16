@@ -277,6 +277,8 @@ public sealed partial class MainPage : Page
     private bool _glyphStrokeScaleHooked;        // OpenSecondPdfGlyph 的描边是否已挂钩 RasterizationScale 变化（Loaded 后只挂一次）
     private bool _zoomPresetOverrideAttached;    // 缩放预设浮层 8 颗是否已接管（Flyout 内容首次打开才进可视树，Loaded / Opening 两处兜底各试一次）
     private bool _pageHoverDriveAttached;        // 整页 hover 几何驱动是否已挂到页面根（避免 Loaded 重入导致重复注册）
+    private ListViewItem? _bookmarkPressedRow;   // 书签列表里当前被按下的那一行（判定见 BookmarkRow_PointerPressed：显式排除行内按钮/编辑框）
+    private Point _bookmarkRowPointer;           // 书签行几何判定用的实时光标位置（MainPage 坐标系，由 PageRoot_PointerMoved 用 e.GetCurrentPoint(this) 维护）
 
     public MainPage()
     {
@@ -291,6 +293,8 @@ public sealed partial class MainPage : Page
         AttachColorSwatchHover();
         // 粗细预设按钮的悬浮/按下底色：构造期一次性指向共享灰刷（详见方法注释）。
         InstallThicknessPresetHoverBrushes();
+        // 书签行的悬浮 / 点击态：改由指针几何驱动（不再采信框架悬停标记），详见方法注释。
+        AttachBookmarkRowStateDrive();
 
         // 全局键盘聚焦拦截：禁止任何焦点落到 ButtonBase（用户要求按钮只由鼠标单击触发，
         // 无 Tab+Enter 触发路径，点后焦点也不残留→Enter/Space 不重触发）。不限 FocusState：
@@ -2382,6 +2386,158 @@ public sealed partial class MainPage : Page
         {
             NavigateToPage(clickedItem.PageIndex);
         }
+    }
+
+    // ---------- 书签行：常态 / 悬浮 / 点击三档（几何驱动，不采信框架悬停标记） ----------
+
+    /// <summary>
+    /// 挂上书签行几何驱动的<b>两个</b>来源：<b>指针移动</b>（见 <c>PageRoot_PointerMoved</c>）与
+    /// <b>布局变化</b>（滚动 / 增删书签 / 编辑态切换 / 侧边栏滑动都会让行移动，而那时指针并未移动
+    /// ⇒ 必须有第二个来源，否则悬浮行会停在旧位置）。
+    /// </summary>
+    /// <remarks>
+    /// 按下 / 松开挂在<b>页面根</b>且 <c>handledEventsToo: true</c>：<c>ListViewItem</c> / <c>ListViewBase</c>
+    /// 自身的 <c>OnPointerPressed</c> 会把事件标成 Handled（ItemClick 的容器判定就在那一层），挂在列表上的
+    /// <b>普通</b>监听收不到；行内 4 颗 Button（<c>ButtonBase</c> 内建吞事件）与自绘编辑框在按下时也各自标
+    /// Handled ⇒ 同理漏。页面根不受 Handled 影响，两种漏洞一次堵死。<b>「点击落在按钮 / 编辑框 = 落在书签栏
+    /// 更上一层，不穿透到行」不再靠 Handled 自然屏蔽，而由 <c>BookmarkRow_PointerPressed</c> 的
+    /// <c>onButton || onEditor</c> 显式保证</b>。
+    /// </remarks>
+    private void AttachBookmarkRowStateDrive()
+    {
+        if (BookmarkListView == null) return;
+
+        // 挂【页面根】+ handledEventsToo=true（理由见上方 remarks）：两种 Handled 漏洞一次堵死。
+        this.AddHandler(PointerPressedEvent, new PointerEventHandler(BookmarkRow_PointerPressed), true);
+        this.AddHandler(PointerReleasedEvent, new PointerEventHandler(BookmarkRow_PointerReleased), true);
+
+        BookmarkListView.LayoutUpdated += (s, e) => RefreshBookmarkRowStates();
+    }
+
+    /// <summary>
+    /// 判定这一次按下算不算"落在书签行上"，是则该行进入点击态。
+    /// ⚠ 因为挂在页面根（不受 Handled 影响），点在行内按钮 / 自绘编辑框时也会到达这里 ⇒
+    /// 必须显式排除 —— 那正是用户定的语义：「点击落在按钮 / 编辑框 = 落在书签栏更上一层，不穿透到行」。
+    /// </summary>
+    private void BookmarkRow_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (BookmarkListView == null || BookmarkListView.Visibility != Visibility.Visible) return;
+        var src = e.OriginalSource as DependencyObject;
+        if (src == null) return;
+
+        bool onButton = HasAncestor<Button>(src);
+        bool onEditor = HasAncestor<SelfDrawnTextBox>(src);
+        var row = FindAncestorListViewItem(src);
+        bool inBookmarkList = row != null && IsDescendantOf(row, BookmarkListView);
+
+        if (onButton || onEditor || row == null || !inBookmarkList) return;
+
+        _bookmarkPressedRow = row;
+        RefreshBookmarkRowStates();
+    }
+
+    private static bool HasAncestor<T>(DependencyObject? node) where T : DependencyObject
+    {
+        while (node != null)
+        {
+            if (node is T) return true;
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
+    /// <summary>任何一次松开都解除按下态（挂页面根、不受 Handled 影响，故在按钮 / 编辑框上松开也算）。</summary>
+    private void BookmarkRow_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_bookmarkPressedRow == null) return;
+        _bookmarkPressedRow = null;
+        RefreshBookmarkRowStates();
+    }
+
+    /// <summary>
+    /// 书签行三档底色的<b>唯一权威</b>：按<b>指针几何</b>判定，而不是框架的 <c>IsPointerOver</c>。
+    /// 原生 <c>ListViewItemPresenter</c> 靠 IsPointerOver 判悬浮，而行内任何元素一旦 <c>CapturePointer</c>
+    /// （Button 的 ButtonBase 内建行为、自绘编辑框的拖选都需要），框架就给行派发一次
+    /// <b>假 PointerExited</b> ⇒ 整行悬浮色当场消失、松手后约 380ms 才补发 Entered 回来（用户实测的"乱闪"）。
+    /// 几何判定不采信任何框架悬停标记 ⇒ 谁捕获指针都不影响 ⇒ 根除，且按钮与编辑框<b>都不必改动</b>。
+    /// 三档颜色仍由模板逐键引用 generic 的 <c>ListViewItemBackground*</c> ⇒ 观感与改前逐像素一致。
+    /// </summary>
+    private void RefreshBookmarkRowStates()
+    {
+        if (BookmarkListView == null || BookmarkListView.Visibility != Visibility.Visible) return;
+        var panel = BookmarkListView.ItemsPanelRoot;
+        if (panel == null) return;
+
+        var pt = _bookmarkRowPointer;
+
+        // 按下后指针被拖出行外（或该行已被虚拟化回收）⇒ 解除按下态，避免点击色残留。
+        if (_bookmarkPressedRow != null && !IsPointerWithinRow(_bookmarkPressedRow, pt))
+            _bookmarkPressedRow = null;
+
+        // 指针不在整块列表内 ⇒ 一律回常态，省掉逐行的 TransformToVisual（LayoutUpdated 触发很频繁）。
+        bool overList = IsPointerWithinRow(BookmarkListView, pt);
+
+        foreach (var child in panel.Children)
+        {
+            if (child is not ListViewItem row) continue;
+            bool pressed = ReferenceEquals(row, _bookmarkPressedRow);
+            bool hover = overList && !pressed && IsPointerWithinRow(row, pt);
+            // 不做"状态未变就跳过"的幂等：容器被虚拟化回收复用时，Tag 会留着上一行的旧值、
+            // 而模板是新建的（三档回到 Normal）⇒ 幂等会让它永远停在 Normal。直接每次都写：
+            // 赋相同值不触发布局，成本可忽略。
+            ApplyBookmarkRowVisual(row, pressed ? "Pressed" : hover ? "PointerOver" : "Normal");
+        }
+    }
+
+    /// <summary>
+    /// 直接切换行模板里三层底色的显隐 —— <b>刻意不走 VisualStateManager</b>：
+    /// <c>ListViewItem</c> 控件自身的状态机会以 <c>IsPointerOver</c> 为依据调用
+    /// <c>GoToState("Normal"|"PointerOver"|"Pressed")</c>，而它遍历的是模板里<b>所有</b> VSM 组 ⇒
+    /// 我们一旦定义同名状态就被它抢（假 PointerExited 到时它把行切回 Normal，10-17 实测"改了没变化"）。
+    /// 模板内不挂 VSM 组 ⇒ 框架无组可切，本方法独占三层底色。
+    /// ⚠ 每次都重新解析模板根，绝不缓存：模板被框架重新应用后旧节点即"幻影"（写它等于写空气）。
+    /// </summary>
+    private static void ApplyBookmarkRowVisual(ListViewItem row, string state)
+    {
+        if (Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(row) <= 0) return;
+        if (Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(row, 0) is not Panel grid) return;
+
+        foreach (var child in grid.Children)
+        {
+            if (child is not FrameworkElement fe) continue;
+            fe.Visibility = fe.Name switch
+            {
+                "RestLayer"    => state == "Normal"      ? Visibility.Visible : Visibility.Collapsed,
+                "HoverLayer"   => state == "PointerOver" ? Visibility.Visible : Visibility.Collapsed,
+                "PressedLayer" => state == "Pressed"     ? Visibility.Visible : Visibility.Collapsed,
+                _ => fe.Visibility,      // ContentPresenter 等：不动
+            };
+        }
+    }
+
+    /// <summary>实时指针是否落在元素的<b>视觉</b>矩形内（与 <c>GetLivePointerPoint()</c> 同为 MainPage 坐标系）。
+    /// 用 <c>TransformToVisual</c> 取元素原点 —— 它含祖先的一切 RenderTransform，得到的是屏幕上的真实位置。</summary>
+    private bool IsPointerWithinRow(FrameworkElement element, Point pt)
+    {
+        double w = element.ActualWidth, h = element.ActualHeight;
+        if (w <= 0 || h <= 0) return false;
+        try
+        {
+            var origin = element.TransformToVisual(this).TransformPoint(new Point(0, 0));
+            return pt.X >= origin.X && pt.X < origin.X + w
+                && pt.Y >= origin.Y && pt.Y < origin.Y + h;
+        }
+        catch { return false; }   // 元素已脱树（窗口关闭 / 容器回收）期间忽略
+    }
+
+    private static ListViewItem? FindAncestorListViewItem(DependencyObject? node)
+    {
+        while (node != null)
+        {
+            if (node is ListViewItem lvi) return lvi;
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return null;
     }
 
     // 书签行跳转走【容器级点击】（与 PageListView_ItemClick 同源）：
@@ -5713,6 +5869,11 @@ public sealed partial class MainPage : Page
     {
         ButtonVisualOverride.UpdateHoverFromPointer(e);
         ToggleButtonVisualOverride.UpdateHoverFromPointer(e);
+
+        // 书签行：用框架给出的同树坐标，而不是 GetLivePointerPoint()（那个是 GetCursorPos 的【屏幕】坐标
+        // 减 TransformToVisual(null) 的【窗口】坐标，两者差一个窗口偏移 ⇒ 判定会整体偏掉）。
+        try { _bookmarkRowPointer = e.GetCurrentPoint(this).Position; } catch { }
+        RefreshBookmarkRowStates();   // 书签行：同样按实时几何判定（指针移动是它的驱动源之一）
     }
 
     private void ZoomPresetFlyout_Opening(object sender, object e)
@@ -6110,6 +6271,11 @@ public sealed partial class MainPage : Page
         if (focused is TextBox or PasswordBox or RichEditBox
             or ButtonBase or ComboBox or ListViewBase or HyperlinkButton)
             return;
+
+        // 欢迎页（尚未打开任何文档）：V/B/N 一律不响应。此时没有可读写的内容，切换模式只会让人困惑
+        // —— 与"欢迎页隐藏只对文档有意义的工具栏按钮"是同一个口径（见 ApplyWelcomeChrome）。
+        // 用 WelcomePanel 的可见性作判据（它是欢迎页的唯一权威开关，打开/关闭文档时同步翻转）。
+        if (WelcomePanel.Visibility == Visibility.Visible) return;
 
         EditMode target;
         switch (sender.Key)

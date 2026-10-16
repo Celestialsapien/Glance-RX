@@ -266,6 +266,119 @@
             </Setter>
         </Style>
 
+        <!-- 书签行容器：换掉原生 ListViewItem 的悬浮判定机制，【外观三档颜色不变】。
+
+             为什么必须换（10-17 定案）：原生 ListViewItemPresenter 靠框架的 IsPointerOver 判悬浮，
+             而行内任何元素一旦 CapturePointer（4 颗 Button 的 ButtonBase 内建行为、自绘编辑框的
+             拖选刚需），框架就给行派发一次【假 PointerExited】⇒ 整行悬浮色当场消失、松手后约
+             380ms 框架补发 Entered 才回来 —— 即用户实测的"乱闪"。这是框架内部行为，应用层关不掉；
+             唯一出路是不再采信任何框架悬停标记，改由【指针几何】判定（与工具栏按钮的
+             ButtonVisualOverride 同一范式），谁捕获指针都不影响。
+
+             三档颜色仍逐字引用 generic 的 ListViewItemBackground{,PointerOver,Pressed}
+             （= SubtleFillColor{Transparent,Secondary,Tertiary}）⇒ 常态 / 悬浮 / 点击色与改前逐像素一致，
+             且主题切换由 ThemeResource 自动跟随，无需代码介入。
+
+             三档底色【刻意不挂 VSM 组】：ListViewItem 控件自身的状态机会以 IsPointerOver 为依据调用
+             GoToState("Normal"|"PointerOver"|"Pressed")，而它遍历模板内【所有】VSM 组 ⇒ 我们一旦定义
+             同名状态就会被它抢；故改由代码 ApplyBookmarkRowVisual 直接切三层 Border 的 Visibility
+             （无 Storyboard，赋相同 Visibility 不触发布局）⇒ 切换瞬时，框架无组可切，本机制独占。 -->
+        <Style x:Key="BookmarkListItemStyle" TargetType="ListViewItem">
+
+            <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
+
+            <Setter Property="FontSize" Value="{ThemeResource ControlContentThemeFontSize}"/>
+
+            <Setter Property="Background" Value="Transparent"/>
+
+            <Setter Property="Foreground" Value="{ThemeResource ListViewItemForeground}"/>
+
+            <Setter Property="TabNavigation" Value="Local"/>
+
+            <Setter Property="Padding" Value="16,0,12,0"/>
+
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+
+            <Setter Property="MinWidth" Value="{ThemeResource ListViewItemMinWidth}"/>
+
+            <Setter Property="MinHeight" Value="{ThemeResource ListViewItemMinHeight}"/>
+
+            <Setter Property="UseSystemFocusVisuals" Value="True"/>
+
+            <Setter Property="FocusVisualMargin" Value="1"/>
+
+            <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource ListViewItemFocusVisualPrimaryBrush}"/>
+
+            <Setter Property="FocusVisualPrimaryThickness" Value="2"/>
+
+            <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource ListViewItemFocusVisualSecondaryBrush}"/>
+
+            <Setter Property="FocusVisualSecondaryThickness" Value="1"/>
+
+            <Setter Property="Template">
+
+                <Setter.Value>
+
+                    <ControlTemplate TargetType="ListViewItem">
+
+                        <Grid x:Name="RowRoot">
+
+                            <!-- 全行透明命中层：三档底色【内缩】后，被缩掉的边缘仍有它顶着 ⇒
+                                 行的左右 / 上下边缘照样可点（与原生一致：容器本身就是命中目标）。
+                                 ⚠ 无 x:Name ⇒ ApplyBookmarkRowVisual 遍历时不会被改名、Visibility 也不动。 -->
+
+                            <Border Background="Transparent"/>
+
+                            <!-- 三档底色叠放，按状态切显隐：底色取值与原生逐键同源。
+                                 左右各留 4、上下各留 2 ⇒ 行与行之间有缝、左右不贴边，
+                                 与缩略图 / 大纲模式（兄弟列表）的观感对齐（原生 ListViewItemPresenter 的背景同样不铺满）。
+                                 CornerRadius 用 ControlCornerRadius（4）与 Fluent 卡片一致。
+                                 【数值来源】10-17 截图像素取证，两个独立锚点（书签悬浮色高 45px ÷ 36 DIP、
+                                 面板宽 275px ÷ 220 DIP）各自得 1.250 px/DIP ⇒ 定标可信；
+                                 大纲（目标）左右内缩实测 5px = 4.0 DIP，书签（当时 Margin=8）实测 10px = 8.0 DIP
+                                 （与其代码值闭环吻合）⇒ 左右由 8 改 4。上下经比对两图一致，保持 2。
+                                 ⚠ 这两个数就是可调点，要再对齐只改这里的 Margin / CornerRadius。 -->
+
+                            <Border x:Name="RestLayer" Margin="4,2,4,2" CornerRadius="{ThemeResource ControlCornerRadius}" Background="{ThemeResource ListViewItemBackground}"/>
+
+                            <Border x:Name="HoverLayer" Margin="4,2,4,2" CornerRadius="{ThemeResource ControlCornerRadius}" Background="{ThemeResource ListViewItemBackgroundPointerOver}" Visibility="Collapsed"/>
+
+                            <Border x:Name="PressedLayer" Margin="4,2,4,2" CornerRadius="{ThemeResource ControlCornerRadius}" Background="{ThemeResource ListViewItemBackgroundPressed}" Visibility="Collapsed"/>
+
+                            <ContentPresenter x:Name="ContentPresenter"
+
+                                              Content="{TemplateBinding Content}"
+
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+
+                                              ContentTransitions="{TemplateBinding ContentTransitions}"
+
+                                              Padding="{TemplateBinding Padding}"
+
+                                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+
+                                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+
+                                              Control.IsTemplateFocusTarget="True"/>
+
+                            <!-- ⚠ 这里【刻意不挂 VisualStateManager.VisualStateGroups】：
+                                 ListViewItem 控件自身的状态机（UpdateVisualState）会以 IsPointerOver / IsSelected
+                                 为依据调用 GoToState("Normal"|"PointerOver"|"Pressed")，而它遍历的是模板里【所有】
+                                 VSM 组 ⇒ 若我们定义同名状态，它会命中并与几何判定抢夺同一批属性 —— 假 PointerExited
+                                 一到它就把行切回 Normal（10-17 实测"改了完全没变化"的根因）。
+                                 不挂组 ⇒ 框架无组可切；三档底色改由 MainPage 的 ApplyBookmarkRowVisual 独占写入。 -->
+
+                        </Grid>
+
+                    </ControlTemplate>
+
+                </Setter.Value>
+
+            </Setter>
+        </Style>
+
         <Style x:Key="ZoomFlyoutPresenterStyle" TargetType="FlyoutPresenter">
 
             <Setter Property="Padding" Value="4,4"/>
@@ -1505,7 +1618,9 @@
 
                     <ListView Grid.Row="2" x:Name="BookmarkListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False"
 
-                              SelectionMode="None" IsItemClickEnabled="True" ItemClick="BookmarkListView_ItemClick">
+                              SelectionMode="None" IsItemClickEnabled="True" ItemClick="BookmarkListView_ItemClick"
+
+                              ItemContainerStyle="{StaticResource BookmarkListItemStyle}">
 
                         <ListView.ItemTemplate>
 
