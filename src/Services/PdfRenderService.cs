@@ -41,11 +41,6 @@ namespace GlanceRX.Services;
 /// </summary>
 public class PdfRenderService : IDisposable
 {
-    // 【已删除】PixelPool = ArrayPool<byte>.Create(64MB, 4)：
-    //   每个桶最多常驻 4 个强引用数组（活对象 → 计入 GC 提交段且永不还 OS），而瓦片缓冲
-    //   的所有权本来就要交给缓存长期持有、根本无法归还池 —— 池只带来了「多一次全量拷贝 +
-    //   一段永不释放的驻留」。Sumatra 侧没有这一层（fz_new_pixmap → fz_drop_pixmap）。
-
     private readonly int _renderCap;
     private IntPtr _engine;
     private SemaphoreSlim? _slot;

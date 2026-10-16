@@ -590,15 +590,15 @@
 
                     <!-- Page Number input box -->
 
-                    <TextBox x:Name="PageNumberInput" Text="1" Width="38" Height="32"
+                    <local:SelfDrawnTextBox x:Name="PageNumberInput" Text="1" Width="64" Height="32"
 
-                             HorizontalContentAlignment="Center" VerticalAlignment="Center"
+                             VerticalAlignment="Center" FontSize="14"
 
-                             GotFocus="PageNumberInput_GotFocus"
+                             ContentAlignment="Center" ShowClearButton="False" AutoFocusOnShow="False" DigitsOnly="True"
 
-                             GettingFocus="PageNumberInput_GettingFocus"
+                             Submitted="PageNumberInput_Submitted" Cancelled="PageNumberInput_Cancelled"
 
-                             KeyDown="PageNumberInput_KeyDown" LosingFocus="PageNumberInput_LosingFocus"/>
+                             EditorGotFocus="PageNumberInput_EditorGotFocus" EditorLostFocus="PageNumberInput_EditorLostFocus"/>
 
 
 
@@ -1523,35 +1523,7 @@
 
                                     <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"/>
 
-                                    <!-- ⚠ 文字"贴左上角"的根因在模板，不在本行的排版参数：
-
-                                         WinUI3 的 DefaultTextBoxStyle 内容宿主 ScrollViewer(x:Name="ContentElement")
-
-                                         只绑 Padding/Margin，**不绑 VerticalContentAlignment**（WindowsAppSDK 2.2.1
-
-                                         的 Microsoft.UI.Xaml/Themes/generic.xaml:23984-23985：BorderElement 只绑
-
-                                         MinHeight，ScrollViewer 那一行里没有该绑定）⇒ 该属性对 TextBox 无效，
-
-                                         内容恒贴"内容盒"左上；模板里能"看起来居中"的唯一机制是
-
-                                         **内容盒被行高刚好填满（余量 0，无处可偏）**——工具栏 PageNumberInput 正是如此：
-
-                                         行高≈18.67(FontSize 14) + 默认 Padding 10,5,6,6 + 边框 2 ≈ Height 32 → 余量≈0。
-
-                                         原 Padding="4,2" 的内容盒 = 32−2−4 = 26 DIP，而 12pt 行高只有 16 DIP
-
-                                         ⇒ 10 DIP 余量全落在文字下方（125% 缩放实测：盒高 32 DIP，文字上留白 7px / 下留白 20px，
-
-                                         与"贴顶 + Padding.top=2"逐像素吻合）。现改用同一机制：
-
-                                         MinHeight=0 让盒高贴合 行高16 + 内边距6+6 + 边框1+1 = 30 DIP ⇒ 余量恒为 0
-
-                                         （随字号/文本缩放自适应）。MinHeight=0 必须写，主题默认 MinHeight=32 会重新撑出余量；
-
-                                         Padding 保持 4,6（与只读态 TextBlock 左沿对齐，同一 Grid Padding），不要改小。 -->
-
-                                    <TextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" MinHeight="0" Padding="4,6" VerticalAlignment="Center" Background="Transparent" BorderThickness="1" KeyDown="BookmarkEditBox_KeyDown" LostFocus="BookmarkEditBox_LostFocus"/>
+                                    <local:SelfDrawnTextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" Submitted="BookmarkEdit_Submitted" Cancelled="BookmarkEdit_Cancelled" CommitRequested="BookmarkEdit_CommitRequested"/>
 
 
 
@@ -1668,7 +1640,7 @@
 
                 <Grid Grid.Column="2" x:Name="SecondaryViewerContainer" Visibility="Collapsed">
 
-                    <!-- GPU 阅读器（右/对比视图，Win2D 呈现层，默认隐藏）。与左 GpuViewer 同款，旧 ScrollViewer+Image 路径已整体移除。 -->
+                    <!-- GPU 阅读器（右/对比视图，Win2D 呈现层，默认隐藏）。与左 GpuViewer 同款。 -->
 
                     <local:GpuPageView x:Name="GpuViewerRight" Visibility="Collapsed"/>
 

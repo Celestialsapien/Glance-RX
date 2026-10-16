@@ -3605,7 +3605,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private const double CanvasMinNodeHeight = CanvasNode.DefaultHeight;
     private static readonly Windows.UI.Color CanvasHandleFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
     // 手柄尺寸一律用【页局部 PDF 点】（与卡片边框/圆角同一坐标空间）→ 随页面缩放一起放大/缩小，
-    // 与卡片边框保持固定比例。早期按"屏幕恒定 DIP"（÷ 页缩放 反算）实现，放大后控件反比边框细，已废弃。
+    // 与卡片边框保持固定比例。
     private const float CanvasHandleRadius = 6.0f;        // 连线圆点半径（页局部 PDF 点，随页缩放）
     // 四角缩放 / 四边单轴缩放控件：尺寸仍用【页局部 PDF 点】随缩放（它们有光标变换指示，用户要求不改）。
     // 显形/命中半径（页局部 PDF 点）：指针靠近到该距离才显现且可选。原本 12，对小卡片而言

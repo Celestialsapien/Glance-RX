@@ -47,8 +47,7 @@
                     <!-- GlanceAccent (Obsidian 紫) 内联为画刷 Color 字面量：本档是 Brush，因为欢迎页按钮样式 /
                          画笔按钮亮起等消费方按 Brush 引用。注：早先注释称 <Color> 资源元素会触发 WMC0001，
                          但本 SDK(WinAppSDK 2.2.1)实测 <Color x:Key="GlanceAccentColor"> 正常编译（见下方画笔色板首位），
-                         该警告已过时——纯 Color 资源可用。深色未选中底走 ControlFillColor*，原深色的
-                         GlanceFillNeutral* 纵深防御三档已无引用方（根因在 a265ad4 移除），随本修复一并删除。 -->
+                         该警告已过时——纯 Color 资源可用。深色未选中底走 ControlFillColor*。 -->
 
                     <!-- 欢迎页"打开文件"按钮专用画刷（第 12 轮）。
                          ⚠ 第 11 轮在主题字典覆盖 generic 的 AccentButtonBackground* 键【无效】：按钮仍是系统蓝。

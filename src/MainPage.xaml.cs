@@ -113,7 +113,7 @@ public sealed partial class MainPage : Page
     private ScrollViewer? _sidebarScrollViewer;  // PageListView 内部 ScrollViewer（Loaded 后缓存，滚动补渲染用）
     private double _sidebarItemHeight;           // 缩略图项高实测缓存（~56px，GetSidebarItemHeight 惰性取）
 
-    // GPU 阅读器为唯一渲染路径（GpuViewer / GpuViewerRight）。旧 ScrollViewer+Image 回退路径已移除。
+    // GPU 阅读器为唯一渲染路径（GpuViewer / GpuViewerRight）。
     // Right (comparison) PDF now uses the same MuPDF engine as the left side,
     // instead of the UWP Windows.Data.Pdf engine + full in-memory file copy.
     // This avoids doubling memory (the old path loaded the whole file into an
@@ -121,7 +121,7 @@ public sealed partial class MainPage : Page
     private PdfRenderService? _pdfRenderServiceRight;
     private CancellationTokenSource? _pdfRenderCts;
     private CancellationTokenSource? _pdfRenderRightCts;
-    private readonly HashSet<int> _realizedSidebar = new(); // 侧栏已生成缩略图的页索引(静默重渲染时增量刷新用)。旧路径的 _realizedLeft/_realizedRight/_renderingPages*/_previewRenderingPages* 已于 GPU 化后移除。
+    private readonly HashSet<int> _realizedSidebar = new(); // 侧栏已生成缩略图的页索引(静默重渲染时增量刷新用)。
     private ObservableCollection<PdfPageViewModel> _pages = new();
     private int _currentPageIndex = 0;
     private bool _isUnloading = false;
@@ -146,8 +146,7 @@ public sealed partial class MainPage : Page
     //   快照在 ToggleSidebar_Click 里【翻转前】同步取，重锚由 PaneOpening/PaneClosing 排一个 Low 回合触发，
     //   这里不再保留任何延时器或视口尺寸字段。）
 
-    // （旧 CPU 渲染路径的性能参数/预览层/滚动门控已随 GPU 化整体移除；
-    //   页位图缓存与预取策略统一由 GpuPageView 内部管理。）
+    // 页位图缓存与预取策略统一由 GpuPageView 内部管理。
 
     private double _currentZoomPercent = 100;
     
@@ -349,7 +348,7 @@ public sealed partial class MainPage : Page
             _currentPageIndex = idx;
             // 仅在输入框未获得焦点时回显页码：用户正在输入时不能覆盖其文本，
             // 否则每次滚动/缩放都会把光标顶到最左、并显示（可能错误的）页码。
-            if (PageNumberInput.FocusState == FocusState.Unfocused)
+            if (!PageNumberInput.HasEditorFocus)
             {
                 PageNumberInput.Text = (idx + 1).ToString();
             }
@@ -549,10 +548,11 @@ public sealed partial class MainPage : Page
         // false 而非抛异常，语义等价且安全。
         if (e.NewFocusedElement is ButtonBase)
             e.TryCancel();
-        // 页数输入框：仅允许鼠标点击聚焦（FocusState.Pointer）。Tab 键与「按钮 Defocus 后框架自动
-        // 把焦点重定位到本框」这类程序化焦点一律拦截。这样既把 Tab 彻底挡在框外，又保留鼠标点进
-        // 去编辑页码的能力（直接设 IsTabStop=false 在本项目会把鼠标点击聚焦也禁掉，导致无法改页数）。
-        else if (e.NewFocusedElement == PageNumberInput && e.FocusState != FocusState.Pointer)
+        // 页数输入框：焦点其实落在自绘控件的隐藏宿主上，故按"是否本控件的宿主"识别。仅允许用户
+        // 点进输入框（本控件发起，IsRequestingFocus=true）；Tab 与被按钮 Defocus 后框架自动把焦点
+        // 重定位到本框这类请求一律拦截（自绘控件已不受原生 TextBox 那套模板/焦点行为影响）。
+        else if (PageNumberInput.OwnsFocusedElement(e.NewFocusedElement)
+                 && e.FocusState != FocusState.Pointer && !PageNumberInput.IsRequestingFocus)
             e.TryCancel();
     }
 
@@ -2503,6 +2503,12 @@ public sealed partial class MainPage : Page
     private void BookmarkConfirm_Click(object sender, RoutedEventArgs e)
     {
         if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
+        CommitBookmark(bm);
+    }
+
+    /// <summary>把编辑文本提交为显示名（空名不改名），退出编辑态并落盘。</summary>
+    private void CommitBookmark(BookmarkViewModel bm)
+    {
         string text = bm.EditText.Trim();
         if (!string.IsNullOrEmpty(text)) bm.DisplayName = text;
         bm.IsEditing = false;
@@ -2524,27 +2530,23 @@ public sealed partial class MainPage : Page
         ShowSaveToast(GlanceRX.Services.LocalizationService.Get("BookmarkRemovedToast"), ToastIconKind.Remove);
     }
 
-    private void BookmarkEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    // 自绘文本域（SelfDrawnTextBox）的事件：回车提交 / Esc 取消 / 失焦请求提交。
+    // 对齐旧原生 TextBox 的语义：回车与"点域外"都提交，Esc 取消。
+    private void BookmarkEdit_Submitted(object sender, RoutedEventArgs e)
     {
-        if (e.Key == Windows.System.VirtualKey.Enter)
-        {
-            BookmarkConfirm_Click(sender, e);
-            e.Handled = true;
-        }
-        else if (e.Key == Windows.System.VirtualKey.Escape)
-        {
-            BookmarkCancel_Click(sender, e);
-            e.Handled = true;
-        }
+        if (GetBookmarkModel(sender) is BookmarkViewModel bm && bm.IsEditing) CommitBookmark(bm);
     }
 
-    private void BookmarkEditBox_LostFocus(object sender, RoutedEventArgs e)
+    private void BookmarkEdit_Cancelled(object sender, RoutedEventArgs e)
     {
-        // Commit on outside click; if the user clicked Cancel/Delete the button handler already changed state.
-        if (sender is TextBox tb && tb.DataContext is BookmarkViewModel bm && bm.IsEditing)
-        {
-            BookmarkConfirm_Click(sender, e);
-        }
+        if (GetBookmarkModel(sender) is BookmarkViewModel bm) bm.IsEditing = false;
+    }
+
+    private void BookmarkEdit_CommitRequested(object sender, RoutedEventArgs e)
+    {
+        // 点 Cancel/Delete 按钮会先把 IsEditing 置假（控件随之折叠、不再可见），故此处按"仍在编辑态"守卫，
+        // 避免误提交。空名不改名由 CommitBookmark 内部兜底。
+        if (GetBookmarkModel(sender) is BookmarkViewModel bm && bm.IsEditing) CommitBookmark(bm);
     }
 
     private BookmarkViewModel? GetBookmarkModel(object sender)
@@ -2668,37 +2670,22 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void PageNumberInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    /// <summary>回车提交（自绘输入框的 Submitted）：跳页后剥夺焦点（宿主失焦 → EditorLostFocus 收尾）。</summary>
+    private void PageNumberInput_Submitted(object sender, RoutedEventArgs e)
     {
-        if (e.Key == Windows.System.VirtualKey.Enter)
-        {
-            // 回车提交：仅做跳页与失焦，工具栏的收起完全交给正常的伸缩逻辑
-            // （鼠标仍在工具栏→保持；鼠标移出工具栏→收起），不在此强行干预。
-            // 提交期间置 _pageInputCommitting，抑制 DefocusPageNumberInput「禁用/启用」引发的
-            // 伪焦点还原把 _pageInputHasFocus 重新置真（同步与异步时序都覆盖，见字段注释）。
-            _pageInputCommitting = true;
-            try
-            {
-                JumpToInputPage();
-            }
-            finally
-            {
-                // 排队复位：晚于 DefocusPageNumberInput 内排队的异步伪还原，故伪还原触发时
-                // _pageInputCommitting 仍为真，会被 GotFocus/GettingFocus 拦截。
-                this.DispatcherQueue?.TryEnqueue(
-                    Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-                    () => _pageInputCommitting = false);
-            }
-            // Lose focus from input box
-            this.Focus(FocusState.Programmatic);
-        }
+        JumpToInputPage();
+        DefocusPageNumberInput();   // 不可用 this.Focus(Programmatic)：对 Page 静默失败，焦点不走
     }
 
-    private void PageNumberInput_GotFocus(object sender, RoutedEventArgs e)
+    /// <summary>Esc 取消：不跳转，回显真实当前页并剥夺焦点（退出编辑）。</summary>
+    private void PageNumberInput_Cancelled(object sender, RoutedEventArgs e)
     {
-        // 剥夺焦点流程（DefocusPageNumberInput 的「禁用再启用」）或回车提交期，WinUI 会在
-        // 重新启用时把焦点还原回输入框，触发一次伪 GotFocus；据此把工具栏保持展开是错的，直接忽略。
-        if (_defocusingPageInput || _pageInputCommitting) return;
+        PageNumberInput.Text = (_currentPageIndex + 1).ToString();
+        DefocusPageNumberInput();
+    }
+
+    private void PageNumberInput_EditorGotFocus(object sender, EventArgs e)
+    {
         // 焦点进入：记录此刻显示的页码（用于「点过但未输入」判定），并标记输入框持有焦点，
         // 使工具栏在输入期间不被鼠标移到画面上而收起（见 Root_PointerMoved / TopToolbar_PointerExited 等守卫）。
         _pageInputHasFocus = true;
@@ -2706,30 +2693,14 @@ public sealed partial class MainPage : Page
         CancelToolbarHide();
     }
 
-    private void PageNumberInput_GettingFocus(UIElement sender, GettingFocusEventArgs e)
-    {
-        // 在焦点真正落下前拦截「剥夺焦点流程 / 回车提交期」中重新启用导致的伪焦点还原：
-        // 取消这次还原，使输入框真正失焦（_pageInputHasFocus 不被重新置真、工具栏得以正常收起）。
-        // 这是 GettingFocus（落下前、可取消）预事件，配合 _pageInputCommitting 覆盖异步还原时序。
-        // 改用 TryCancel()：焦点从外部重新进入等不可取消情形下返回 false 而非抛 E_INVALIDARG。
-        if (_defocusingPageInput || _pageInputCommitting)
-            e.TryCancel();
-    }
-
-    private void PageNumberInput_LosingFocus(object sender, RoutedEventArgs e)
+    private void PageNumberInput_EditorLostFocus(object sender, EventArgs e)
     {
         _pageInputHasFocus = false;
 
         // 仅当用户实际改动了页码才跳转；点过但未输入 / 输入未变 / 输入非法都视为「未提交」，
         // 原地不动（不再把视图拉到该页顶端），仅把显示同步回真实当前页。
         string entered = PageNumberInput.Text.Trim();
-        if (entered == _pageInputValueAtFocus.Trim())
-        {
-            PageNumberInput.Text = (_currentPageIndex + 1).ToString();
-            RequestHideTopToolbar();
-            return;
-        }
-        if (!int.TryParse(entered, out int pageNum))
+        if (entered == _pageInputValueAtFocus.Trim() || !int.TryParse(entered, out _))
         {
             PageNumberInput.Text = (_currentPageIndex + 1).ToString();
             RequestHideTopToolbar();
@@ -2746,8 +2717,7 @@ public sealed partial class MainPage : Page
             NavigateToPage(target);
             // 提交后把焦点基准同步到新页，避免失焦回环里重复跳转同一页。
             _pageInputValueAtFocus = PageNumberInput.Text;
-            // 提交跳页后请求收起工具栏（鼠标不在工具栏触发区时即生效；键盘提交已在
-            // PageNumberInput_KeyDown 里撤销 _pointerInTopToolbar，确保此处能正常收起）。
+            // 提交跳页后请求收起工具栏（鼠标不在工具栏触发区时即生效；回车提交也由此收尾）。
             RequestHideTopToolbar();
         }
         else
@@ -2758,45 +2728,39 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// 剥夺页码输入框的焦点。页码框只在「用户主动调整页码」（点击/Tab 进入）时才应持有焦点；
+    /// 剥夺页码输入框的焦点。页码框只在「用户主动调整页码」（鼠标点进框内）时才应持有焦点；
     /// 其余一切操作（点击 PDF 画面、滚动、缩放、翻页）都应立即把焦点从它身上移走。
     /// 否则焦点残留会导致：① 切窗口时视口被带回页面顶部；② 滚动/缩放时光标被顶到最左并覆盖输入；
     /// ③ 缩放过程中回显（可能错误的）页码。
-    /// 剥夺焦点用「临时禁用再启用」而非 Control.Focus(FocusState.Unfocused)：后者会向 combase
-    /// 传入非法 FocusState 参数并抛出 0x80070057(E_INVALIDARG) 致崩溃（WER 报告故障模块 combase.dll、
-    /// 异常代码 80070057）。禁用控件无法持有焦点，焦点被强制交出并触发 LosingFocus（提交输入页码），
-    /// 随即重新启用，用户无感。
+    /// 手法沿用本项目已验证可靠的「临时禁用再启用」：禁用控件无法持焦 ⇒ 焦点被强制交出，随即重新启用用户无感。
+    /// （不可用 this.Focus(Programmatic)：对 Page 调用会静默失败、焦点根本不走；一倍验证过。）
+    /// 重新启用时若框架把焦点回灌到宿主，会被 OnGettingFocusBlockButtons 中「非自发起请求一律 TryCancel」
+    /// 的守卫拦下（此刻 IsRequestingFocus==false），确保焦点真正离开。
     /// </summary>
-    private bool _defocusingPageInput; // 重入守卫：剥夺焦点会同步触发 LosingFocus→JumpToInputPage→GoToPage→ViewportChanged→本方法，须阻断该回环
+    private bool _defocusingPageInput; // 重入守卫：剥夺焦点会同步触发 EditorLostFocus→JumpToInputPage→GoToPage→ViewportChanged→本方法，须阻断该回环
 
     // 页码输入框焦点状态：用于区分「点过但未输入」与「实际改了页码」，并驱动工具栏收起逻辑。
     // _pageInputValueAtFocus = 焦点进入时框内显示的页码文本；失焦时若文本仍与之相同，说明用户未改动，不跳转。
     private string _pageInputValueAtFocus = "1";
     private bool _pageInputHasFocus;
-    // 回车提交期标记：回车提交会经 DefocusPageNumberInput 的「禁用/启用」触发一次伪焦点还原
-    // （WinUI 重新启用控件时把焦点回灌，异步发生）。该伪还原的 GotFocus/GettingFocus 会试图把
-    // _pageInputHasFocus 重新置真、卡死工具栏收起。_pageInputCommitting 在提交期间为真，
-    // 并经 DispatcherQueue 排队复位（晚于异步伪还原），从而同步/异步两种时序下都拦得住。
-    private bool _pageInputCommitting;
     private void DefocusPageNumberInput()
     {
-        if (_defocusingPageInput) return; // 已在「剥夺焦点」链中（LosingFocus 回环），直接返回，避免重入
-        if (PageNumberInput.FocusState != FocusState.Unfocused)
+        if (_defocusingPageInput) return; // 已在「剥夺焦点」链中（EditorLostFocus 回环），直接返回，避免重入
+        if (!PageNumberInput.HasEditorFocus) return;
+        _defocusingPageInput = true;
+        try
         {
-            _defocusingPageInput = true;
-            try
-            {
-                PageNumberInput.IsEnabled = false; // 强制失焦：禁用控件无法持焦，焦点交出并触发 LosingFocus
-            }
-            finally
-            {
-                PageNumberInput.IsEnabled = true;  // 立即重新启用，用户无感（同一 tick 内完成）
-                _defocusingPageInput = false;
-            }
-            // 焦点离开后，让输入框回显真实当前页，避免停留在用户键入但未提交的残留文本
-            // （例如刚点过输入框、又去缩放，缩放结束后框里还显示旧输入值而非真实页码）。
-            PageNumberInput.Text = (_currentPageIndex + 1).ToString();
+            // 禁用 → 焦点被强制交出（无法持焦）→ 立即启用；宿主失焦触发 EditorLostFocus（提交输入页码），重入由本守卫阻断
+            PageNumberInput.IsEnabled = false;
+            PageNumberInput.IsEnabled = true;
         }
+        finally
+        {
+            _defocusingPageInput = false;
+        }
+        // 焦点离开后，让输入框回显真实当前页，避免停留在用户键入但未提交的残留文本
+        // （例如刚点过输入框、又去缩放，缩放结束后框里还显示旧输入值而非真实页码）。
+        PageNumberInput.Text = (_currentPageIndex + 1).ToString();
     }
 
     /// <summary>
@@ -6683,7 +6647,7 @@ public class PdfPageViewModel : INotifyPropertyChanged
     private double _pageHeight;
     private double _rotationAngle = 0.0;
     private int _pageIndex;
-    private ImageSource? _thumbnailSource = null; // 侧栏缩略图位图(常驻)。旧路径的高清/预览位图字段已随 GPU 化移除。
+    private ImageSource? _thumbnailSource = null; // 侧栏缩略图位图(常驻)。
     private Microsoft.UI.Xaml.Media.Brush? _annotationsBackground = null;
     private bool _isBookmarked;
 

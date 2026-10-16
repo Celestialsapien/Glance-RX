@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SelfDrawnTextBox —— 自绘单行文本域（取代原生 TextBox 的可见渲染与光标）。
+
+  动机（原生 TextBox 的不可修问题）：
+    ①「悬浮工字 → 按下变箭头」：WinUI3 框架在合成循环里【每帧 SetCursor】按"当前命中元素"重设光标，
+       元素级 ProtectedCursor 打不过它，只能靠系统光标资源替换（白板编辑态已验证的同源手法）。
+    ②「插入光标位置错乱 / 恒在最左」：原生 TextBox 的插入光标即 SelectionStart，任何程序写 Text 都会清零，
+       且模板内建"清空 ×"按钮动焦点，交互越复杂越难兜。
+
+  解法（与白板卡片编辑态同源的三段式，但可见层不走 Win2D —— 单行场景用 XAML 更轻）：
+    · 宿主：一个 Opacity=0 的隐藏 TextBox（Host）。只负责键盘 / IME / 剪贴板 / 选区模型
+      （SelectionStart/Length）。它【必须保持可命中】—— 实测 IsHitTestVisible=False 会让它拿不到键盘焦点；
+      挡鼠标改由其上覆盖的一层透明命中层承担 ⇒ 指针永远进不去宿主，不会替我们移动光标、也不会被框架切光标。
+    · 可见层：纯 XAML 自绘 —— TextBlock 画字形，Rectangle 画插入光标（定时器切 Opacity 闪烁），
+      Border 画选区高亮。位置全部由本控件按"逐前缀宽度"自行计算，与原生无关。
+    · 鼠标：由本控件（Root）自己接管 —— 点击落光标、拖选、双击选词，全部自行把屏幕 x 反解成索引。
+    · 光标：指针在域内时用系统光标资源替换强制工字（CursorInterop），落在"清空 ×"热区时还原箭头。
+
+  为什么用"逐前缀测量"算位置：字形本身由 TextBlock 渲染，用同字体的 TextBlock 量前缀宽度 ⇒ 光标 x 与
+  实际字形天然同源一致，不存在"两套排版引擎对不齐"的问题。
+-->
+<UserControl
+    x:Class="GlanceRX.SelfDrawnTextBox"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    IsTabStop="False">
+
+    <Grid x:Name="Root" Background="Transparent"
+          PointerPressed="Root_PointerPressed"
+          PointerMoved="Root_PointerMoved"
+          PointerReleased="Root_PointerReleased"
+          PointerCaptureLost="Root_PointerCaptureLost"
+          PointerEntered="Root_PointerEntered"
+          PointerExited="Root_PointerExited">
+
+        <!-- ===== 边框壳：常态描边 + 聚焦强调描边（两层切换，免去代码里捞主题资源） ===== -->
+        <Border Background="Transparent" CornerRadius="4" BorderThickness="1"
+                BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"/>
+        <Border x:Name="FocusFrame" Background="Transparent" CornerRadius="4" BorderThickness="1"
+                BorderBrush="{ThemeResource GlanceAccentBrush}" Visibility="Collapsed"/>
+
+        <!-- ===== 文本区：改用 Canvas 承载 ⇒ 子元素按"自然尺寸"测量（不受父级槽宽钳制）、可用
+             Canvas.Left/Top 自由定位；本层再设 Clip 裁到自身范围，即实现单行横向"滚动"。
+             （此前用 Grid：溢出槽宽的字形会被钳到槽宽而整段看不见，改用 Canvas 消除该钳制。） ===== -->
+        <Canvas x:Name="TextArea" Margin="4,6,4,6" VerticalAlignment="Center" SizeChanged="TextArea_SizeChanged">
+            <!-- 选区高亮（在字形之下）；位置/尺寸由代码用 Canvas.SetLeft/SetTop 与 Width/Height 给出 -->
+            <Border x:Name="SelRect" Background="{ThemeResource GlanceAccentBrush}"
+                    Opacity="0.35" Visibility="Collapsed"/>
+
+            <!-- 可见字形；位置由代码用 Canvas.SetLeft/SetTop 给出（单行横向平移靠 SetLeft） -->
+            <TextBlock x:Name="VisibleText" TextWrapping="NoWrap" TextTrimming="None"
+                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
+
+            <!-- 插入光标：1px 宽 Rectangle + 定时器切 Opacity 实现闪烁（不触发任何重排） -->
+            <Rectangle x:Name="Caret" Width="1" Fill="{ThemeResource TextFillColorPrimaryBrush}"
+                       Visibility="Collapsed"/>
+
+            <!-- 度量块：只用于量"逐前缀宽度"与行高。Canvas 以无限尺寸测量子元素 ⇒ DesiredSize 即自然宽，
+                 不受先前 0×0 宿主父级的钳制，保证 _adv 真实可用。 -->
+            <TextBlock x:Name="MeasureTb" Opacity="0" TextWrapping="NoWrap"/>
+        </Canvas>
+
+        <!-- ===== "清空 ×"热区：非 Button、不可聚焦 ⇒ 点它不会把焦点从宿主编走 ===== -->
+        <Border x:Name="ClearHit" Width="22" HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                Background="Transparent" Visibility="Collapsed" IsHitTestVisible="False">
+            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE711;"
+                      FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        </Border>
+
+        <!-- ===== 不可见输入宿主：只管键盘 / IME / 剪贴板 / 选区模型。Opacity=0 ⇒ 其内建光标与"清空 ×"全不可见。
+             ⚠ 它【必须保持可命中】：实测 IsHitTestVisible=False 会让它拿不到键盘输入焦点（输入全废）。
+             挡鼠标改由下面那层"透明命中层"负责（命中层在宿主之上，先吃到指针再冒泡到 Root）。 ===== -->
+        <TextBox x:Name="Host" Opacity="0" MinHeight="0"
+                 AcceptsReturn="False" TextWrapping="NoWrap" BorderThickness="0" Padding="0"
+                 VerticalContentAlignment="Center"
+                 IsSpellCheckEnabled="False" IsTextPredictionEnabled="False"
+                 ScrollViewer.HorizontalScrollBarVisibility="Hidden"
+                 ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                 TextChanged="Host_TextChanged"
+                 SelectionChanged="Host_SelectionChanged"
+                 GotFocus="Host_GotFocus"
+                 LostFocus="Host_LostFocus"
+                 KeyDown="Host_KeyDown"/>
+
+        <!-- ===== 透明命中层：盖在宿主之上，替我们吃掉全部鼠标（命中→冒泡到 Root）。
+             宿主保持可命中只为拿键盘焦点，指针永远进不去它 ⇒ 它的 caret 不会被鼠标挪动、
+             它内建的"清空 ×"也永远点不到；框架逐帧按本层（普通 Border）设的箭头光标再被
+             我们的系统光标替换抹成工字。 ===== -->
+        <Border Background="Transparent"/>
+    </Grid>
+</UserControl>
