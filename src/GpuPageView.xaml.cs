@@ -257,6 +257,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // 只替换箭头槽，不动 I 形槽。控件区/卡外/退出编辑则 SPI_SETCURSORS 恢复真箭头与 resize 形状。
     private bool _ibeamInstalled;                  // 工字作用域是否已安装（对齐画笔 _ringInstalled；变化才动资源）
     private bool _canvasCursorLocked;              // 画布手势光标是否处于锁定态（只有锁过才允许 Unlock 去还原资源）
+    private bool _canvasEditControlGesture;        // 本次按下命中【编辑卡】的边框控件 ⇒ 属控件交互而非"点卡外退出编辑"
     private bool _canvasPointerOnEditCard;         // 指针是否落在编辑卡上（编辑框通道置 true，其 Exited/卡外置 false）
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _ibeamScopeTimer;   // 25ms 作用域轮询（对齐画笔 _ringScopeTimer）
 
@@ -2707,23 +2708,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 阻断它零视觉丢失）。阻断器无逻辑、不会与 Viewer 上的逻辑处理器重复处理。
         Viewer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelChanged), true);
         Spacer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelBlocker), true);
-        // 编辑态专用通道：TextBox 会把 PointerPressed 标记 Handled ⇒ Viewer_PointerPressed 收不到，
-        // 于是"编辑态拖滚动条 / 拖四角缩放 / 从四边中点拉连线"全都无法开始。
-        // 用 handledEventsToo=true 在编辑框上补一个处理器，只在命中滚动条或卡片手柄时接管，其余不干预文本编辑。
+        // 编辑态【文本按下】通道：RichEditBox 会把 PointerPressed 标记 Handled ⇒ Viewer_PointerPressed 收不到。
+        // 用 handledEventsToo=true 在编辑框上补一个处理器：收到文本区按下时同步指针位置并刷新自绘光标。
+        // ⚠ 边框控件（滚动条 / 四角 / 四边中点 / 四边中段）的按下【不在这里】：其命中带已被 SyncCanvasEditHitCarve
+        //   从编辑框命中区挖除，走 Viewer 手势通道 ⇒ 编辑框对控件交互零参与。
         CanvasEditBox.AddHandler(UIElement.PointerPressedEvent,
             new PointerEventHandler(OnCanvasEditBoxPointerPressed), true);
-        // 编辑态滚动条现在也是 Win2D 画的（不可命中元素），命中走 OnCanvasEditBoxPointerPressed →
-        // TryHitCanvasScrollBar（已对编辑卡开放），无需单独的 XAML 滚动条通道。
-        // 指针抬起：结束编辑态滚动条拖动（拖拽期间捕获在 RichEditBox 上，Viewer 收不到抬起）。
-        // 用 handledEventsToo 订阅 —— RichEditBox 可能把 PointerReleased 标 Handled。
+        // 文本按下松手：按松手点重判"指针是否仍在卡内"，供工字作用域轮询下一拍装/卸工字。
+        // 用 handledEventsToo 订阅 —— RichEditBox 会把 PointerReleased 标 Handled。
         CanvasEditBox.AddHandler(UIElement.PointerReleasedEvent,
             new PointerEventHandler(OnCanvasEditBoxPointerReleased), true);
-        // 捕获丢失兜底（拖滚动条途中被抢走捕获）→ 结束拖动并还原选区。
-        CanvasEditBox.AddHandler(UIElement.PointerCaptureLostEvent,
-            new PointerEventHandler(OnCanvasEditBoxPointerCaptureLost), true);
-        // 指针移动：编辑态补喂白板交互层（手柄显形）+ 拖滚动条 + 滚动条上的光标。
-        // ⚠ 必须 handledEventsToo=true —— RichEditBox 内部把 PointerMoved 标 Handled，普通 `+=` 订阅收不到，
-        //    导致"编辑态拖不动滚动条""滚动条上仍是工字光标"（两项共同的根因）。
+        // 指针移动（文本区悬停）：补喂白板交互层（手柄显形/悬停）+ 同步指针位置 + 维持挖洞与元素级光标。
+        // ⚠ 必须 handledEventsToo=true —— RichEditBox 内部把 PointerMoved 标 Handled，普通 `+=` 订阅收不到。
         CanvasEditBox.AddHandler(UIElement.PointerMovedEvent,
             new PointerEventHandler(OnCanvasEditBoxPointerMoved), true);
         // 选区变化（鼠标拖动选择 / Shift+方向键）→ 立刻刷新 Win2D 自绘选区，消除"蓝底迟钝"。
@@ -3988,7 +3984,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         Rect textRect, double topPad, double scrollY, double z)
     {
         if (_canvasEditNodeId == null || CanvasEditBox == null) return;
-        if (AnyCanvasGestureActive) return;   // 编辑态手势期间抑制自绘光标（避免它跟着 RichEditBox 的选区活动端乱跳）
+        // 手势期间不抑制：边框控件交互不应改动编辑态 —— 插入光标原地照常闪烁（选区在按下瞬间已还原、捕获已交还，
+        // 活动端不会再被 RichEditBox 带走，故不会乱跳）。
         if (!_canvasCaretVisible || CanvasEditBox.FocusState == FocusState.Unfocused) return;
         try
         {
@@ -4086,12 +4083,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return _canvasTextCache.GetValue(node, _ => new CachedCanvasText()).LineCount;
     }
 
-    /// <summary>编辑态下的指针按下（handledEventsToo 通道）。RichEditBox 会吃掉 PointerPressed，
-    /// 所以滚动条拖动 / 四角缩放 / 四边中点连线这三类"卡片控件"交互要在编辑态工作，必须在这里接管；
-    /// 其余情况【不处理】，交给 RichEditBox 正常定位光标与选择文本。
-    /// ⚠ 这里【不】调用 this.CapturePointer：RichEditBox 按下时自己会抓指针捕获，硬抢会与它来回争夺
-    ///   （抢到又被它夺回 → 触发 Viewer_PointerCaptureLost → 连线被"打断即取消" → 表现为"从卡片内侧拖连线到空白处不建卡"）。
-    ///   改为【让编辑框独占捕获】：移动/抬起都经 OnCanvasEditBoxPointerMoved/Released 转调 Viewer 的手势逻辑。</summary>
+    /// <summary>编辑态下的指针按下（handledEventsToo 通道）。编辑框覆盖整卡，RichEditBox 会吃掉 PointerPressed。
+    ///
+    /// 边框控件（滚动条 / 四角 / 四边中点 / 四边中段）的指针流【不在这里】：它们所在的命中带已被
+    /// <see cref="SyncCanvasEditHitCarve"/> 从编辑框命中区【挖掉】（悬停即置 IsHitTestVisible=false），
+    /// 控件交互全程走 Viewer 手势通道（与阅读态完全相同，含 CapturePointer）。因此能进到这里的按下
+    /// 【必然是文本区按下】—— 交给 RichEditBox 正常定位光标/选择文本即可；编辑框因此对控件交互零参与。
+    /// 只补一次自绘光标刷新（按下后插入光标位置变了，Win2D 需重画）。</summary>
     private void OnCanvasEditBoxPointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (_canvasEditNodeId == null) return;
@@ -4100,51 +4098,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasPointerPos = p;
         _canvasPointerValid = true;
         UpdateCanvasNodeHover(p);
-
-        // ① 滚动条拖动（编辑态也允许，与 Obsidian 一致；拖动期间的失焦由 CanvasEditBox_LostFocus 抑制）。
-        if (TryHitCanvasScrollBar(p, out var sbNode) && sbNode != null && sbNode.Id == _canvasEditNodeId)
-        {
-            _canvasGestureFromEditBox = true;
-            StopSmoothZoom();
-            StopWheelScroll();
-            BeginCanvasScrollDrag(sbNode, p);
-            e.Handled = true;
-            return;
-        }
-        // ② 四角缩放。
-        if (TryHitCanvasCorner(p, out var rNode, out var rCorner) &&
-            CanvasViewportToPage(p, out int rPage, out _, out _))
-        {
-            _canvasGestureFromEditBox = true;
-            StopSmoothZoom();
-            StopWheelScroll();
-            BeginCanvasResize(rNode, rCorner, rPage);
-            e.Handled = true;
-            return;
-        }
-        // ③ 四边中点拉连线（须排在单轴缩放之前：中点圆域吃掉中心，剩下中段才归单轴）。
-        if (TryHitCanvasHandle(p, out var hNode, out var hSide))
-        {
-            _canvasGestureFromEditBox = true;
-            StopSmoothZoom();
-            StopWheelScroll();
-            CancelCanvasConnection();
-            BeginCanvasConnection(hNode, hSide, p);
-            e.Handled = true;
-            return;
-        }
-        // ③½ 四边中段单轴缩放（边中点与四角之间的带状区）。
-        if (TryHitCanvasEdge(p, out var eNode, out var eEdge) &&
-            CanvasViewportToPage(p, out int ePage, out _, out _))
-        {
-            _canvasGestureFromEditBox = true;
-            StopSmoothZoom();
-            StopWheelScroll();
-            BeginCanvasEdgeResize(eNode, eEdge, ePage);
-            e.Handled = true;
-            return;
-        }
-        // 其余：不动，让 RichEditBox 照常处理（定位光标 / 选择）；但光标位置变了，刷新 Win2D 自绘光标。
         ResetCaretBlink();
         ScreenCanvas.Invalidate();
         // 指针在编辑卡文本区：工字作用域轮询（25ms）会自愈维持（含按住捕获期间）；此处只同步标志与元素级光标。
@@ -4220,35 +4173,30 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasScrollDragStartScrollY = node.Id == _canvasEditNodeId
             ? (_canvasEditScrollViewer?.VerticalOffset ?? 0)
             : GetCanvasScrollY(node.Id);
-        CaptureCanvasEditSelectionAnchor(node.Id);
     }
 
-    /// <summary>编辑态手势（拖滚动条 / 拖角缩放 / 拖边连线）开始时，记下 RichEditBox 当前选区 ——
-    /// 手势的同一串指针事件也落在 RichEditBox 上，它会顺手"拖选文字"，故收尾时必须还原。
-    /// 仅当手势作用于【当前编辑卡】时才记。</summary>
-    private void CaptureCanvasEditSelectionAnchor(string gestureNodeId)
+    /// <summary>【编辑态边框控件的信号切割】把"编辑卡边框控件命中带"从编辑框的命中区里【挖掉】。
+    ///
+    /// 问题本质：编辑框是覆盖整卡的 RichEditBox。控件命中带（滚动条 / 四角 / 四边中点 / 四边中段）都落在
+    /// 编辑框矩形内更进一步，按下的指针流先命中编辑框、被它的类处理器吃掉（挪插入光标 / 起选区 / 抓捕获拖选）——
+    /// 这正是"用控件时编辑态被改动"的根因。事后用快照把光标跳回去只是补丁，信号仍然进了编辑框。
+    ///
+    /// 正解：指针悬停在控件命中带上时把 <see cref="UIElement.IsHitTestVisible"/> 置 false，让这条带对编辑框
+    /// 【完全不可命中】。此后该带上的指针流落到覆盖层之下的 Viewer（覆盖层无背景、不拦截命中），走的是与阅读态
+    /// 【完全相同】的 Viewer 手势通道 ⇒ 编辑框全程收不到任何指针事件：插入光标不挪、不起选区、不拖选、不丢焦点。
+    /// 指针移回文本区（非控件带）时再置回 true，文本编辑恢复常态。
+    ///
+    /// 关键性质：<c>IsHitTestVisible</c> 只影响命中测试，【不影响键盘焦点】—— 编辑框仍持有焦点，
+    /// 方向键 / 打字 / 快捷键照常，插入光标照常闪烁（由 Win2D 自绘，见 DrawCanvasEditCaret）。
+    /// 靠 25ms 作用域轮询（UpdateIbeamScope）持续自愈，事件漏一条下一拍也会补齐。</summary>
+    private void SyncCanvasEditHitCarve(Point vp)
     {
-        _canvasEditHasSelAnchor = false;
-        if (CanvasEditBox == null || _canvasEditNodeId == null ||
-            !string.Equals(gestureNodeId, _canvasEditNodeId, StringComparison.Ordinal)) return;
-        try
-        {
-            var sel = CanvasEditBox.Document.Selection;
-            _canvasEditSelAnchorA = Math.Min(sel.StartPosition, sel.EndPosition);
-            _canvasEditSelAnchorB = Math.Max(sel.StartPosition, sel.EndPosition);
-            _canvasEditHasSelAnchor = true;
-        }
-        catch { _canvasEditHasSelAnchor = false; }
-    }
-
-    /// <summary>编辑态手势结束：把 RichEditBox 顺手做出的文字选区还原回手势前（抹掉副作用）。
-    /// 必须在清掉手势标志（_isCanvasScrollDragging / _isCanvasResizing / _isCanvasConnecting）之后调用，
-    /// 否则绘制侧仍在抑制、看不到还原结果。</summary>
-    private void RestoreCanvasEditSelectionAfterGesture()
-    {
-        if (!_canvasEditHasSelAnchor || _canvasEditNodeId == null || CanvasEditBox == null) return;
-        _canvasEditHasSelAnchor = false;
-        try { CanvasEditBox.Document.Selection.SetRange(_canvasEditSelAnchorA, _canvasEditSelAnchorB); } catch { }
+        if (_canvasEditNodeId == null || CanvasEditBox == null) return;
+        if (AnyCanvasGestureActive) return;   // 手势进行中：通道已确定，保持现状（勿在捕获中改命中区）
+        bool onBand = ResolveEditHoverCursor(vp) != null;
+        if (CanvasEditBox.IsHitTestVisible != !onBand) CanvasEditBox.IsHitTestVisible = !onBand;
+        // 把命中区还回编辑框时，元素级光标同步回工字（否则会残留上一个控件带的 resize/箭头光标一帧）。
+        if (!onBand) CanvasEditBox.OverrideCursor(CanvasIBeamCursor);
     }
 
     /// <summary>是否有编辑态"卡片手势"在进行（滚动条拖动 / 四角缩放 / 四边连线）。</summary>
@@ -5111,12 +5059,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private string? _canvasScrollDragNodeId;
     private double _canvasScrollDragStartPointerY;   // 按下时的页局部 Y
     private double _canvasScrollDragStartScrollY;    // 按下时的滚动偏移
-    // 编辑态手势（滚动条/缩放/连线）时，RichEditBox 会顺手做文字选区 ⇒ 记下手势前的选区、收尾还原（见 Capture/RestoreCanvasEditSelectionAfterGesture）。
-    private bool _canvasEditHasSelAnchor;
-    private int _canvasEditSelAnchorA, _canvasEditSelAnchorB;
-    // 当前手势是否由【编辑框通道】（OnCanvasEditBoxPointerPressed）发起。用于让 Viewer_PointerCaptureLost
-    // 忽略"编辑框丢捕获"的冒泡 —— 否则会把正在进行的连线取消（内侧拉线到空白处不建卡的根因，日志已坐实）。
-    private bool _canvasGestureFromEditBox;
 
     // ---- Obsidian 对齐：单击【已选中卡片】松手无拖动 → 进入编辑态（光标落点击点） ----
     // 按下已选中卡本体时挂起此标记；PointerMoved 超过阈值判定为拖动 → 撤销；PointerReleased 仍挂起 → 进编辑。
@@ -5260,6 +5202,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasEditBox.LayoutUpdated += OnCanvasEditBoxLayoutUpdated;   // 每帧兜底：取内部 ScrollViewer + 刷新画面
         // 指针移动处理器已在构造时以 handledEventsToo 常驻订阅（见构造函数）——普通 `+=` 会被 RichEditBox
         // 的 Handled 吞掉，故不再在此处订阅。
+        CanvasEditBox.IsHitTestVisible = true;   // 每次进编辑都从"整卡可命中"起（清除上一次被挖除的命中带状态）
         PositionCanvasEditBox();
         // 显式把编辑框根光标固定为系统工字：控件（滚动条/四角/四边）悬停时由 OnCanvasEditBoxPointerMoved
         // 的 OverrideCursor 覆盖为对应光标。资源级的"卡内恒工字"由工字作用域轮询（EnterIbeamScope）负责，
@@ -5333,11 +5276,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (commit) FlushCanvasEditText();   // 提交最后一段尚未入史的文字
         else StopCanvasEditCommitTimer();
         _canvasEditNodeId = null;
+        _canvasEditControlGesture = false;
         StopCaretBlink();
         ExitIbeamScope();                                              // 退出编辑态：停工字作用域、恢复系统光标
         CanvasEditBox.OverrideCursor(null);                            // 复位光标覆盖（防残留箭头）
         this.ProtectedCursor = null;                                   // 同步清根光标，退出编辑后首帧不残留缩放箭头
         CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 退出编辑即退订重试钩子
+        CanvasEditBox.IsHitTestVisible = true;   // 复位命中区（可能停在"被挖除"态）⇒ 下次进编辑是干净的整卡可命中
         CanvasEditBox.Visibility = Visibility.Collapsed;
         // 折叠的 RichEditBox 仍会保持键盘焦点（WinUI 已知行为），会吞掉 F/G/Ctrl+Z 这类页面级按键：
         // 表现为白板模式下快捷键整体失效、字母键进入输入法。必须把焦点显式移回滚动宿主。
@@ -5540,7 +5485,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _connTargetNodeId = null;
         _connTargetSide = "";
         _connCursorScreen = vp;
-        CaptureCanvasEditSelectionAnchor(nodeId);   // 编辑态：连线也会顺带拖选文字 ⇒ 记下选区待还原
 
         CanvasNode? node = null;
         lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
@@ -5685,7 +5629,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasResizeOrigW = node.Width;
         _canvasResizeOrigH = node.Height;
         LockCanvasCursor((corner == "tl" || corner == "br") ? CanvasIdcSizeNwSe : CanvasIdcSizeNeSw, _canvasEditNodeId != null);
-        CaptureCanvasEditSelectionAnchor(nodeId);   // 编辑态：缩放也会顺带拖选文字 ⇒ 记下选区待还原
     }
 
     /// <summary>开始【单轴】缩放：只动一条边（edge = top/bottom/left/right），对侧固定。
@@ -5705,7 +5648,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasResizeOrigW = node.Width;
         _canvasResizeOrigH = node.Height;
         LockCanvasCursor((edge == "top" || edge == "bottom") ? CanvasIdcSizeNs : CanvasIdcSizeWe, _canvasEditNodeId != null);
-        CaptureCanvasEditSelectionAnchor(nodeId);   // 编辑态：缩放也会顺带拖选文字 ⇒ 记下选区待还原
     }
 
     /// <summary>锁定画布手势光标：把"系统箭头（编辑态保留系统 I 形）"资源替换为该标准光标（对齐画笔圆环的 SetSystemCursor 方案）。
@@ -5789,6 +5731,24 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
         }
         catch { }
+    }
+
+    /// <summary>视口点是否命中【当前编辑卡】的某个边框控件（滚动条 / 四角缩放 / 四边中点连线 / 四边中段缩放）。
+    /// 判据与 <see cref="OnCanvasEditBoxPointerPressed"/> 的四条分支同源，故"编辑框内通道"与"编辑框外 Viewer 通道"
+    /// 对同一控件的认定完全一致。</summary>
+    private bool PressHitsEditedCardControl(Point vp)
+    {
+        string editId = _canvasEditNodeId!;
+        if (editId == null) return false;
+        if (TryHitCanvasScrollBar(vp, out var sb) && sb != null &&
+            string.Equals(sb.Id, editId, StringComparison.Ordinal)) return true;
+        if (TryHitCanvasCorner(vp, out var cn, out _) &&
+            string.Equals(cn, editId, StringComparison.Ordinal)) return true;
+        if (TryHitCanvasHandle(vp, out var hn, out _) &&
+            string.Equals(hn, editId, StringComparison.Ordinal)) return true;
+        if (TryHitCanvasEdge(vp, out var en, out _) &&
+            string.Equals(en, editId, StringComparison.Ordinal)) return true;
+        return false;
     }
 
     /// <summary>视口点是否落在编辑框覆盖的卡片矩形内（用编辑框自身变换，含页缩放/旋转）。</summary>
@@ -6024,11 +5984,21 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void CanvasEditBox_LostFocus(object sender, RoutedEventArgs e)
     {
-        // 编辑态手势（拖滚动条 / 拖角缩放 / 拖边连线）期间系统会把焦点从 RichEditBox 夺走：这**不算**"退出编辑"，
-        // 手势收尾会把焦点还回来。⚠ 必须覆盖【全部】手势 —— 否则缩放/连线中途 `EndCanvasEdit` 会清掉手势状态
-        //（连线：`Viewer_PointerCaptureLost` 里连带取消 → 表现为"从卡片内侧拖连线到空白处不创建卡片"），
-        // 并折叠编辑框导致手势抖动。
-        if (AnyCanvasGestureActive) return;
+        // 编辑态手势（拖滚动条 / 拖角缩放 / 拖边连线）期间系统会把焦点从 RichEditBox 夺走：这**不算**"退出编辑"。
+        // ⚠ 必须覆盖【全部】手势 —— 否则缩放/连线中途 `EndCanvasEdit` 会清掉手势状态、并折叠编辑框导致手势抖动。
+        if (AnyCanvasGestureActive || _canvasEditControlGesture)
+        {
+            // 焦点被夺走会让插入光标停止闪烁（DrawCanvasEditCaret 以 FocusState 为前提）。用法是"控件交互期间
+            // 编辑态零变动、光标照常闪烁"，故这里把焦点重申回编辑框：焦点与指针捕获互不相干，交还焦点不影响
+            // Viewer 侧正在进行的控件手势；队列尾部执行，避开本轮焦点切换事件的分发过程。
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_canvasEditNodeId == null) return;
+                if (CanvasEditBox.FocusState == FocusState.Unfocused)
+                    CanvasEditBox.Focus(FocusState.Programmatic);
+            });
+            return;
+        }
         EndCanvasEdit(commit: true);
     }
 
@@ -6502,14 +6472,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void OnCanvasEditBoxPointerMoved(object sender, PointerRoutedEventArgs e)
     {
         if (_canvasEditNodeId == null) return;
-        // 手势进行中（拖滚动条 / 拖角缩放 / 拖边连线）：RichEditBox 在按下时抓着指针捕获 ⇒ 移动事件落在它身上，
-        // 挂在 this 的 Viewer_PointerMoved 收不到。直接【转调权威手势处理】，四角缩放/四边连线/滚动条共用同一套更新逻辑。
-        if (AnyCanvasGestureActive)
-        {
-            Viewer_PointerMoved(sender, e);
-            e.Handled = true;
-            return;
-        }
         var p = e.GetCurrentPoint(Viewer).Position;
         _canvasPointerOnEditCard = true;   // 编辑框通道收到移动 ⇒ 指针在编辑卡上
         // 文本拖选进行中（左键按住、非卡片手势）：冻结边框控件交互 —— 不刷新手柄显形/悬停，
@@ -6522,8 +6484,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasPointerPos = p;
         _canvasPointerValid = true;
         UpdateCanvasNodeHover(p);                       // 先刷新悬停（手柄命中依赖 _hoverCanvasNodeId）
+        // 命中边框控件带 ⇒ 把该带从编辑框命中区【挖掉】（信号完全切割，见 SyncCanvasEditHitCarve）。
+        SyncCanvasEditHitCarve(p);
         // 元素级光标：文本区工字、控件区对应光标（箭头槽替换态由工字作用域轮询按此同步）。
-        CanvasEditBox.OverrideCursor(ResolveEditHoverCursor(p) ?? CanvasIBeamCursor);
+        var hoverCursor = ResolveEditHoverCursor(p);
+        CanvasEditBox.OverrideCursor(hoverCursor ?? CanvasIBeamCursor);
         InvalidateOverlayThrottled();
     }
 
@@ -6544,27 +6509,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return null;   // 文本区 → 控件默认（I 形）
     }
 
-    /// <summary>编辑框上的指针抬起：结束编辑态手势（此时捕获在 RichEditBox 上，Viewer_PointerReleased 收不到）——
-    /// 转调权威收尾逻辑，再兜底释放编辑框自身的捕获并把焦点还给编辑框，保持仍处于编辑态。</summary>
+    /// <summary>编辑框上的指针抬起。编辑态下能落在编辑框上的只有【文本按下】—— 边框控件命中带已被
+    /// <see cref="SyncCanvasEditHitCarve"/> 从编辑框命中区挖除，控件交互全程走 Viewer 通道（含其自有的
+    /// PointerReleased 收尾）。故这里只需按松手点重判"指针是否仍在卡内"（松手前可能已滑出卡、拖动捕获期间
+    /// 收不到 PointerExited），供工字作用域轮询下一拍决定装/卸工字。</summary>
     private void OnCanvasEditBoxPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        _canvasGestureFromEditBox = false;   // 手势到此收尾
-        // 纯文本点击/拖选松手：按松手点重判"指针是否还在卡内"（松手前可能已滑出卡、捕获期间没收到 Exited）——
-        // 之后由工字作用域轮询自愈（卡内装工字、卡外卸下），无需在这里动资源。
-        if (!AnyCanvasGestureActive)
-        {
-            _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
-            _canvasPointerValid = true;
-            _canvasPointerOnEditCard = IsPointOnCanvasEditCard(_canvasPointerPos);
-            return;
-        }
-        Viewer_PointerReleased(sender, e);           // 手势收尾（Unlock 恢复系统光标，轮询随后按位置重装）
-        CanvasEditBox.ReleasePointerCaptures();      // 兜底：Viewer 侧 ReleasePointerCapture 释放的是 this，不是编辑框
-        if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
-        // 手势状态已清 → 自绘光标的抑制门已开，但最后一次重绘可能发生在手势进行中（光标被抑制）；
-        // 不补绘的话光标要等下一次闪烁 tick（≤530ms）才现身（与双击进编辑"慢半拍"同根因）。
-        ScreenCanvas.Invalidate();
-        e.Handled = true;
+        _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
+        _canvasPointerValid = true;
+        _canvasPointerOnEditCard = IsPointOnCanvasEditCard(_canvasPointerPos);
     }
 
     /// <summary>指针离开编辑卡：清"在卡上"标志 ⇒ 工字作用域轮询下一拍卸下替换（卡外走正常悬停光标）。
@@ -6573,19 +6526,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         if (CursorInterop.AnyMouseButtonDown()) return;
         _canvasPointerOnEditCard = false;
-    }
-
-    /// <summary>编辑框上的指针捕获丢失（被系统 / 其他控件抢走）：兜底结束编辑态滚动条拖动并还原选区。</summary>
-    private void OnCanvasEditBoxPointerCaptureLost(object sender, PointerRoutedEventArgs e)
-    {
-        // 捕获丢失时指针通常仍按住（RichEditBox 拖选中途内部放捕获）：不动资源 —— 按住态由工字作用域
-        // 轮询维持（按下期间恒工字），松手后按位置自愈。
-        if (!_isCanvasScrollDragging) return;
-        _isCanvasScrollDragging = false;
-        _canvasScrollDragNodeId = null;
-        UnlockCanvasCursor();                       // 编辑框通道滚动条拖动被打断 ⇒ 解锁光标
-        RestoreCanvasEditSelectionAfterGesture();
-        ScreenCanvas.Invalidate();
     }
 
     /// <summary>在可视化树里深度优先找第一个指定类型后代（用于取 TextBox 模板内的 ScrollViewer）。
@@ -7400,7 +7340,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void Viewer_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (_pages.Count == 0) return;
-        _canvasGestureFromEditBox = false;   // 从外部按下 ⇒ 清"编辑框通道手势"标记（本次手势走 Viewer 通道）
         _canvasClickEditPending = false;     // 新按下 ⇒ 清上一次的"单击已选中卡进编辑"待定（本次按下重新判定）
 
         // 【这里曾经拦掉动画期间的一切按下，是"动画没结束就点不动"的直接原因，现已放行】
@@ -7428,7 +7367,21 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         // 白板编辑中：任何落在编辑框之外的按下都结束编辑（Obsidian 行为）。编辑框与浮动控件
         // 都在覆盖层内，落在其上的按下被它们吃掉、到不了本视图 —— 能到这里的一定是"卡片之外"。
-        if (_canvasEditNodeId != null) EndCanvasEdit(commit: true);
+        //
+        // ⚠ 例外：命中【当前编辑卡】边框控件的按下（卡片滚动条 / 四角 / 四边中点 / 四边中段）。这些控件的命中带
+        //   会探出编辑框覆盖区（卡片外缘与底部手柄带都留了命中半径一圈），属"控件交互"而非"点卡外退出编辑"。
+        //   这里不结束编辑，交给下面的白板手势分派 —— 走的是与阅读态完全相同的 Viewer 通道（会 CapturePointer），
+        //   编辑框全程收不到这次指针流 ⇒ 光标不挪、选区不变、编辑态不退出（用户报告：编辑态用边缘控件会退出编辑）。
+        // 控件命中判定依赖 _hoverCanvasNodeId（回退 _selectedCanvasNodeId，编辑卡进编辑即置选中）；
+        // 先在按下点就地刷新一次悬停，避免指针从别处快速移入时用的是上一次 PointerMoved 的残值。
+        if (_canvasEditNodeId != null)
+        {
+            _canvasPointerPos = pt.Position;
+            _canvasPointerValid = true;
+            UpdateCanvasNodeHover(pt.Position);
+        }
+        _canvasEditControlGesture = _canvasEditNodeId != null && PressHitsEditedCardControl(pt.Position);
+        if (_canvasEditNodeId != null && !_canvasEditControlGesture) EndCanvasEdit(commit: true);
 
         // ── 标注模式：左键交给标注管线，右键仍可拖拽缩放 ──
         if (AnnotationInputActive && pt.Properties.IsLeftButtonPressed)
@@ -7456,13 +7409,20 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (CanvasInputActive && pt.Properties.IsLeftButtonPressed)
         {
             // 手柄"显形/命中"都依据指针位置：按下瞬间先就地刷新一次（不依赖上次 PointerMoved 的残值）。
-            _canvasPointerPos = pt.Position;
-            _canvasPointerValid = true;
-            UpdateCanvasNodeHover(pt.Position);
+            // 编辑态已在上面"结束编辑判定"处就地刷新过同一坐标，此处不重复。
+            if (_canvasEditNodeId == null)
+            {
+                _canvasPointerPos = pt.Position;
+                _canvasPointerValid = true;
+                UpdateCanvasNodeHover(pt.Position);
+            }
             // 视口接管键盘焦点：鼠标点击画布不会让 ScrollViewer 自动获焦，而 MainPage 的 Delete/Backspace
             // 处理是【依赖焦点】的 KeyDown 路由（必须穿过 MainPage 视觉树才可达）⇒ 首次打开带卡片的 PDF 时
             // 选中卡片/连线按 Del 无效，非要在编辑态进出一次（退出编辑会 RestoreViewerFocus）才恢复（用户报告）。
-            EnsureViewerFocus();
+            // ⚠ 编辑态【不】抢焦点：编辑框必须继续持有键盘焦点，插入光标才照常闪烁（DrawCanvasEditCaret 以
+            //   FocusState 为绘制前提），方向键也才能继续移动光标。控件命中带的按下虽走本通道，但焦点保持不动
+            //   ⇒ "用边框控件时编辑态零变动"。退出编辑后由 RestoreViewerFocus 恢复视口焦点。
+            if (_canvasEditNodeId == null) EnsureViewerFocus();
             // 滚动条优先：它在卡片内部、意图更明确；命中区仅滚动条矩形（±小容差），
             // 只对真的画了滚动条的卡片生效 ⇒ 不会把贴着卡片边框的缩放/连线手柄整体抢走。
             if (TryHitCanvasScrollBar(pt.Position, out var sbNode) && sbNode != null)
@@ -7689,9 +7649,19 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 否则拖选指针滑过控件带会触发边框控件悬浮显示与鼠标变化（用户报告）。
         bool canvasTextDragSelecting = _canvasEditNodeId != null &&
             e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed;
-        // 编辑态下 Viewer 通道收到移动 ⇒ 指针在编辑框之外（卡外）：清"在卡上"标志，工字作用域轮询下一拍卸下。
-        if (_canvasEditNodeId != null && !canvasTextDragSelecting && _canvasPointerOnEditCard)
-            _canvasPointerOnEditCard = false;
+        // 编辑态下 Viewer 通道收到移动 ⇒ 指针在编辑框之外（卡外或【已被挖除的控件命中带】）：
+        // ① 清"在卡上"标志，工字作用域轮询下一拍卸下；② 同步最新的指针位置（工字作用域据此判定命中带）；
+        // ③ 若已不在编辑卡的边框控件带上，把命中区【还回编辑框】（撤销 OnCanvasEditBoxPointerMoved 的挖除），
+        //    鼠标移回文本区即可继续正常编辑。
+        if (_canvasEditNodeId != null)
+        {
+            var editHoverPos = e.GetCurrentPoint(Viewer).Position;
+            _canvasPointerPos = editHoverPos;
+            _canvasPointerValid = true;
+            if (!canvasTextDragSelecting && _canvasPointerOnEditCard)
+                _canvasPointerOnEditCard = false;
+            if (!AnyCanvasGestureActive) SyncCanvasEditHitCarve(editHoverPos);
+        }
         if (CanvasInputActive && !_isRightZooming && !_isDragPanning && !canvasTextDragSelecting)
         {
             var hoverPos = e.GetCurrentPoint(Viewer).Position;
@@ -7824,14 +7794,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void Viewer_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        _canvasGestureFromEditBox = false;   // 手势到此收尾
+        _canvasEditControlGesture = false;   // "控件交互"窗口随本次按下-抬起结束
         UnlockCanvasCursor();                // 手势结束 ⇒ 还原系统光标（SPI_SETCURSORS 一次性恢复全部，覆盖滚动/缩放/连线）
         if (_isCanvasScrollDragging)
         {
             // 先清状态再释放捕获（释放会同步触发 CaptureLost，那里也会兜底清一次）。
             _isCanvasScrollDragging = false;
             _canvasScrollDragNodeId = null;
-            RestoreCanvasEditSelectionAfterGesture();   // 还原拖动前选区（编辑态拖滚动条的副作用）
             this.ReleasePointerCapture(e.Pointer);
             // 拖动期间焦点被系统从编辑框夺走（见 CanvasEditBox_LostFocus）⇒ 这里还回去，保持仍在编辑态。
             if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
@@ -7849,7 +7818,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double nx = node?.X ?? 0, ny = node?.Y ?? 0;
             double nw = node?.Width ?? 0, nh = node?.Height ?? 0;
             CancelCanvasResize();
-            RestoreCanvasEditSelectionAfterGesture();   // 编辑态：缩放顺带拖选的文字也要还原
             this.ReleasePointerCapture(e.Pointer);
             if (node != null)
                 CanvasNodeResizeCompleted?.Invoke(this, new CanvasNodeEventArgs
@@ -7858,6 +7826,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                     X = nx, Y = ny, Width = nw, Height = nh,
                     OrigX = ox, OrigY = oy, OrigWidth = ow, OrigHeight = oh
                 });
+            // 编辑态用【探出编辑框外的】缩放控件时，按下与拖动期间焦点会落到视口 ⇒ 这里还回编辑框，
+            // 编辑态与插入光标闪烁继续（与滚动条分支同款收尾）。
+            if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
             e.Handled = true;
             return;
         }
@@ -7872,7 +7843,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _connFromNodeId = null;
             _connTargetNodeId = null;
             _connTargetSide = "";
-            RestoreCanvasEditSelectionAfterGesture();   // 编辑态：连线顺带拖选的文字也要还原
             this.ReleasePointerCapture(e.Pointer);
             InvalidateOverlay();
             // ⚠ 目标在【释放点当下重新判定】，不再依赖拖动期间累积的 _connTargetNodeId：
@@ -7904,6 +7874,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                     NodeId = from, FromSide = fromSide, PageIndex = dropPage, X = x, Y = y
                 });
             }
+            // 同缩放分支：控件探出编辑框外的连线同样会带走焦点 ⇒ 还回编辑框，保持仍在编辑态。
+            // 放在两个 Invoke【之后】：落在空白页时会由 MainPage 接管新卡片的编辑态（CanvasEditBox 被重新
+            // 布局到新卡），这里再聚焦只是对同一个宿主的幂等重申，不会和 MainPage 的接管抢焦点。
+            if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
             e.Handled = true;
             return;
         }
@@ -7985,23 +7959,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         _isDragPanning = false;
         _isRightZooming = false;
-        // ⚠ 编辑态手势由【编辑框通道】驱动：PointerCaptureLost 是【冒泡】事件 —— 编辑框在拖动中丢捕获
-        //   （指针拖出编辑框外时必然发生）会冒到 this 上。若照常执行下面的"手势被打断即收尾/取消"，
-        //   会把正在进行的连线【取消】（`_isCanvasConnecting=false; _connFromNodeId=null`）→ 松手不建卡
-        //   （实测坐实：本次 capturelost 时 `_isCanvasConnecting=True`，随后的 release 里已是 False）。
-        //   ⇒ 来自编辑框通道的手势这里一律不碰，由 OnCanvasEditBoxPointer* 那条线自己收尾。
-        if (_canvasGestureFromEditBox &&
-            (_isCanvasConnecting || _isCanvasResizing || _isCanvasScrollDragging || _isCanvasDragging))
-        {
-            StopWheelScroll();
-            StopPanApplyTimer();
-            return;
-        }
+        _canvasEditControlGesture = false;   // 捕获丢失 ⇒ "控件交互"窗口收尾（防标志残留导致后续失焦被误判为控件交互）
         // 滚动条拖动被系统打断：偏移已实时生效，直接清状态即可（无需回滚）。
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         UnlockCanvasCursor();                       // 捕获丢失 ⇒ 解锁画布手势光标（覆盖滚动/连线，恢复框架默认）
-        RestoreCanvasEditSelectionAfterGesture();   // 编辑态拖滚动条的选区副作用也要还原
         // 缩放拖拽被系统打断：尺寸已实时写回模型 → 照常发完成事件收尾（MainPage 据此入历史）。
         if (_isCanvasResizing && _canvasResizeNode != null)
         {
