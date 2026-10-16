@@ -326,6 +326,19 @@ public sealed partial class MainPage : Page
         zoomOutAccel.Invoked += ZoomOut_Invoked;
         this.KeyboardAccelerators.Add(zoomOutAccel);
 
+        // 模式切换快捷键：V=阅读 / B=画笔 / N=白板。与导航/缩放同机制，走输入管理器全局分发、
+        // 与焦点无关（阅读时焦点在 GpuViewer 上也能触发）。无修饰键；焦点落在文本/按钮等原生控件时
+        // 由 ModeSwitch_Invoked 放行，不抢键。三个加速器共用同一 Invoked（按 sender.Key 分流）。
+        var readModeAccel = new KeyboardAccelerator { Key = VirtualKey.V };
+        readModeAccel.Invoked += ModeSwitch_Invoked;
+        this.KeyboardAccelerators.Add(readModeAccel);
+        var penModeAccel = new KeyboardAccelerator { Key = VirtualKey.B };
+        penModeAccel.Invoked += ModeSwitch_Invoked;
+        this.KeyboardAccelerators.Add(penModeAccel);
+        var canvasModeAccel = new KeyboardAccelerator { Key = VirtualKey.N };
+        canvasModeAccel.Invoked += ModeSwitch_Invoked;
+        this.KeyboardAccelerators.Add(canvasModeAccel);
+
         PageListView.ItemsSource = _pages;
         BookmarkListView.ItemsSource = _bookmarks;
         OutlineListView.ItemsSource = _outlineItems;
@@ -4171,7 +4184,7 @@ public sealed partial class MainPage : Page
         catch { return (255, 255, 0); }
     }
 
-    private void SetEditMode(EditMode mode)
+    private void SetEditMode(EditMode mode, bool openPenOptions = true)
     {
         _currentMode = mode;
         ReadModeButton.IsChecked = (mode == EditMode.Navigate);
@@ -4198,7 +4211,8 @@ public sealed partial class MainPage : Page
 
         // Toggle the floating pen-options capsule (color + thickness) for drawing mode.
         // It lives in a Popup positioned below the Pen button, so it never shifts the toolbar layout.
-        bool showColors = (mode == EditMode.Pen);
+        // openPenOptions=false（如键盘快捷键 B）时仅切模式、不展开工具栏与颜色胶囊，与阅读/白板一致。
+        bool showColors = (mode == EditMode.Pen) && openPenOptions;
         if (PenOptionsPopup != null)
         {
             if (showColors)
@@ -6116,6 +6130,34 @@ public sealed partial class MainPage : Page
                 return;
         }
 
+        args.Handled = true;
+    }
+
+    /// <summary>
+    /// 模式切换快捷键 V/B/N（见构造函数注册的 KeyboardAccelerator，输入管理器全局分发、与焦点无关）。
+    /// 守卫（与 Nav_Invoked 同思路）：焦点在文本编辑控件（TextBox/PasswordBox/RichEditBox）上时放行——
+    /// 用户正在输入页码或白板文字，不抢 V/B/N 键；其余原生控件（按钮/列表等）也放行，避免劫持其原生按键。
+    /// 命中后置 args.Handled=true，阻止字符落到焦点控件。直接走 SetEditMode（与点击工具栏按钮一致）：
+    /// V 退回阅读；B 进画笔并展开颜色胶囊；N 进白板；重复按同键幂等。
+    /// </summary>
+    private void ModeSwitch_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        var focused = FocusManager.GetFocusedElement(XamlRoot);
+        if (focused is TextBox or PasswordBox or RichEditBox
+            or ButtonBase or ComboBox or ListViewBase or HyperlinkButton)
+            return;
+
+        EditMode target;
+        switch (sender.Key)
+        {
+            case VirtualKey.V: target = EditMode.Navigate; break;
+            case VirtualKey.B: target = EditMode.Pen;      break;
+            case VirtualKey.N: target = EditMode.Canvas;   break;
+            default: return;
+        }
+        // 键盘进画笔(B)不展开工具栏/颜色胶囊（openPenOptions=false），与 V/N 纯切模式一致；
+        // 阅读/白板及其它调用走默认 true（仅 Pen 受影响）。
+        SetEditMode(target, openPenOptions: target != EditMode.Pen);
         args.Handled = true;
     }
 
