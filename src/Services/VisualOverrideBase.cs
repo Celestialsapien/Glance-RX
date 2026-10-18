@@ -83,6 +83,33 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         }
     }
 
+    /// <summary>
+    /// 对<b>指定的那一颗</b>已接管按钮开启 hover「冷处理」：先<b>立即</b>把它清回静止，
+    /// 再在窗口期内<b>拒绝一切"点亮"请求</b>（见 <see cref="BaseLink.SetHover"/>）。窗口只由
+    /// <b>该按钮自己的真实 <c>PointerMoved</c></b> 提前解除（<c>PointerMoved</c> 不可能来自框架补发，
+    /// 见 <see cref="BaseLink"/> 的 ④），<paramref name="windowMs"/> 只是兜底过期时间。
+    /// <para><b>为什么必须"按窗口"而不是"清一次"</b>（2026-10-18 实证）：<c>ButtonBase</c> 松手时经
+    /// <c>ReleasePointerCaptureInternal()</c> 补发一次<b>假 PointerExited</b>，并在<b>约 380ms 后"圆谎"</b>补一次
+    /// <c>PointerEntered</c>，带的是<b>松手那一刻的旧坐标</b>。若浮层在这段时间内因钳制发生位移，那个迟到事件
+    /// 仍按旧坐标判定"指针还在按钮里"⇒ 把已滑出光标下方的按钮重新点亮，而几何驱动只在真实移动时重算
+    /// ⇒ 悬浮色一直残留到用户动鼠标。零时长的 <c>true→false</c> 清一次完全挡不住它（首次修复因此无效）。</para>
+    /// <para><b>为什么作用域是"被按的那一颗"</b>：那两次假事件都由<b>该按钮自己的 ButtonBase</b> 在
+    /// 捕获释放路径上补发，<b>不可能发给别的按钮</b>。早先按子树整体冷处理，会让本无假事件的邻居按钮
+    /// 也被禁亮整整一个窗口期（点圆点收起后，指针恰好停在胶囊按钮上时光效迟迟不亮）——故收窄到单颗。</para>
+    /// <para><b>为什么不伤及几何驱动这个"命根"</b>：判据（<c>GetCurrentPoint</c> + ActualWidth/Height）一行不改，
+    /// 影响范围只有这一颗按钮且在窗口期后自动失效；真实移动一到即解除，正常手感不变。</para>
+    /// </summary>
+    protected static void BeginHoverHoldOffFor(ButtonBase? target, int windowMs = 900)
+    {
+        if (target == null) return;
+        long until = Environment.TickCount64 + windowMs;
+        foreach (var link in _instances)
+        {
+            if (!ReferenceEquals(link.Button, target)) continue;
+            link.BeginHoverHoldOff(until);
+        }
+    }
+
     /// <summary>接管逻辑的共享内核。具体按钮类型（Button / ToggleButton）由 <typeparamref name="TButton"/> 参数化；
     /// 类型相关的状态回调（如 ToggleButton.IsChecked）由 <see cref="AttachExtra"/> 补挂，状态表由 <see cref="Apply"/> 各自实现。
     /// 用 public 以便从各自独立的接管器类（非嵌套、无法直接触达 protected 嵌套类型）派生 Link。</summary>
@@ -95,7 +122,21 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         protected bool _dirty;
         protected ContentPresenter? _root;
 
+        // hover「冷处理」到期时间戳（TickCount64，0 = 未启用；见 BeginHoverHoldOffFor）。
+        // 期间拒绝一切"点亮"请求 —— 专挡 ButtonBase 松手约 380ms 后补发的"圆谎" PointerEntered。
+        private long _holdOffUntilTicks;
+
         protected BaseLink(TButton button) { _button = button; }
+
+        /// <summary>本 Link 接管的按钮（供包含类做子树归属判断等）。</summary>
+        internal TButton Button => _button;
+
+        /// <summary>开启 hover 冷处理：立即清回静止，并在 <paramref name="untilTicks"/> 前拒绝点亮。</summary>
+        internal void BeginHoverHoldOff(long untilTicks)
+        {
+            _holdOffUntilTicks = untilTicks;
+            SetHover(false);
+        }
 
         internal void Attach()
         {
@@ -123,8 +164,10 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             };
 
             // ④ 指针落点只用来维护「鼠标到底在不在按钮上」，绝不采信 IsPointerOver / PointerExited
+            //    ⚠ PointerMoved 只可能是<b>真实</b>移动 —— ButtonBase 那两次"假退出 / 约 380ms 后圆谎"
+            //    补的都是 PointerExited / PointerEntered，绝不会补 PointerMoved ⇒ 只有它有权提前解除冷处理。
             _button.PointerEntered += (s, e) => Track(e);
-            _button.PointerMoved += (s, e) => Track(e);
+            _button.PointerMoved += (s, e) => { _holdOffUntilTicks = 0; Track(e); };
             _button.PointerExited += (s, e) => Track(e);
             _button.PointerPressed += (s, e) => Track(e);
 
@@ -201,6 +244,23 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         {
             // 弹模态对话框期间抑制 hover（详见 SetHoverSuppressed）：任何 hover 请求都按静止处理，
             // 否则弹窗打开瞬间的游离 PointerMoved/Entered 会把按钮卡在悬浮态、且弹窗期间整页几何驱动不触发。
+            if (_hoverSuppressed) hover = false;
+            // 冷处理窗口内拒绝"点亮"（见 BeginHoverHoldOffFor）：挡的正是 ButtonBase 松手约 380ms 后
+            // 补发的那次"圆谎" PointerEntered —— 它带旧坐标，会把刚位移出去的按钮重新点亮。
+            if (hover && Environment.TickCount64 < _holdOffUntilTicks) hover = false;
+            if (_hover == hover) return;
+            _hover = hover;
+            _dirty = true;
+            Sync();
+        }
+
+        /// <summary><b>权威指派</b>：调用方已按<b>实时指针位置</b>算好几何（不经过任何指针事件），
+        /// 直接设定 hover 状态，<b>不受冷处理窗口约束</b>（那窗口是给「可能带旧坐标的迟到事件」设的，
+        /// 与本地实时几何无关）。仅用于「元素因布局变化滑到静止指针下方」这种 WinUI 不会主动派发
+        /// hover 事件的场合 —— 例如白板卡片胶囊展开/收起后按当前指针补判一次。
+        /// 仍尊重 <c>_hoverSuppressed</c>（弹模态对话框期间一律静止）。</summary>
+        internal void ForceHover(bool hover)
+        {
             if (_hoverSuppressed) hover = false;
             if (_hover == hover) return;
             _hover = hover;

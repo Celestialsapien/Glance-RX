@@ -26,6 +26,7 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using GlanceRX.Rendering;
+using GlanceRX.Services;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.Text;
@@ -41,7 +42,6 @@ using Microsoft.UI.Xaml.Hosting;
 using Windows.Foundation;
 using Windows.Graphics.DirectX;
 using Windows.System;
-using GlanceRX.Services;
 using GlanceRX.Diagnostics;
 using Windows.UI.Core;
 using GlanceRX.Interop;
@@ -135,6 +135,8 @@ public sealed class CanvasNodeEventArgs : EventArgs
     public string? ArrowStyle { get; init; }
     /// <summary>连线颜色 "#RRGGBB"（仅连线样式事件填充；null = 不变更颜色；空串 = 恢复默认色）。</summary>
     public string? EdgeColor { get; init; }
+    /// <summary>卡片颜色 "#RRGGBB"（仅卡片颜色事件填充；null = 不变更颜色）。</summary>
+    public string? NodeColor { get; init; }
 }
 
 /// <summary>
@@ -2697,9 +2699,27 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
+    private bool _cardToolbarShown;
+
     public GpuPageView()
     {
         InitializeComponent();
+        ButtonVisualOverride.Attach(CanvasEditButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasColorButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasDeleteButton, transparentAtRest: true);
+        AttachCanvasColorDotHover();   // 二级颜色胶囊圆点的悬浮/选中放大反馈（照抄 PenOptionsCapsule）
+        // 胶囊展开/收起会让按钮"滑到静止指针下方"，而 WinUI 不会因此主动派发 hover 事件
+        // ⇒ 记下胶囊内的最后指针位置（CanvasOverlay 坐标），在布局落定后主动补判一次几何。
+        // PointerPressed 需 handledEventsToo：ButtonBase 会把它标 Handled。
+        CanvasCardToolbar.PointerMoved += CanvasCardToolbar_PointerMoved;
+        CanvasCardToolbar.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler(CanvasCardToolbar_PointerPressed), true);
+        if (CanvasCardToolbarHideAnim != null)
+            CanvasCardToolbarHideAnim.Completed += (s, e) =>
+            {
+                if (!_cardToolbarShown && CanvasCardToolbar != null)
+                    CanvasCardToolbar.Visibility = Visibility.Collapsed;
+            };
         // 滚轮：逻辑处理器挂在 Viewer(ScrollViewer 自身) 上、且用 HandledEventsToo 订阅，
         // 保证必定接管（ScrollViewer 原生处理时会把路由事件标 Handled，普通订阅会被整段吞掉——
         // “横向下滚不动”正是这个根因）。纵/横滚轮现在都走统一弹簧引擎，不再交还原生滚动。
@@ -2718,6 +2738,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 用 handledEventsToo 订阅 —— RichEditBox 会把 PointerReleased 标 Handled。
         CanvasEditBox.AddHandler(UIElement.PointerReleasedEvent,
             new PointerEventHandler(OnCanvasEditBoxPointerReleased), true);
+        // 根级按下监听（handledEventsToo 常驻）：记录右键时刻 + 文本菜单外点击即收起。
+        // 必须挂在根上：卡片胶囊/连线工具条等子控件会把 PointerPressed 标 Handled，普通订阅收不到。
+        this.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler(OnRootPointerPressed), true);
         // 指针移动（文本区悬停）：补喂白板交互层（手柄显形/悬停）+ 同步指针位置 + 维持挖洞与元素级光标。
         // ⚠ 必须 handledEventsToo=true —— RichEditBox 内部把 PointerMoved 标 Handled，普通 `+=` 订阅收不到。
         CanvasEditBox.AddHandler(UIElement.PointerMovedEvent,
@@ -3196,6 +3220,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void Viewer_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
+        // 视图动了（滚动/缩放）⇒ 文本菜单的位置就失效了，直接收起（用户下一次右键会重新定位）。
+        HideCanvasEditContextMenu();
         if (_zoomAnimCommitting)
         {
             // 【这里曾经制造"双击缩放闪一帧别处画面"】原先无条件关窗并往下同步 _live*。
@@ -3582,6 +3608,41 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private static readonly Windows.UI.Color CanvasCardFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
     private static readonly Windows.UI.Color CanvasCardStroke = Windows.UI.Color.FromArgb(255, 138, 143, 152);
     private static readonly Windows.UI.Color CanvasCardText = Windows.UI.Color.FromArgb(255, 32, 32, 34);
+
+    /// <summary>卡片"淡色底纹"的 alpha（0-255，约 10%）。只给「后 6 色」用：在白色卡面之上再薄薄叠一层本色，
+    /// 使卡片内部带一点同色氛围；首位默认灰不上底纹（灰底纹会显脏，且用户明确排除）。
+    /// ⚠ 绝不能把这个 alpha 直接写进卡面底色 —— 卡面必须不透明，否则身后的连线/卡片会透出来。</summary>
+    private const byte CanvasCardTintAlpha = 26;
+
+    /// <summary>卡片边框色解析缓存：绘制期每帧、每卡都会问一次，绝不能在 Draw 里反复解析字符串。
+    /// 键 = 原始 hex 串（大小写不敏感），值为解析结果（非法值也缓存成默认灰，避免反复解析）。
+    /// 规模天然有界（调色板 7 色 + 外部导入的少量颜色）。并发字典：Draw 在 Win2D 线程、模型可能被 UI 线程改写。</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Windows.UI.Color> CanvasStrokeColorCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>把 <c>node.Color</c>（"#RRGGBB"）解析成卡片边框色；空串 / 非法值一律回落默认灰
+    /// <see cref="CanvasCardStroke"/>（= 二级胶囊首位灰点 #8A8F98，两处语义一致）。</summary>
+    private static Windows.UI.Color ResolveCanvasCardStroke(string? hex)
+    {
+        if (string.IsNullOrEmpty(hex)) return CanvasCardStroke;
+        if (CanvasStrokeColorCache.TryGetValue(hex, out var cached)) return cached;
+
+        var color = CanvasCardStroke;
+        string s = hex[0] == '#' ? hex.Substring(1) : hex;
+        if (s.Length == 6
+            && int.TryParse(s.Substring(0, 2), System.Globalization.NumberStyles.HexNumber,
+                             System.Globalization.CultureInfo.InvariantCulture, out int r)
+            && int.TryParse(s.Substring(2, 2), System.Globalization.NumberStyles.HexNumber,
+                             System.Globalization.CultureInfo.InvariantCulture, out int g)
+            && int.TryParse(s.Substring(4, 2), System.Globalization.NumberStyles.HexNumber,
+                             System.Globalization.CultureInfo.InvariantCulture, out int b))
+        {
+            color = Windows.UI.Color.FromArgb(255, (byte)r, (byte)g, (byte)b);
+        }
+        CanvasStrokeColorCache[hex] = color;
+        return color;
+    }
+
     // 编辑态选区高亮（Win2D 自绘）。10-17 改：原为写死的半透明蓝 FromArgb(64,0,120,215)，
     // 与工具栏页码框 / 书签编辑框（SelfDrawnTextBox 的 SelRect）不是一回事 ⇒ 三处拖选颜色不统一。
     // 现改为与它们【同源】：取 App.xaml 主题字典里的 GlanceAccentBrush（Obsidian 紫，
@@ -3691,7 +3752,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_selectedCanvasNodeId != null && !idx.ContainsKey(_selectedCanvasNodeId))
         {
             _selectedCanvasNodeId = null;
-            if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+            HideCanvasCardToolbar();
         }
         if (_canvasEditNodeId != null && !idx.ContainsKey(_canvasEditNodeId))
         {
@@ -3803,6 +3864,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var pages = _pages;
         var savedTransform = ds.Transform;
 
+        // ---- 连线（底层）：必须先于卡片绘制 ⇒ 卡片永远压在连线之上 ----
+        // 对齐 Obsidian Canvas：连线只是"卡片之间的说明文字"，卡片才是主体。卡面是不透明的
+        // （CanvasCardFill = #FFFFFFFF），所以盖上去就是完全遮住，不存在"半透明穿帮"。
+        // ⚠ 这条绘制顺序同时定死了命中层级 —— 挡在上面的先命中，所以卡片的滚动条/四角/边手柄/
+        //   本体全部优先，连线只能在卡片之外的空白处选中（见 Viewer_PointerPressed 的命中链，
+        //   以及 UpdateCanvasEdgeHover 里按卡片矩形做的悬浮遮罩：看不见的东西不许亮）。
+        if (pages.Count > 0 && edges.Length > 0)
+        {
+            GetViewState(out _, out double eHOff, out double eVOff);
+            Rect EdgeDestOf(int idx) => ComputePageDest(idx, z, eHOff, eVOff);
+            // 连线在屏幕坐标绘制：会话变换必须为恒等，防止任何上游泄漏的页变换把端点/控制点二次映射 → 连线脱离卡片。
+            ds.Transform = Matrix3x2.Identity;
+            DrawCanvasEdges(ds, z, pages, EdgeDestOf, index, edges);
+            ds.Transform = savedTransform;
+        }
+
         // ---- 卡片：逐可见页施加页变换，在页局部空间绘制（随页旋转/缩放）----
         foreach (var (p, dest) in visible)
         {
@@ -3874,32 +3951,48 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             ds.Transform = savedTransform;
         }
 
-        // ---- 连线：屏幕坐标绘制（端点/控制点各自经所属页的页变换映射）----
-        if (pages.Count > 0 && (edges.Length > 0 || _isCanvasConnecting))
+        // ---- 拉线预览（顶层）：橡皮筋 + 吸附环，唯一压在卡片之上的"线"----
+        // 它属于【操作反馈】而不是图元：沉到卡片下面会在拖过卡片时整段消失、目标吸附环被卡面切掉一半，
+        // 拖拽过程直接失去反馈。它不参与命中（命中链里没有它），所以不破坏"卡片/控件全优先"。
+        if (pages.Count > 0 && _isCanvasConnecting)
         {
-            GetViewState(out _, out double hOff, out double vOff);
-            Rect DestOf(int idx) => ComputePageDest(idx, z, hOff, vOff);
-            // 连线在屏幕坐标绘制：会话变换必须为恒等（卡片循环已还原，此处再兜底一次，防止
-            // 任何上游泄漏的页变换把端点/控制点二次映射 → 连线脱离卡片）。
             ds.Transform = Matrix3x2.Identity;
-            if (edges.Length > 0)
-                DrawCanvasEdges(ds, z, pages, DestOf, index, edges);
-            if (_isCanvasConnecting)
-                DrawCanvasConnecting(ds);
+            DrawCanvasConnecting(ds);
             ds.Transform = savedTransform;
         }
     }
 
-    /// <summary>画一张卡片。<paramref name="emphasized"/>=true（选中/悬停）时把【边框本身】换成强调色并加粗——
-    /// 不在卡片外另套一层描边（对齐 Obsidian：就是那根边框变色）。
+    /// <summary>画一张卡片。<paramref name="emphasized"/>=true（选中/悬停/手势中）时把【边框本身】加粗——
+    /// 不在卡片外另套一层描边（对齐 Obsidian：就是那根边框变色）。未上色卡片同时换成强调色；
+    /// 已上色卡片保留自身颜色（只靠加粗表达强调，理由见方法内注释）。
     /// <paramref name="z"/>=当前页缩放，仅编辑态画光标时需要把"1 屏幕像素"换算成页局部宽度。</summary>
     private void DrawCanvasCard(CanvasDrawingSession ds, CanvasNode node, bool emphasized, double z)
     {
         double w = Math.Max(12, node.Width);
         double h = Math.Max(12, node.Height);
         var rect = new Rect(node.X, node.Y, w, h);
+        // 卡面：先铺【不透明白底】（必须不透明 —— 卡片要完全遮住身后的连线/其他卡片），
+        // 上色卡片再薄叠一层本色的低透明度底纹（≈10%），做出"淡淡的同色氛围"。
+        // ⚠ 不要把白底直接换成"半透明本色"：那样会变成半透明卡面、透出背景（见上）。
         ds.FillRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius, CanvasCardFill);
-        var strokeColor = emphasized ? _canvasAccentColor : CanvasCardStroke;
+
+        // 边框色（步骤 5）：卡片已上色（node.Color 非空 = "#RRGGBB"）时用它自己的颜色；未上色回落默认灰。
+        // 强调态的取舍（刻意如此）：
+        //   ① 已上色卡片 —— 强调时【保留自身颜色、只用加粗表示】。若强调色压过卡片色，用户刚点完颜色
+        //      卡片仍是强调紫，会以为"没生效"（选中态在选色后必然还在）。
+        //   ② 未上色卡片 —— 沿用原强调色 + 加粗，选中/悬停反馈强度与旧版完全一致。
+        // ⚠ "选了首位默认灰"（= #8A8F98）按【未上色】处理：它与未着色在视觉上等价，若当成"已上色"，
+        //   同一张灰卡会随"有没有点过灰点"在选中时呈现紫/灰两种描边，属自相矛盾。
+        bool customColor = !string.IsNullOrEmpty(node.Color)
+            && !string.Equals(node.Color, CanvasCardDefaultGrayHex, StringComparison.OrdinalIgnoreCase);
+        var cardColor = customColor ? ResolveCanvasCardStroke(node.Color) : CanvasCardStroke;
+        if (customColor)
+        {
+            // 淡色底纹：与边框同色相、只降低不透明度；叠在白底上 ⇒ 结果仍是不透明卡面。
+            ds.FillRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius,
+                Windows.UI.Color.FromArgb(CanvasCardTintAlpha, cardColor.R, cardColor.G, cardColor.B));
+        }
+        var strokeColor = customColor ? cardColor : (emphasized ? _canvasAccentColor : CanvasCardStroke);
         float strokeWidth = emphasized ? CanvasCardSelectedStrokeWidth : CanvasCardStrokeWidth;
         ds.DrawRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius, strokeColor, strokeWidth);
 
@@ -4125,8 +4218,28 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void OnCanvasEditBoxPointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (_canvasEditNodeId == null) return;
-        if (!e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed) return;
-        var p = e.GetCurrentPoint(Viewer).Position;
+        var pt = e.GetCurrentPoint(Viewer);
+        bool isRight = pt.Properties.IsRightButtonPressed;
+        _canvasEditLastPressWasRight = isRight;
+        _canvasEditLastPressDevice = e.Pointer.PointerDeviceType;
+        if (isRight)
+        {
+            // 右键 = 新的意图，清掉"刚在拖选"的标记：否则"先拖选、再右键复制"这个最常用动作会被
+            // 当成拖选尾巴压掉，菜单根本不出现。
+            _canvasEditPressMoved = false;
+            _canvasEditLastLeftInteractTick = 0;
+            return;
+        }
+        if (!pt.Properties.IsLeftButtonPressed) return;
+        // 拖选尾巴识别基线：记按下点与时刻，供 OnCanvasEditBoxPointerMoved 判位移、
+        // 供 ContextMenuOpening 判"这次请求是不是刚做完一次拖选"。
+        _canvasEditPressPoint = pt.Position;
+        _canvasEditPressMoved = false;
+        _canvasEditLastLeftInteractTick = System.Diagnostics.Stopwatch.GetTimestamp();
+        // 左键落在文本区 = 改光标 / 重开拖选 ⇒ 右键菜单的落点与可用性都失效，先收起。
+        // （右键不在此收：它要弹菜单，见 CanvasEditBox_ContextMenuOpening。）
+        HideCanvasEditContextMenu();
+        var p = pt.Position;
         _canvasPointerPos = p;
         _canvasPointerValid = true;
         UpdateCanvasNodeHover(p);
@@ -4700,12 +4813,51 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return true;
     }
 
+    /// <summary>指针是否落在"卡片本体或其边框控件命中带"上 —— 即按下会落到卡片/控件上的全部区域。
+    /// ⚠ 判据必须与 <see cref="Viewer_PointerPressed"/> 的前四支、<see cref="ResolveCanvasHoverCursor"/>
+    /// **完全同源**，不能只测卡片矩形：边框控件的命中带向卡外探出，且三者半径不同
+    /// （悬停手柄=clamp(12z,10,26) DIP、四边中段带=12 页局部点、四角=8 页局部点，高缩放下中段带反而更宽）
+    /// ⇒ 只测卡内会在卡外留一道"光标已是控件态、连线却仍高亮"的缝（用户报告）。</summary>
+    private bool IsPointOnCanvasCardOrControl(Point vp) =>
+        TryHitCanvasNode(vp, out _, out _, out _, out _) ||
+        TryHitCanvasCorner(vp, out _, out _) ||
+        TryHitCanvasHandle(vp, out _, out _) ||
+        TryHitCanvasEdge(vp, out _, out _);
+
+    /// <summary>指针是否落在白板【浮层控件】上（卡片悬浮胶囊 / 连线工具条）。
+    /// 它们是盖在 Win2D 画布之上的 XAML 元素，指针在上面时属于"操作 chrome"而不是操作画布 —— 与卡片遮罩同一原则：
+    /// 挡在指针下面的连线不许亮（否则鼠标停在胶囊上、后面的连线却在闪，用户报告）。
+    /// 编辑框不在其列：它与卡片同矩形，已被 <see cref="IsPointOnCanvasCardOrControl"/> 的卡片矩形覆盖。
+    /// 用元素实测矩形（TransformToVisual）而不是记住的 Margin：胶囊尺寸/居中/钳制都由布局决定，记常量必然对不上。</summary>
+    private bool IsPointOverCanvasOverlayChrome(Point vp) =>
+        IsPointInsideVisibleElement(CanvasCardToolbar, vp) ||
+        IsPointInsideVisibleElement(CanvasEdgeToolbar, vp) ||
+        // 编辑态文本菜单：也算浮层 chrome，否则指针停在菜单上时背后的卡片/连线会跟着高亮。
+        IsPointInsideVisibleElement(CanvasEditContextMenu, vp);
+
+    /// <summary>vp 是否落在某个【可见】元素的当前布局矩形内（坐标换算到 Viewer 系）。
+    /// Collapsed / 尚未布局（ActualWidth=0）/ 抛异常 一律算"不在"，绝不外抛。</summary>
+    private bool IsPointInsideVisibleElement(FrameworkElement? el, Point vp)
+    {
+        try
+        {
+            if (el == null || el.Visibility != Visibility.Visible) return false;
+            if (el.ActualWidth <= 0 || el.ActualHeight <= 0) return false;
+            var r = el.TransformToVisual(Viewer)
+                .TransformBounds(new Rect(0, 0, el.ActualWidth, el.ActualHeight));
+            return vp.X >= r.X && vp.X <= r.X + r.Width && vp.Y >= r.Y && vp.Y <= r.Y + r.Height;
+        }
+        catch { return false; }
+    }
+
     /// <summary>无手势时的连线悬停高亮（指针靠近即变强调色）。
-    /// 拉线控件优先：连线端点 = 卡片边中点手柄，指针进入手柄命中圆时【不】触发连线悬浮，
-    /// 让拉线控件的悬浮显示独占该区域（否则端点附近手柄与连线悬浮同时亮，互相打架）。</summary>
+    /// 两重遮罩，原则都是"看得见挡着的东西优先"：
+    /// ① 卡片/控件（<see cref="IsPointOnCanvasCardOrControl"/>，与光标和按下同源）；
+    /// ② 浮层 chrome（<see cref="IsPointOverCanvasOverlayChrome"/>：卡片胶囊、连线工具条）。
+    /// ⇒ 鼠标呈控件态或停在浮层上时，连线绝不高亮；反过来"还亮的范围"总是可以点选连线的范围。</summary>
     private void UpdateCanvasEdgeHover(Point vp)
     {
-        if (TryHitCanvasHandle(vp, out _, out _))
+        if (IsPointOnCanvasCardOrControl(vp) || IsPointOverCanvasOverlayChrome(vp))
         {
             if (_hoverCanvasEdgeId == null) return;   // 已是空，避免每帧无效重绘
             _hoverCanvasEdgeId = null;
@@ -4722,6 +4874,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 渲染侧据此显出四边连线圆点/四角缩放块与淡描边；指针移开即清空。仅在状态变化时重绘。</summary>
     private void UpdateCanvasNodeHover(Point vp)
     {
+        // 胶囊叠层遮罩：悬停在卡片胶囊 / 连线工具条上时，背后卡片的边框控件（角/边手柄）不显形。
+        // 否则胶囊压在另一张卡片之上时，指针明明在胶囊里，那张背后卡片的控件却亮起、光标也变（用户实测）。
+        if (IsPointOverCanvasOverlayChrome(vp))
+        {
+            if (_hoverCanvasNodeId == null) return;
+            _hoverCanvasNodeId = null;
+            InvalidateOverlayThrottled();
+            return;
+        }
         string? hover = null;
         if (_canvasInputActive && _annotationsVisible &&
             TryHitCanvasNodeForHandles(vp, out var node) && node != null)
@@ -5104,10 +5265,23 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private double _canvasToolbarW, _canvasToolbarH;
     private double _canvasToolbarLeft, _canvasToolbarTop;
     private bool _canvasToolbarPlaced;
+    // 展开 7 色后的【真实宽度】（窄态宽度 _canvasToolbarW 只用于跟踪卡片中心，不重新居中）。
+    private double _canvasToolbarExpandedW;
     // 边工具栏缓存（同卡片工具栏，避免拖动/缩放时每帧 Measure）。
     private double _canvasEdgeToolbarW, _canvasEdgeToolbarH;
     private double _canvasEdgeToolbarLeft, _canvasEdgeToolbarTop;
     private bool _canvasEdgeToolbarPlaced;
+    // 二级颜色胶囊（内联展开到卡片胶囊内）：是否展开（展开时隐藏颜色按钮、显示 7 色圆点、胶囊变宽）。
+    private bool _canvasColorPickerShown;
+    // 二级颜色胶囊圆点尺寸（与 PenOptionsCapsule 同源：悬浮/选中放大 1.6×，负 Margin 抵消布局位移）。
+    private const double CanvasColorDotBaseSize = 16.0;
+    private const double CanvasColorDotEnlargedSize = 16.0 * 1.6;
+    private const double CanvasColorDotBaseRadius = CanvasColorDotBaseSize / 2.0;
+    private const double CanvasColorDotEnlargedRadius = CanvasColorDotEnlargedSize / 2.0;
+    private const double CanvasColorDotEnlargedInset = (CanvasColorDotEnlargedSize - CanvasColorDotBaseSize) / 2.0;
+    // 卡片边框默认灰（DrawCanvasCard 的 CanvasCardStroke）：二级胶囊首位圆点的颜色。
+    private const string CanvasCardDefaultGrayHex = "#8A8F98";
+    private Button? _canvasColorSelectedDot;   // 当前卡片已应用颜色对应的圆点（展开时放大）
 
     /// <summary>卡片拖动中（携带 clamp 后的新位置，MainPage 直接写回模型）。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeDragged;
@@ -5129,6 +5303,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeDeleteRequested;
     /// <summary>连线样式变更（箭头 ArrowStyle / 颜色 EdgeColor，仅填充变更项）。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeStyleChanged;
+    /// <summary>卡片颜色变更（二级颜色胶囊：NodeId + NodeColor）。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasNodeColorChanged;
     /// <summary>从连线手柄拖到空白处：请求在该处新建卡片并与源节点连成一条线
     /// （NodeId=源节点、FromSide=源出边、PageIndex/X/Y=落点页与已 clamp 的左上角）。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeCreateConnectedRequested;
@@ -5146,6 +5322,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         string? id = string.IsNullOrEmpty(nodeId) ? null : nodeId;
         if (_selectedCanvasNodeId == id && _selectedCanvasEdgeId == null) { SyncCanvasOverlayNow(); return; }
+        // 选中目标变了（含取消选中）→ 收起二级颜色胶囊，避免它停在原卡片的旧位置。
+        if (id != _selectedCanvasNodeId) HideCanvasColorPicker();
         _selectedCanvasNodeId = id;
         _selectedCanvasEdgeId = null;   // 与连线选中互斥
         // 选中即置顶，且必须是【永久】的：这里只发请求，真正的重排与落盘由 MainPage 改模型数组完成
@@ -5207,7 +5385,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         string? id = _selectedCanvasNodeId;
         if (string.IsNullOrEmpty(id)) return false;
         _selectedCanvasNodeId = null;
-        if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasCardToolbar();
         if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
         CanvasNodeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });
         InvalidateOverlay();
@@ -5252,10 +5430,26 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             CanvasEditBox.Document.Selection.SetRange(caret, caret);
             ResetCaretBlink();
             ScreenCanvas.Invalidate();
+            // 指针此刻是否在编辑卡上 —— 按【实际坐标】落在卡片屏幕矩形内判定，不再"有落点就假定在卡内"：
+            //  · 带落点（双击卡内 / 单击已选中卡）：落点即指针位置；
+            //  · 不带落点（工具栏「编辑」按钮 / MainPage 新建卡片后进编辑）：用实时指针位置镜像
+            //    `_canvasPointerPos` —— 它由【根级】PointerMoved（构造函数 2745 行 `this.PointerMoved +=`）维护，
+            //    工具栏按钮/编辑框上的移动会一路冒泡到根 ⇒ 指针不动时它就是真值，无需 GetCursorPos 轮询。
+            // 两侧都要判的实证：① 工具栏按钮在卡外，装工字会闪一下（用户报告）；② 新建卡片以双击点为卡心、
+            //    指针必在卡内，判真后当场装工字 ⇒ 不再依赖框架自己何时刷新元素光标（那正是"有时快有时慢"的来源）。
+            // 用卡片【模型矩形】而不是编辑框几何：此刻刚 PositionCanvasEditBox，TransformToVisual 可能还是上一帧的。
+            Point? entryPoint = clickVp;
+            if (entryPoint == null && _canvasPointerValid) entryPoint = _canvasPointerPos;
+            bool entryOnCard = entryPoint is { } ep &&
+                TryGetCanvasNodeScreenRect(node.Id, out var entryRect) &&
+                ep.X >= entryRect.X && ep.X <= entryRect.X + entryRect.Width &&
+                ep.Y >= entryRect.Y && ep.Y <= entryRect.Y + entryRect.Height;
             // 启动"卡内=工字"光标作用域（对齐画笔）：轮询自愈，卡内（含按住/捕获/停下不动）恒工字，
             // 控件区/卡外自动恢复真箭头。放在 Focus 之后避开焦点求值竞态。
-            EnterIbeamScope();
-            try { CursorInterop.SetCursor(CursorInterop.LoadSystemCursor(CursorInterop.IdcIbeam)); } catch { }
+            EnterIbeamScope(entryOnCard);
+            // 强制刷一次工字：只对"指针确实在卡内"的入口做。工具栏按钮在卡外，刷了就会闪一下再被轮询改回来（用户报告）。
+            if (entryOnCard)
+            { try { CursorInterop.SetCursor(CursorInterop.LoadSystemCursor(CursorInterop.IdcIbeam)); } catch { } }
         });
     }
 
@@ -5309,6 +5503,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         else StopCanvasEditCommitTimer();
         _canvasEditNodeId = null;
         _canvasEditControlGesture = false;
+        _canvasEditMenuClickPending = false;
         StopCaretBlink();
         ExitIbeamScope();                                              // 退出编辑态：停工字作用域、恢复系统光标
         CanvasEditBox.OverrideCursor(null);                            // 复位光标覆盖（防残留箭头）
@@ -5330,6 +5525,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         DispatcherQueue.TryEnqueue(() =>
         {
             if (_canvasEditNodeId != null) return; // 期间又进入编辑，不抢焦点
+            // ⚠ 只有焦点【还滞留在】（已折叠的）编辑框上、或已经落空时才交还视口。
+            // 用户已经点中别的控件（工具栏「设置」按钮 / 模式按钮 / 侧边栏…）时绝不抢焦点 ——
+            // 否则会把刚被点开的 Flyout 顶掉，表现为"设置按钮第一次点没反应，第二次才展开"（用户报告）。
+            object? focused = FocusManager.GetFocusedElement(XamlRoot);
+            if (focused != null && !ReferenceEquals(focused, CanvasEditBox)) return;
             if (Viewer != null && Viewer.Focus(FocusState.Programmatic)) return;
             FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
         });
@@ -5365,7 +5565,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
         if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
-        if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasCardToolbar();
         if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
         if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
     }
@@ -5383,9 +5583,19 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
-        _canvasEditNodeId = null;
-        ExitIbeamScope();   // 退出白板模式即退出编辑态：停工字作用域、恢复系统光标
-        CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 直接清 id 的路径也要退订（否则钩子残留）
+        // 编辑态必须走 EndCanvasEdit 正式收尾：它会提交最后一段尚未入史的文字、收起文本菜单，
+        // 并把焦点从（折叠后仍持焦的）编辑框交还视口。
+        // ⚠ 此前是直接 `_canvasEditNodeId = null` —— 编辑框折叠了但**焦点还留在它身上**，切到阅读/画笔模式后
+        //   键盘输入全被这个看不见的控件吃掉：字母键变成往卡片里打字，F/G 之类快捷键失灵（用户报告）。
+        if (_canvasEditNodeId != null)
+        {
+            EndCanvasEdit(commit: true);
+        }
+        else
+        {
+            ExitIbeamScope();   // 退出白板模式即退出编辑态：停工字作用域、恢复系统光标
+            CanvasEditBox.LayoutUpdated -= OnCanvasEditBoxLayoutUpdated;   // 直接清 id 的路径也要退订（否则钩子残留）
+        }
         _selectedCanvasNodeId = null;
         _selectedCanvasEdgeId = null;
         _hoverCanvasNodeId = null;
@@ -5393,7 +5603,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasPointerValid = false;
         if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
         if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
-        if (CanvasCardToolbar != null) CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasCardToolbar();
         if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
         InvalidateOverlay();
     }
@@ -5511,6 +5721,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void BeginCanvasConnection(string nodeId, string side, Point vp)
     {
         _isCanvasConnecting = true;
+        HideCanvasCardToolbar();   // 拉线开始：立即暂隐卡片悬浮胶囊，防止挡住连线过程
         LockCanvasCursor(CanvasIdcArrow, _canvasEditNodeId != null);   // 连线拖拽：锁定箭头光标（编辑态保留系统工字，含指针停下）
         _connFromNodeId = nodeId;
         _connFromSide = side;
@@ -5563,6 +5774,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         if (!_isCanvasConnecting) return false;
         _isCanvasConnecting = false;
+        SyncCanvasOverlayNow();   // 取消连线 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
         _connFromNodeId = null;
         _connTargetNodeId = null;
         _connTargetSide = "";
@@ -5710,9 +5922,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     /// <summary>启动编辑态"卡内=工字"光标作用域（对齐画笔 EnterPenRingMode）：建 25ms 轮询并立刻评估一次。
     /// 轮询式（而非纯事件）：事件漏一条下一拍也会自愈 —— 这是画笔圆环稳定不回退的根本。</summary>
-    private void EnterIbeamScope()
+    /// <param name="pointerOnCard">进入编辑的那一刻，指针是否真的落在编辑卡上。
+    /// ⚠ **绝不能无条件写 true**：进编辑有两条【不带落点】的入口 —— 卡片悬浮工具栏的「编辑」按钮（在卡片外面）
+    /// 与 MainPage 的 <c>BeginCanvasEdit(nodeId)</c>。此时写 true 会让下面的首拍评估当场装上工字（箭头槽替换），
+    /// 指针明明在卡外的按钮上却被刷成工字，下一拍/下一次指针事件才纠正 ⇒ 用户看到的"闪一下又变回来"。
+    /// 由调用方按【落点优先、否则实时指针位置】在卡片屏幕矩形内实测后传入（见 BeginCanvasEdit）。</param>
+    private void EnterIbeamScope(bool pointerOnCard)
     {
-        _canvasPointerOnEditCard = true;   // 进编辑的入口（双击/单击）必然落在卡内
+        _canvasPointerOnEditCard = pointerOnCard;
         if (_ibeamScopeTimer == null)
         {
             _ibeamScopeTimer = DispatcherQueue.CreateTimer();
@@ -5986,6 +6203,229 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         InvalidateOverlay();
     }
 
+    // ---- 卡片二级颜色胶囊（步骤 4）：由卡片胶囊的"颜色"按钮触发 ----
+
+    /// <summary>颜色按钮：切换二级颜色胶囊的展开 / 收起。</summary>
+    private void CanvasColorButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasNodeId == null) return;
+        double oldLeft = _canvasToolbarLeft;
+        if (_canvasColorPickerShown) HideCanvasColorPicker();
+        else ShowCanvasColorPicker();
+        SyncCanvasOverlayNow();   // 展开态按真实宽度做右缘钳制（正常不位移、越界才最小左移）
+        ClearCanvasToolbarHoverIfMoved(oldLeft, sender as Button);
+        RequestCapsuleHoverSyncAfterLayout();   // 先挡迟到事件，再按实时指针权威补判一次
+    }
+
+    /// <summary>颜色圆点：Tag = "#RRGGBB"，7 色一视同仁（首位即卡片边框默认灰 #8A8F98）。</summary>
+    private void CanvasColorDot_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasNodeId == null) return;
+        string hex = (sender as FrameworkElement)?.Tag as string ?? "";
+        CanvasNodeColorChanged?.Invoke(this, new CanvasNodeEventArgs
+        {
+            NodeId = _selectedCanvasNodeId,
+            NodeColor = hex
+        });
+        double oldLeft = _canvasToolbarLeft;
+        HideCanvasColorPicker();
+        SyncCanvasOverlayNow();   // 收起回窄态居中（若之前被钳制左移过，这里复原）
+        // ⚠ 传入的是圆点：圆点不归 ButtonVisualOverride 接管 ⇒ 不会触发任何冷处理，
+        // 收起后指针若恰好停在其中一颗胶囊按钮上，悬浮光效照常立刻亮起（用户报告的问题）。
+        ClearCanvasToolbarHoverIfMoved(oldLeft, sender as Button);
+        RequestCapsuleHoverSyncAfterLayout();   // 收回后按实时指针权威补判一次（同上）
+        InvalidateOverlay();
+    }
+
+    /// <summary>展开二级颜色胶囊：颜色按钮保留（作二次点击收起开关），7 色圆点在它右侧展开。
+    /// 量一次【展开态真实宽度】缓存起来，供定位时按真实宽度做右缘钳制（只在越界时左移，正常不位移）。
+    /// ⚠ DesiredSize 含 Margin：测前把 Margin 归零，否则上次定位的 left/top 会被算进宽度、测出畸大值。</summary>
+    private void ShowCanvasColorPicker()
+    {
+        if (CanvasColorDotPanel == null || CanvasCardToolbar == null) return;
+        CanvasColorDotPanel.Visibility = Visibility.Visible;
+        _canvasColorPickerShown = true;
+        SyncCanvasColorDotSelection();   // 展开时把"当前卡片已应用颜色"对应的圆点放大
+        var saved = CanvasCardToolbar.Margin;
+        CanvasCardToolbar.Margin = new Thickness(0);
+        CanvasCardToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        _canvasToolbarExpandedW = CanvasCardToolbar.DesiredSize.Width;
+        CanvasCardToolbar.Margin = saved;
+    }
+
+    private void HideCanvasColorPicker()
+    {
+        if (CanvasColorDotPanel == null) return;
+        CanvasColorDotPanel.Visibility = Visibility.Collapsed;
+        _canvasColorPickerShown = false;
+    }
+
+    /// <summary>展开/收起（含钳制）导致胶囊实际位移后，对<b>刚才被按下的那颗按钮</b>开启 hover 冷处理 ——
+    /// 挡住 ButtonBase 松手约 380ms 后补发的那次"圆谎" PointerEntered（带松手时的旧坐标），否则会把已滑出
+    /// 光标下方的按钮重新点亮。窗口只由该按钮自己的真实 PointerMoved 提前解除（900ms 兜底）。
+    /// <para>⚠ 作用域必须收窄到<b>被点的那一颗</b>，不能是整个胶囊子树：那两次假事件只可能发给被按的按钮。
+    /// 早先按子树全冷处理，导致点圆点收起后（圆点不归接管、本无假事件），胶囊里 3 颗按钮也被禁亮 900ms
+    /// ⇒ 指针若正好停在某颗上，悬浮光效要等一会才亮（用户报告）。</para>
+    /// <para>pressed 不必管：它由 IsPressed 属性回调在松手时自行回落。</para></summary>
+    private void ClearCanvasToolbarHoverIfMoved(double oldLeft, Button? clicked)
+    {
+        if (Math.Abs(_canvasToolbarLeft - oldLeft) > 0.5)
+            ButtonVisualOverride.SuppressHoverFor(clicked);
+    }
+
+    // ---- 胶囊位移后按"最后一次指针位置"补判 hover ----
+    // 背景：WinUI 不会因为布局变化而给"刚滑到静止指针下方"的元素补发 PointerEntered/Moved，
+    // 几何驱动（只在真实移动时重算）也就没有机会跑 ⇒ 悬浮底色要等它某次迟到的重新命中测试才亮。
+    // 故记下胶囊内的最后指针位置（CanvasOverlay 坐标，点击前必然已被 PointerMoved 刷新），
+    // 在本次布局落定后（LayoutUpdated，arrange 已完成、TransformToVisual 已是新位置）补判一次。
+
+    private Point? _canvasChromePointer;
+    private bool _capsuleHoverSyncArmed;   // 已挂上"布局落定后补判 hover"的双通道回调（见 RequestCapsuleHoverSyncAfterLayout）
+
+    private void CanvasCardToolbar_PointerMoved(object sender, PointerRoutedEventArgs e)
+        => RecordCanvasChromePointer(e);
+
+    private void CanvasCardToolbar_PointerPressed(object sender, PointerRoutedEventArgs e)
+        => RecordCanvasChromePointer(e);
+
+    private void RecordCanvasChromePointer(PointerRoutedEventArgs e)
+    {
+        if (CanvasOverlay == null) return;
+        try { _canvasChromePointer = e.GetCurrentPoint(CanvasOverlay).Position; }
+        catch { /* 坐标系不可达（元素脱树）时保持旧值 */ }
+    }
+
+    /// <summary>请求在【本次布局落定后】补判一次胶囊 3 颗按钮的 hover（一次性，触发即退订）。
+    /// <para>双保险：① <c>LayoutUpdated</c>（布局落定即触发，同帧内）；② 下一帧 <c>CompositionTarget.Rendering</c>
+    /// （渲染必然在布局之后）—— 展开路径里 <c>ShowCanvasColorPicker</c> 手动 <c>Measure</c> 过，会把"待测量"
+    /// 标志清掉、框架可能认为无需再布局，单靠 ① 有扑空风险。两者都调用同一个<b>幂等</b>的补判，重复一次无副作用。</para></summary>
+    private void RequestCapsuleHoverSyncAfterLayout()
+    {
+        if (CanvasCardToolbar == null || _canvasChromePointer == null) return;
+        if (!_capsuleHoverSyncArmed)
+        {
+            _capsuleHoverSyncArmed = true;
+            CanvasCardToolbar.LayoutUpdated += CanvasCardToolbar_LayoutUpdatedOnce;
+            Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += CompositionTarget_RenderingOnce;
+        }
+        CanvasCardToolbar.InvalidateArrange();   // 促成一轮布局，让 ① 尽量同帧触发
+    }
+
+    private void CanvasCardToolbar_LayoutUpdatedOnce(object? sender, object e) => FinishCapsuleHoverSync();
+
+    private void CompositionTarget_RenderingOnce(object? sender, object e) => FinishCapsuleHoverSync();
+
+    /// <summary>收尾：退订两条通道并按记录的实时指针补判一次 hover。</summary>
+    private void FinishCapsuleHoverSync()
+    {
+        if (!_capsuleHoverSyncArmed) return;
+        _capsuleHoverSyncArmed = false;
+        if (CanvasCardToolbar != null)
+            CanvasCardToolbar.LayoutUpdated -= CanvasCardToolbar_LayoutUpdatedOnce;
+        Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= CompositionTarget_RenderingOnce;
+        ApplyCapsuleHoverFromRecordedPointer();
+    }
+
+    /// <summary>按记录下的实时指针位置，判定胶囊 3 颗按钮各自是否被指针覆盖，并<b>权威指派</b> hover。</summary>
+    private void ApplyCapsuleHoverFromRecordedPointer()
+    {
+        if (_canvasChromePointer is not Point p || CanvasOverlay == null) return;
+        ApplyCapsuleHoverOne(CanvasEditButton, p);
+        ApplyCapsuleHoverOne(CanvasColorButton, p);
+        ApplyCapsuleHoverOne(CanvasDeleteButton, p);
+    }
+
+    private void ApplyCapsuleHoverOne(Button? button, Point p)
+    {
+        if (button == null) return;
+        bool inside = false;
+        if (button.Visibility == Visibility.Visible && button.ActualWidth > 0 && button.ActualHeight > 0)
+        {
+            try
+            {
+                var origin = button.TransformToVisual(CanvasOverlay).TransformPoint(new Point(0, 0));
+                inside = p.X >= origin.X && p.X < origin.X + button.ActualWidth
+                      && p.Y >= origin.Y && p.Y < origin.Y + button.ActualHeight;
+            }
+            catch { inside = false; }   // 元素已脱树（窗口关闭 / 容器回收）期间按"不在内"处理
+        }
+        ButtonVisualOverride.ForceHover(button, inside);
+    }
+
+    // ---- 二级颜色胶囊圆点反馈（照抄 PenOptionsCapsule）：悬浮放大、选中(当前卡片已应用色)放大 ----
+
+    private void SetCanvasColorDotSize(Button b, bool enlarged)
+    {
+        b.Width = b.Height = enlarged ? CanvasColorDotEnlargedSize : CanvasColorDotBaseSize;
+        b.CornerRadius = new CornerRadius(enlarged ? CanvasColorDotEnlargedRadius : CanvasColorDotBaseRadius);
+        double inset = enlarged ? CanvasColorDotEnlargedInset : 0.0;
+        b.Margin = new Thickness(-inset);
+    }
+
+    private void RefreshCanvasColorDotState(Button b)
+        => SetCanvasColorDotSize(b, b == _canvasColorSelectedDot);
+
+    private void CanvasColorDot_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Button b) SetCanvasColorDotSize(b, true);
+    }
+
+    private void CanvasColorDot_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Button b) RefreshCanvasColorDotState(b);
+    }
+
+    /// <summary>把"当前卡片已应用颜色"对应的圆点置为选中(放大)态。7 色一视同仁：只放大、不改底色。</summary>
+    private void HighlightCanvasColorDot(Button? selected)
+    {
+        _canvasColorSelectedDot = selected;
+        if (CanvasColorDotPanel == null) return;
+        foreach (var child in CanvasColorDotPanel.Children)
+        {
+            if (child is Button b) RefreshCanvasColorDotState(b);
+        }
+    }
+
+    /// <summary>展开时按当前选中卡片的颜色高亮对应圆点。7 色一视同仁按 Tag 比较；
+    /// 未着色（空）等价于默认灰 #8A8F98，故默认卡片高亮首位灰圆点。</summary>
+    private void SyncCanvasColorDotSelection()
+    {
+        if (CanvasColorDotPanel == null) return;
+        string current = CanvasCardDefaultGrayHex;   // 空/未着色 = 默认灰
+        if (_selectedCanvasNodeId != null)
+        {
+            lock (_canvasLock)
+            {
+                foreach (var n in _canvasNodes)
+                    if (string.Equals(n.Id, _selectedCanvasNodeId, StringComparison.Ordinal))
+                    { current = string.IsNullOrEmpty(n.Color) ? CanvasCardDefaultGrayHex : n.Color; break; }
+            }
+        }
+        Button? match = null;
+        foreach (var child in CanvasColorDotPanel.Children)
+        {
+            if (child is Button b && b.Tag?.ToString() is string tag &&
+                string.Equals(tag, current, StringComparison.OrdinalIgnoreCase))
+            { match = b; break; }
+        }
+        HighlightCanvasColorDot(match);
+    }
+
+    /// <summary>给 7 个颜色圆点逐个挂悬浮/离开事件（悬浮预览放大用）。绝不在此写 element.Resources
+    /// （运行时写 Resources 在主题切换会闪退，2026-09-29 崩溃根因；底色档已在 XAML 解析期逐按钮声明）。</summary>
+    private void AttachCanvasColorDotHover()
+    {
+        if (CanvasColorDotPanel == null) return;
+        foreach (var child in CanvasColorDotPanel.Children)
+        {
+            if (child is Button b)
+            {
+                b.PointerEntered += CanvasColorDot_PointerEntered;
+                b.PointerExited += CanvasColorDot_PointerExited;
+            }
+        }
+    }
+
     /// <summary>按选中连线的实际样式刷新三态箭头按钮的强调态（选中态=不透明，未选=半透明）。</summary>
     private void RefreshEdgeArrowButtons()
     {
@@ -6018,7 +6458,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         // 编辑态手势（拖滚动条 / 拖角缩放 / 拖边连线）期间系统会把焦点从 RichEditBox 夺走：这**不算**"退出编辑"。
         // ⚠ 必须覆盖【全部】手势 —— 否则缩放/连线中途 `EndCanvasEdit` 会清掉手势状态、并折叠编辑框导致手势抖动。
-        if (AnyCanvasGestureActive || _canvasEditControlGesture)
+        // 菜单项点击同样算：菜单摆在卡片下方时，点它本身就在编辑框之外，焦点必然被挪走 —— 但那只是"执行菜单命令"，
+        // 不能因此结束编辑（否则全选/剪切刚做完就退出编辑，选区看不见，等于动作没做）。
+        if (AnyCanvasGestureActive || _canvasEditControlGesture || _canvasEditMenuClickPending)
         {
             // 焦点被夺走会让插入光标停止闪烁（DrawCanvasEditCaret 以 FocusState 为前提）。用法是"控件交互期间
             // 编辑态零变动、光标照常闪烁"，故这里把焦点重申回编辑框：焦点与指针捕获互不相干，交还焦点不影响
@@ -6061,6 +6503,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void CanvasEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // 文本菜单开着时：Esc 只收起菜单（不退出编辑）；按其他任何键都视为继续输入/移动光标，菜单一并收起。
+        if (_canvasEditMenuOpen)
+        {
+            if (e.Key == VirtualKey.Escape)
+            {
+                e.Handled = true;
+                HideCanvasEditContextMenu();
+                return;
+            }
+            HideCanvasEditContextMenu();
+        }
         // Esc = 结束编辑（提交当前文本）；Enter 交给 RichEditBox 原生换行（AcceptsReturn=true）。
         if (e.Key == VirtualKey.Escape)
         {
@@ -6257,6 +6710,388 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasEditBox.Document.Selection.Collapse(false);   // 光标落到插入内容之后
     }
 
+    // ───────────────────── 编辑态文本右键菜单（自绘，非弹层）─────────────────────
+    // 为什么不挂 ContextFlyout / MenuFlyout：任何 Flyout 都是独立弹层，一弹出就把焦点从编辑框拿走
+    // → CanvasEditBox_LostFocus → EndCanvasEdit(commit)，表现为"右键后拖选消失、菜单项作用在已折叠的
+    // 隐形宿主上"。所以菜单做在 CanvasOverlay 里（与编辑框同一棵可视树），且整份菜单没有一个可聚焦元素
+    // （行是 Grid 不是 Button）⇒ 编辑框全程持有焦点，选区/光标/IME 状态零变动。
+
+    /// <summary>菜单是否开着。只用于收尾判断（按下/按键/视图变化时收起），不参与焦点逻辑。</summary>
+    private bool _canvasEditMenuOpen;
+
+    /// <summary>正在执行一次菜单项点击。这段时间内的失焦【不算退出编辑】——
+    /// 点击行为发生在编辑框之外（菜单可以摆在卡片下方），框架会把焦点从编辑框挪走，
+    /// 若照常 EndCanvasEdit 就会"全选刚做完就退出编辑、选区看不见"，等于动作没做（用户报告）。
+    /// 与 _canvasEditControlGesture 同一思路：交互期间编辑态零变动。</summary>
+    private bool _canvasEditMenuClickPending;
+
+    // ---- 拖选尾巴识别：左键"有位移的按下"之后的这一次 ContextMenuOpening 是选择手势的尾巴，不是要菜单 ----
+    private Point _canvasEditPressPoint;
+    private bool _canvasEditPressMoved;
+    private long _canvasEditLastLeftInteractTick;                 // 最近一次左键按下/抬起
+    private bool _canvasEditLastPressWasRight;                    // 最近一次按下是不是右键（含笔筒键）
+    private Microsoft.UI.Input.PointerDeviceType _canvasEditLastPressDevice;
+    private static readonly long CanvasEditDragTailTicks = System.Diagnostics.Stopwatch.Frequency / 4;   // 250ms
+
+    // ---- 菜单落点：右键/触控按下时就地记下（覆盖层坐标）----
+    // 为什么不靠 ContextMenuEventArgs.CursorLeft/Top：WinUI 3 里它不是"相对控件"，
+    // 直接当控件坐标用会把菜单钳到视口角落（用户报告）。按下点的坐标空间是确定的（GetCurrentPoint(CanvasOverlay)
+    // 就是菜单 Margin 用的那套），拿它摆位一定准。
+    private Point _canvasEditMenuAnchor;
+    private bool _canvasEditMenuAnchorValid;
+    private long _canvasEditMenuAnchorTick;      // 记下时刻：只认"刚刚那一下"的按下（触控长按要等 ~0.6s 才请求菜单，窗口不能太窄）
+    private static readonly long CanvasEditMenuAnchorTicks = System.Diagnostics.Stopwatch.Frequency * 2;   // 2s
+
+    private bool IsCanvasEditLeftInteractRecent() =>
+        _canvasEditLastLeftInteractTick != 0 &&
+        System.Diagnostics.Stopwatch.GetTimestamp() - _canvasEditLastLeftInteractTick < CanvasEditDragTailTicks;
+
+    /// <summary>鼠标左键此刻是否按着（VK_LBUTTON）。包 try：鼠标键非常规入参，不支持时只当"没按着"。</summary>
+    private static bool IsCanvasLeftButtonDown()
+    {
+        try
+        {
+            return (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.LeftButton)
+                    & Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>根级按下监听（handledEventsToo 常驻）：菜单开着时，**菜单外的任何按下都立即收起**。
+    /// 挂在根上而不是 Viewer 上，是因为卡片胶囊 / 连线工具条这类子控件会自己把 PointerPressed 标 Handled，
+    /// 事件根本到不了 Viewer（用户报告"点工具栏不关菜单"）。</summary>
+    private void OnRootPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        // 先记落点，与菜单是否已开无关：右键 / 触控长按随后请求菜单时，要靠它把菜单摆到"按下的那一点"。
+        RecordCanvasEditMenuAnchor(e);
+        if (!_canvasEditMenuOpen) return;
+        var pt = e.GetCurrentPoint(Viewer);
+        if (IsPointInsideVisibleElement(CanvasEditContextMenu, pt.Position)) return;   // 点在菜单内 → 交给菜单
+        HideCanvasEditContextMenu();
+    }
+
+    /// <summary>记下用于摆菜单的按下点（覆盖层坐标）。只认右键 / 触控 / 笔：左键按下是"选文本"，
+    /// 即便随后真把菜单调起来也该压在激活端或卡片内侧，不该拿它摆位。</summary>
+    private void RecordCanvasEditMenuAnchor(PointerRoutedEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        try
+        {
+            var pt = e.GetCurrentPoint(CanvasOverlay);
+            if (e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse
+                && !pt.Properties.IsRightButtonPressed) return;
+            // 只认落在编辑框上的点：卡外的右键会结束编辑（菜单根本不会弹），记下来只会污染下一次键盘触发。
+            if (!IsPointInsideVisibleElement(CanvasEditBox, pt.Position)) return;
+            SetCanvasEditMenuAnchor(pt.Position);
+        }
+        catch { _canvasEditMenuAnchorValid = false; }
+    }
+
+    /// <summary>无条件把落点刷成当前指针位置（松手时用：那一刻右键已经抬起，按键判据不再成立）。</summary>
+    private void RefreshCanvasEditMenuAnchor(PointerRoutedEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        try { SetCanvasEditMenuAnchor(e.GetCurrentPoint(CanvasOverlay).Position); }
+        catch { _canvasEditMenuAnchorValid = false; }
+    }
+
+    private void SetCanvasEditMenuAnchor(Point p)
+    {
+        _canvasEditMenuAnchor = p;
+        _canvasEditMenuAnchorValid = true;
+        _canvasEditMenuAnchorTick = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    /// <summary>落点是否"刚刚那一下按下"留下的：右键/触控请求与按下几乎同拍，键盘请求（Shift+F10）
+    /// 根本没有按下 ⇒ 不能用陈旧点，否则菜单会回到上一次右键的位置。</summary>
+    private bool IsCanvasEditMenuAnchorFresh() =>
+        _canvasEditMenuAnchorValid &&
+        System.Diagnostics.Stopwatch.GetTimestamp() - _canvasEditMenuAnchorTick < CanvasEditMenuAnchorTicks;
+
+    /// <summary>右键/键盘请求弹出文本菜单。**必须在 ContextMenuOpening 里拦**：RichEditBox 的内置菜单走的是
+    /// 控件自己的这个事件；实测在 ContextRequested 里 Handled=true 完全无效（系统菜单照出）。
+    /// 触发来源与系统一致：右键 / Shift+F10 / Application 菜单键 / 触控长按都弹。
+    /// 唯一例外：**左键拖选结束时框架也会补发一次本事件** —— 那不是"要菜单"，要压掉（见下）。</summary>
+    private void CanvasEditBox_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        e.Handled = true;   // ← 系统菜单不再出现的唯一开关
+        // 拖选尾巴：框架在"左键拖选并松开"之后也会补发一次本事件 —— 那不是"要菜单"（用户报告）。
+        // 判据与系统语义对齐：
+        //   · 最近一次按下是右键（含笔筒键）⇒ 正当请求；
+        //   · 触控 / 笔 ⇒ 长按本来就该弹（"拖选"是鼠标专属的歧义）；
+        //   · 距最近一次左键交互已超过 250ms（或从未有过）⇒ 键盘触发（Shift+F10 / Application 键）；
+        //   · 其余（刚拖选完、或鼠标左键还按着）⇒ 压掉。
+        bool dragTail = !_canvasEditLastPressWasRight
+            && _canvasEditLastPressDevice == Microsoft.UI.Input.PointerDeviceType.Mouse
+            && _canvasEditPressMoved
+            && IsCanvasEditLeftInteractRecent();
+        bool mouseDragging = _canvasEditLastPressDevice == Microsoft.UI.Input.PointerDeviceType.Mouse
+            && IsCanvasLeftButtonDown();
+        if (dragTail || mouseDragging)
+        {
+            _canvasEditPressMoved = false;
+            return;
+        }
+        Point pos;
+        // ① 首选：刚刚那一下右键/触控的按下点（坐标空间确定 = 菜单 Margin 用的同一套）。
+        if (IsCanvasEditMenuAnchorFresh())
+        {
+            pos = _canvasEditMenuAnchor;
+        }
+        // ② 其次：键盘触发（Shift+F10 / Application 键）时按 CursorLeft/Top 多原点自校验。
+        else if (!TryGetCanvasEditMenuAnchor(e, out pos))
+        {
+            // ③ 拿不到可信落点：指针若仍在卡上就用它，否则退到卡片左上角内侧 ——
+            //    绝不把菜单甩到视口角落（那是把窗口/屏幕坐标当成控件坐标算出来的典型症状）。
+            pos = (_canvasPointerValid && IsPointInsideVisibleElement(CanvasEditBox, _canvasPointerPos))
+                ? _canvasPointerPos
+                : CanvasEditBoxOriginInOverlay(12, 12);
+        }
+        _canvasEditMenuAnchorValid = false;   // 一次请求只消费一次
+        ShowCanvasEditContextMenu(pos);
+    }
+
+    /// <summary>编辑框左上角在覆盖层坐标系里的位置（可加偏移）。抛异常一律按 (8,8) 兜底。</summary>
+    private Point CanvasEditBoxOriginInOverlay(double dx, double dy)
+    {
+        try
+        {
+            var r = CanvasEditBox.TransformToVisual(CanvasOverlay)
+                .TransformBounds(new Rect(0, 0, CanvasEditBox.ActualWidth, CanvasEditBox.ActualHeight));
+            return new Point(r.X + dx, r.Y + dy);
+        }
+        catch { return new Point(8, 8); }
+    }
+
+    /// <summary>菜单落点。`CursorLeft/CursorTop` 在 WinUI 3 里**不是**"相对控件"的坐标（UWP 文档那套写法
+    /// 在这里会算飞，表现为菜单被钳到视口右下角），故用【多候选 + 必须落在编辑框内】自校验：
+    /// 分别以编辑框 / 本控件 / 窗口根为原点换算一次，谁落在编辑框矩形（外扩 16 DIP）里谁可信。
+    /// 都不在 ⇒ 返回 false，调用方退回实时指针位置。</summary>
+    private bool TryGetCanvasEditMenuAnchor(ContextMenuEventArgs e, out Point anchor)
+    {
+        anchor = default;
+        double cx = e.CursorLeft, cy = e.CursorTop;
+        if (double.IsNaN(cx) || double.IsNaN(cy)) return false;
+        Rect cardRect;
+        try
+        {
+            var r = CanvasEditBox.TransformToVisual(CanvasOverlay)
+                .TransformBounds(new Rect(0, 0, CanvasEditBox.ActualWidth, CanvasEditBox.ActualHeight));
+            if (r.Width <= 0 || r.Height <= 0) return false;
+            cardRect = new Rect(r.X - 16, r.Y - 16, r.Width + 32, r.Height + 32);
+        }
+        catch { return false; }
+        var origins = new UIElement?[] { CanvasEditBox, this, XamlRoot?.Content as UIElement };
+        foreach (var origin in origins)
+        {
+            if (origin == null) continue;
+            try
+            {
+                var p = origin.TransformToVisual(CanvasOverlay).TransformPoint(new Point(cx, cy));
+                if (cardRect.Contains(p)) { anchor = p; return true; }
+            }
+            catch { }
+        }
+        return false;
+    }
+
+    private void ShowCanvasEditContextMenu(Point pos)
+    {
+        if (CanvasEditContextMenu == null || _canvasEditNodeId == null) return;
+        // 文案每次弹出时取（语言可在运行期变化；弹出不是高频路径，字典查找无感）。
+        CanvasEditMenuCutText.Text = GlanceRX.Services.LocalizationService.Get("CanvasCut");
+        CanvasEditMenuCopyText.Text = GlanceRX.Services.LocalizationService.Get("CanvasCopy");
+        CanvasEditMenuPasteText.Text = GlanceRX.Services.LocalizationService.Get("CanvasPaste");
+        CanvasEditMenuSelectAllText.Text = GlanceRX.Services.LocalizationService.Get("CanvasSelectAll");
+        // 可用性：无选区 → 剪切/复制灰掉；剪贴板无文本 → 粘贴灰掉；空文档 → 全选灰掉。
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuCut, CanvasEditHasSelection());
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuCopy, CanvasEditHasSelection());
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuPaste, CanvasClipboardHasText());
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuSelectAll, _canvasEditText.Length > 0);
+        CanvasEditContextMenu.Visibility = Visibility.Visible;
+        // 先量出实际尺寸再钳制落点：菜单贴右/贴下会溢出视口。UpdateLayout 是同步的，
+        // 这里只在"用户右键"这一下发生，不在绘制/滚动路径上。
+        CanvasEditContextMenu.UpdateLayout();
+        double w = CanvasEditContextMenu.ActualWidth > 0 ? CanvasEditContextMenu.ActualWidth : 192;
+        double h = CanvasEditContextMenu.ActualHeight > 0 ? CanvasEditContextMenu.ActualHeight : 152;
+        double maxX = Math.Max(4, CanvasOverlay.ActualWidth - w - 4);
+        double maxY = Math.Max(4, CanvasOverlay.ActualHeight - h - 4);
+        CanvasEditContextMenu.Margin = new Thickness(
+            Math.Clamp(pos.X, 4, maxX), Math.Clamp(pos.Y, 4, maxY), 0, 0);
+        _canvasEditMenuOpen = true;
+    }
+
+    private void HideCanvasEditContextMenu()
+    {
+        if (CanvasEditContextMenu == null) return;
+        _canvasEditMenuOpen = false;
+        CanvasEditContextMenu.Visibility = Visibility.Collapsed;
+        // 清悬停底色：点中某一行会把它连同菜单一起 Collapsed，那一行收不到 PointerExited，
+        // 不收的话下次弹出会带着上一次的高亮。
+        SetCanvasEditMenuRowHover(CanvasEditMenuCut, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuCopy, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuPaste, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuSelectAll, false);
+    }
+
+    /// <summary>菜单项可用性用 Opacity 表达（1 = 可用 / 0.4 = 灰掉）：行是 Grid（不可聚焦），
+    /// 灰掉只影响观感与是否执行，不引入额外的状态字段。</summary>
+    private static void SetCanvasEditMenuItemEnabled(Grid row, bool enabled)
+    {
+        if (row == null) return;
+        row.Opacity = enabled ? 1.0 : 0.4;
+    }
+
+    private static bool IsCanvasEditMenuItemEnabled(Grid row) => row != null && row.Opacity >= 0.99;
+
+    /// <summary>悬停底色：每行第一个子元素就是那块置底的 Border（Opacity 0/1 切换；
+    /// 颜色来自主题资源，深浅主题都不用另配）。</summary>
+    private static void SetCanvasEditMenuRowHover(Grid row, bool on)
+    {
+        if (row != null && row.Children.Count > 0 && row.Children[0] is Border hover)
+            hover.Opacity = on ? 1.0 : 0.0;
+    }
+
+    private void CanvasEditMenuItem_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Grid row && IsCanvasEditMenuItemEnabled(row)) SetCanvasEditMenuRowHover(row, true);
+    }
+
+    private void CanvasEditMenuItem_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Grid row) SetCanvasEditMenuRowHover(row, false);
+    }
+
+    /// <summary>菜单内任何按下都在此吞掉（含右键）：漏到画布会触发右键缩放、左键还会结束编辑。</summary>
+    private void CanvasEditContextMenu_PointerPressed(object sender, PointerRoutedEventArgs e) => e.Handled = true;
+
+    private void CanvasEditMenuItem_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (!e.GetCurrentPoint(CanvasEditContextMenu).Properties.IsLeftButtonPressed) return;   // 只认左键
+        if (sender is not Grid row || !IsCanvasEditMenuItemEnabled(row) || row.Tag is not string action) return;
+        // 菜单可以摆在卡片下方，点菜单本身就在编辑框之外 —— 框架会把焦点从编辑框挪走。先立"点击进行中"标记，
+        // 让 CanvasEditBox_LostFocus 这段时间内不结束编辑（否则"全选刚做完就退出编辑、选区看不见"，等于没做）。
+        MarkCanvasEditMenuClickPending();
+        // 先执行、后收起：执行期间菜单仍可见，万一同一次按下的后续处理落到 Viewer，
+        // IsPointOverCanvasOverlayChrome 还能把这次按下判成浮层、提前返回（多一道保险）。
+        ExecuteCanvasEditMenuAction(action);
+        HideCanvasEditContextMenu();
+    }
+
+    /// <summary>"菜单项点击进行中"窗口（一次点击的按下→抬起跨度）。用一次性定时器收尾而不是队列尾：
+    /// 焦点可能在抬起的另一拍才被挪走，队列尾太早。</summary>
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _canvasEditMenuClickTimer;
+
+    private void MarkCanvasEditMenuClickPending()
+    {
+        _canvasEditMenuClickPending = true;
+        _canvasEditMenuClickTimer ??= DispatcherQueue.CreateTimer();
+        _canvasEditMenuClickTimer.Stop();
+        _canvasEditMenuClickTimer.Interval = TimeSpan.FromMilliseconds(500);
+        _canvasEditMenuClickTimer.IsRepeating = false;
+        _canvasEditMenuClickTimer.Tick -= OnCanvasEditMenuClickTick;
+        _canvasEditMenuClickTimer.Tick += OnCanvasEditMenuClickTick;
+        _canvasEditMenuClickTimer.Start();
+    }
+
+    private void OnCanvasEditMenuClickTick(object? sender, object e) => _canvasEditMenuClickPending = false;
+
+    private void ExecuteCanvasEditMenuAction(string action)
+    {
+        if (_canvasEditNodeId == null) return;
+        try
+        {
+            switch (action)
+            {
+                case "cut":
+                    CopyCanvasSelectionToClipboard();
+                    // 选区替换成空串 = 删除选区（与粘贴用同一 API，语义一致）
+                    CanvasEditBox.Document.Selection.SetText(Microsoft.UI.Text.TextSetOptions.None, "");
+                    break;
+                case "copy":
+                    CopyCanvasSelectionToClipboard();
+                    break;
+                case "paste":
+                    PasteCanvasClipboardText();
+                    break;
+                case "selectall":
+                {
+                    int len = GetCanvasEditText().Length;
+                    var sel = CanvasEditBox.Document.Selection;
+                    // 先把【活动端】放到文末，再把另一端拉回文首 ⇒ 选中全文，且插入光标停在末尾。
+                    // 直接 SetRange(0, len) 会让框架把活动端留在 start，全选后光标跑到文字开头（用户报告）。
+                    sel.SetRange(len, len);
+                    sel.StartPosition = 0;
+                    // 自绘光标的活动端是"与上一帧比较"推出来的：清掉基线，下一帧直接取 End（见 DrawCanvasEditCaret）。
+                    _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;
+                    break;
+                }
+            }
+        }
+        catch { }
+        // 选区/文字变化不经过 TextChanged（全选只动选区）⇒ 这里统一补一次重绘与光标重置。
+        ResetCaretBlink();
+        ScreenCanvas.Invalidate();
+    }
+
+    private bool CanvasEditHasSelection()
+    {
+        try
+        {
+            var sel = CanvasEditBox.Document.Selection;
+            return Math.Abs(sel.EndPosition - sel.StartPosition) > 0;
+        }
+        catch { return false; }
+    }
+
+    private static bool CanvasClipboardHasText()
+    {
+        try
+        {
+            return Windows.ApplicationModel.DataTransfer.Clipboard.GetContent()
+                .Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>复制选区为【纯文本】：TOM 的段落符是 \r，剪贴板要 \r\n（与粘贴端的反向归一同源）。</summary>
+    private void CopyCanvasSelectionToClipboard()
+    {
+        string text;
+        try { text = CanvasEditBox.Document.Selection.Text ?? ""; } catch { return; }
+        if (text.Length == 0) return;
+        try
+        {
+            var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+            package.SetText(text.Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", "\r\n"));
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+            Windows.ApplicationModel.DataTransfer.Clipboard.Flush();   // 关掉应用后剪贴板内容仍可用
+        }
+        catch { }
+    }
+
+    /// <summary>粘贴一律按纯文本（与 CanvasEditBox_Paste 同一口径，绝不把 RTF/HTML 带进卡片）。</summary>
+    private async void PasteCanvasClipboardText()
+    {
+        string text;
+        try
+        {
+            var data = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
+            if (!data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text)) return;
+            text = await data.GetTextAsync();
+        }
+        catch { return; }
+        // await 期间编辑可能已结束（用户按 Esc / 点了别处）：此时绝不往文档里写
+        if (_canvasEditNodeId == null || string.IsNullOrEmpty(text)) return;
+        CanvasEditBox.Document.Selection.SetText(Microsoft.UI.Text.TextSetOptions.None,
+            text.Replace("\r\n", "\r").Replace('\n', '\r'));
+        CanvasEditBox.Document.Selection.Collapse(false);
+        ResetCaretBlink();
+        ScreenCanvas.Invalidate();
+    }
+
     /// <summary>把编辑框当前文本作为一步提交（不关闭编辑框）；与上次提交相同则忽略。
     /// 文本未变时 MainPage 侧也会自动忽略，这里提前判断避免无谓事件。</summary>
     private void FlushCanvasEditText()
@@ -6308,27 +7143,39 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             if (editing) return;   // 编辑中：编辑框已摆好，别把整体藏掉
             CanvasOverlay.Visibility = Visibility.Collapsed;
-            CanvasCardToolbar.Visibility = Visibility.Collapsed;
+            HideCanvasCardToolbar();
             CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
             return;
         }
 
         CanvasOverlay.Visibility = Visibility.Visible;
-        CanvasCardToolbar.Visibility = Visibility.Visible;   // 编辑态也保持显示（摆位随卡片走；用户要求）
+        ShowCanvasCardToolbar();   // 编辑态也保持显示（摆位随卡片走；用户要求）
         CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
         // 浮动控件尺寸固定（两颗按钮），测一次即缓存：拖动时每次指针事件都会走到这里，
         // 重复 Measure 会白白触发布局。位置未变（<0.5px）也不再写 Margin，进一步省掉无效布局。
         if (_canvasToolbarW <= 0)
         {
+            // ⚠ Measure 的 DesiredSize【含 Margin】：胶囊上次定位写入的 (left,top) 会被算进宽高，
+            //    展开/收起后重新 Measure 就会得到畸大尺寸 ⇒ left/top 被钳到视口左上、看起来"脱离卡片"。
+            //    故测前先把 Margin 归零、并强制下方重新落位（_canvasToolbarPlaced=false）。
+            CanvasCardToolbar.Margin = new Thickness(0);
+            _canvasToolbarPlaced = false;
             CanvasCardToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             var measured = CanvasCardToolbar.DesiredSize;
             _canvasToolbarW = measured.Width;
             _canvasToolbarH = measured.Height;
         }
-        double szW = _canvasToolbarW, szH = _canvasToolbarH;
+        double szW = _canvasToolbarW, szH = _canvasToolbarH;   // 窄态宽度：用于"跟踪卡片中心"（展开时不重新居中）
+        // 展开 7 色时右缘钳制要用【展开态真实宽】：否则越界时内容被视口截断、圆角还在，观感很怪。
+        double clampW = (_canvasColorPickerShown && _canvasToolbarExpandedW > 0) ? _canvasToolbarExpandedW : szW;
         double left = rect.X + rect.Width / 2.0 - szW / 2.0;
-        double top = rect.Y - szH - CanvasToolbarGap;
-        left = Math.Clamp(left, 4, Math.Max(4, _vpW - szW - 4));
+        // 与卡片顶边边框控件（缩放手柄）的命中带分离：手柄带屏幕高 ≈ clamp(CanvasHandleHitRadius*z, 10, 26) DIP，
+        // 工具栏底部须高于该带 + 余量，否则 XAML 工具栏会盖住手柄命中区 ⇒ 指针事件被吞、光标错乱。
+        double handleBand = Math.Clamp(CanvasHandleHitRadius * CurrentZoom,
+            (double)CanvasConnHandleHitMinDip, (double)CanvasConnHandleHitMaxDip);
+        double gap = Math.Max(CanvasToolbarGap, handleBand + 4);
+        double top = rect.Y - szH - gap;
+        left = Math.Clamp(left, 4, Math.Max(4, _vpW - clampW - 4));
         // 双向钳制：上方空间不够时【不再翻到卡片下方】（避免一步跳变），而是停在视口上缘、允许侵入卡片内部；
         // 向下滚→钉上缘、向右滚→钉左缘，移出视口即停在对应边缘。
         top = Math.Clamp(top, 4, Math.Max(4, _vpH - szH - 4));
@@ -6340,6 +7187,36 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _canvasToolbarTop = top;
             _canvasToolbarPlaced = true;
         }
+    }
+
+    // 卡片悬浮控件显隐：与缩放胶囊同源的淡入淡出（Opacity 0.15s）。
+    // 显示：取消在途淡出再淡入；隐藏：淡出结束后才 Collapsed（放掉命中，避免透明态拦截点击）。
+    // _cardToolbarShown 去重：SyncCanvasOverlayNow 每次调用都走到这里，仅 Collapsed→Visible / Visible→Collapsed 的
+    // 跳变才触发动画，避免每帧重启动画导致闪烁 / 长时间停在半透明。
+    private void ShowCanvasCardToolbar()
+    {
+        if (CanvasCardToolbar == null) return;
+        if (_isCanvasConnecting) return;   // 拉线（连线）进行中：暂隐胶囊，避免遮挡连线交互
+        CanvasCardToolbarHideAnim?.Stop();
+        if (_cardToolbarShown) return;
+        _cardToolbarShown = true;
+        CanvasCardToolbar.Visibility = Visibility.Visible;
+        CanvasCardToolbar.Opacity = 0;
+        CanvasCardToolbarShowAnim?.Begin();
+    }
+
+    private void HideCanvasCardToolbar()
+    {
+        if (CanvasCardToolbar == null) return;
+        HideCanvasColorPicker();   // 卡片工具栏收起（取消选中/拉线中）→ 二级颜色胶囊一并收起
+        if (!_cardToolbarShown)
+        {
+            CanvasCardToolbar.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _cardToolbarShown = false;
+        CanvasCardToolbarShowAnim?.Stop();
+        CanvasCardToolbarHideAnim?.Begin();
     }
 
     /// <summary>把边工具栏摆到选中连线锚点附近（仿 Obsidian Canvas）：
@@ -6355,7 +7232,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             return;
         }
         CanvasOverlay.Visibility = Visibility.Visible;
-        CanvasCardToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasCardToolbar();
         CanvasEdgeToolbar.Visibility = Visibility.Visible;
         RefreshEdgeArrowButtons();
         if (_canvasEdgeToolbarW <= 0)
@@ -6510,6 +7387,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 指针滑过控件带也不切光标；元素级工字（箭头槽替换态由工字作用域轮询维持）。
         if (e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed)
         {
+            // 拖选识别：按住左键移动超过 6 DIP ⇒ 这是一次文字选择手势（而非点选/长按）。
+            if (!_canvasEditPressMoved &&
+                (Math.Abs(p.X - _canvasEditPressPoint.X) > 6 || Math.Abs(p.Y - _canvasEditPressPoint.Y) > 6))
+                _canvasEditPressMoved = true;
             CanvasEditBox.OverrideCursor(CanvasIBeamCursor);
             return;
         }
@@ -6532,6 +7413,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 角域/中点域半径各自吃掉两端与中心，剩下的"边中点与四角之间"中段才归单轴缩放 —— 顺序必须为 角&gt;中点&gt;边。</summary>
     private Microsoft.UI.Input.InputCursor? ResolveCanvasHoverCursor(Point p)
     {
+        // 胶囊叠层遮罩：悬停其上时不强加背后卡片的边框控件光标（卡片角/边缩放光标等），
+        // 使胶囊成为真正隔离的控件面（用户实测：胶囊区光标会随背后卡片变）。
+        if (IsPointOverCanvasOverlayChrome(p)) return null;
         if (TryHitCanvasScrollBar(p, out var sb) && sb != null) return CanvasArrowCursor;
         if (TryHitCanvasCorner(p, out _, out var corner))
             return (corner == "tl" || corner == "br") ? CanvasResizeNwSeCursor : CanvasResizeNeSwCursor;
@@ -6547,9 +7431,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 收不到 PointerExited），供工字作用域轮询下一拍决定装/卸工字。</summary>
     private void OnCanvasEditBoxPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        _canvasEditLastLeftInteractTick = System.Diagnostics.Stopwatch.GetTimestamp();   // 拖选尾巴判定窗口的起点
         _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
         _canvasPointerValid = true;
         _canvasPointerOnEditCard = IsPointOnCanvasEditCard(_canvasPointerPos);
+        // 右键松手 = 菜单即将弹出（系统在松手时才请求）：把落点刷新到松手点，
+        // 这样"按住右键停了很久再松手"也不会因为按下时刻太早而被判成陈旧落点。
+        if (_canvasEditLastPressWasRight && e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse)
+            RefreshCanvasEditMenuAnchor(e);
     }
 
     /// <summary>指针离开编辑卡：清"在卡上"标志 ⇒ 工字作用域轮询下一拍卸下替换（卡外走正常悬停光标）。
@@ -7397,6 +8286,32 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         var pt = e.GetCurrentPoint(Viewer);
 
+        // 编辑态：右键落在编辑框上 = 要弹【文本右键菜单】（自绘，见 CanvasEditContextMenu），不是右键拖拽缩放。
+        // 直接 return 即可：既不开启 _isRightZooming，也不会走到下面的"落卡外就结束编辑"。
+        // ⚠ 刻意【不】设 e.Handled：WinUI 的右键手势/ContextMenuOpening 与指针按下的 handled 状态有关，
+        //   吞掉按下有连带把菜单请求也吞掉的风险（那菜单就再也不弹了）。
+        if (_canvasEditNodeId != null && pt.Properties.IsRightButtonPressed &&
+            IsPointInsideVisibleElement(CanvasEditBox, pt.Position))
+            return;
+        // 菜单开着时的其他按下（菜单内的按下被菜单自己吃掉，到不了这里）⇒ 先收起再继续常规处理。
+        HideCanvasEditContextMenu();
+
+        // ── 浮层 chrome 隔离：卡片胶囊 / 连线工具条是叠在画布上的独立控件，必须先把落在它们之上的
+        //    按下隔离掉，否则【画布命中链会按"画布几何"】把胶囊背后的卡片边框控件 / 卡片本体 / 连线当成命中
+        //    目标（用户实测：整颗胶囊区左键都会落到背后卡片的边框控件上、拖拽直接操作背后卡片）。
+        //  · 左键：纯 no-op —— 不关胶囊、不拖背景、不触发背后任何元素（事件在此被吞，杜绝穿透）；
+        //  · 右键：放行到下方右键缩放手势（物理自愈兜底，松手即收尾）。
+        //    判据复用 IsPointOverCanvasOverlayChrome（与悬停侧浮层遮罩同一口径）；仅拦左键，右键不拦。
+        if (IsPointOverCanvasOverlayChrome(pt.Position))
+        {
+            if (pt.Properties.IsLeftButtonPressed)
+            {
+                e.Handled = true;   // 吞掉，杜绝穿透到背后卡片
+                return;
+            }
+            // 右键：跳过下面整条画布命中链（卡片/连线），直接走底部右键缩放手势。
+        }
+
         // 白板编辑中：任何落在编辑框之外的按下都结束编辑（Obsidian 行为）。编辑框与浮动控件
         // 都在覆盖层内，落在其上的按下被它们吃掉、到不了本视图 —— 能到这里的一定是"卡片之外"。
         //
@@ -7486,9 +8401,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 e.Handled = true;
                 return;
             }
-            // 手柄优先级：四角（缩放）> 四边中点（连线）> 四边中段（单轴缩放）> 卡片本体（移动）。
+            // 命中优先级 = 绘制层级（挡在上面的先命中），严格照抄 Obsidian Canvas：
+            //   滚动条 > 四角（缩放）> 四边中点（拉线手柄）> 四边中段（单轴缩放）> 卡片本体（移动/点选）> 连线。
             // 手柄都落在卡片边界上，若先测本体必被"移动"抢走；四角与四边手柄在极小卡片上可能重叠，
-            // 故四角最优先；中段单轴缩放带夹在角域与中点域之间，须排在连线之后、本体之前。
+            // 故四角最优先；中段单轴缩放带夹在角域与中点域之间，须排在拉线手柄之后、本体之前。
+            // 连线【最后】：它画在所有卡片之下（见 DrawWhiteboardLayer），被卡片盖住的那一段根本看不见，
+            // 让它抢命中只会变成"点卡片却选中了看不见的线"。⇒ 连线只在卡片之外的空白处可选中，
+            // 卡片的一切控件与交互天然免于和连线打架（用户定案）。
             if (TryHitCanvasCorner(pt.Position, out var rNodeId, out var rCorner) &&
                 CanvasViewportToPage(pt.Position, out int rPage, out _, out _))
             {
@@ -7518,6 +8437,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 e.Handled = true;
                 return;
             }
+            // 卡片本体（含移动 / 点击已选中卡片进编辑）：排在连线之前 ——
+            // 连线画在卡片之下（见 DrawWhiteboardLayer 的绘制顺序），看不见的部分就不该抢命中。
             if (TryHitCanvasNode(pt.Position, out var hitNode, out int hitPage, out double hitPx, out double hitPy)
                 && hitNode != null)
             {
@@ -7540,7 +8461,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 e.Handled = true;
                 return;
             }
-            // 连线命中（在卡片本体之后）：卡片优先，未被卡片占用的区域再判连线。
+            // 连线命中（最后）：只负责"卡片之外"的空白区。
+            // 命中阈值 = max(CanvasEdgeHitThreshold, 光晕半宽)，与 UpdateCanvasEdgeHover 同一条；
+            // 悬停侧另有按卡片矩形的遮罩 ⇒ "亮的范围 = 能点中的范围"依然成立，只是两者都排除卡内。
             if (TryHitCanvasEdge(pt.Position, out var hitEdgeId))
             {
                 StopSmoothZoom();
@@ -7549,7 +8472,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 e.Handled = true;
                 return;
             }
-            SelectCanvasNode(null); // 点空白 → 取消选中（随后按左键继续拖动平移）
+            // 命中链兜底：点中"画布空白"（卡片/连线/控件之外）⇒ 取消选中（随后左键继续拖动平移）。
+            // 落在卡片胶囊 / 连线工具条上的左键已在上方 chrome 隔离处直接 return，不会到达这里。
+            SelectCanvasNode(null); // 点空白 → 取消选中（随后左键继续拖动平移）
         }
 
         if (pt.Properties.IsLeftButtonPressed)
@@ -7724,6 +8649,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         if (_isRightZooming)
         {
+            // 【自愈】物理按键已全部抬起，却仍处在右键缩放手势里 ⇒ 那次 PointerReleased 被别处吞掉了
+            // （典型：胶囊按钮吃掉抬起，见 Viewer_PointerPressed 的浮层 chrome 守卫；或松手点在窗口外）。
+            // 以【物理按键】为准立刻收尾：右键缩放不捕获指针，等不到"框架通知"，必须自己校验。
+            if (!CursorInterop.AnyMouseButtonDown())
+            {
+                EndRightZoomGesture();
+                e.Handled = true;
+                return;
+            }
             // 上推放大、下拉缩小。锚点 = 按下时的鼠标位置：该文档点在屏幕上保持不动。
             //
             // 旧实现把每一个鼠标点直接当成缩放值下发（ChangeView + 整页重光栅）。两个后果：
@@ -7875,6 +8809,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _connFromNodeId = null;
             _connTargetNodeId = null;
             _connTargetSide = "";
+            SyncCanvasOverlayNow();   // 连线结束 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
             this.ReleasePointerCapture(e.Pointer);
             InvalidateOverlay();
             // ⚠ 目标在【释放点当下重新判定】，不再依赖拖动期间累积的 _connTargetNodeId：
@@ -8018,6 +8953,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _connTargetNodeId = null;
             _connTargetSide = "";
             InvalidateOverlay();
+            SyncCanvasOverlayNow();   // 系统打断连线（失焦等）⇒ 恢复胶囊
         }
         // 白板卡片拖动被系统打断：位置已实时写回模型 → 照常发完成事件收尾（MainPage 据此入历史）。
         // 被打断的手势不再视为"单击"：撤销进编辑待定（不进入编辑态）。

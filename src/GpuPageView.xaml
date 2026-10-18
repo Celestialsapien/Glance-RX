@@ -48,20 +48,122 @@
              卡片本体与选中框仍由 Win2D 自绘，避免逐帧布局开销；本层无 Background，
              空白处不拦截命中，只有子元素（按钮/编辑框）可见时才吃指针。 -->
         <Grid x:Name="CanvasOverlay" Visibility="Collapsed">
-            <Border x:Name="CanvasCardToolbar" Visibility="Collapsed"
+            <Grid.Resources>
+                <!-- 卡片悬浮控件显隐：与缩放胶囊同源的淡入淡出（0.15s）。Opacity=0 时仍 IsHitTestVisible，
+                     故隐藏动画结束再 Collapsed（见 GpuPageView.xaml.cs 的 HideCanvasCardToolbar），避免透明态拦截点击。 -->
+                <Storyboard x:Name="CanvasCardToolbarShowAnim">
+                    <DoubleAnimation Storyboard.TargetName="CanvasCardToolbar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/>
+                </Storyboard>
+                <Storyboard x:Name="CanvasCardToolbarHideAnim">
+                    <DoubleAnimation Storyboard.TargetName="CanvasCardToolbar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
+                </Storyboard>
+            </Grid.Resources>
+
+            <!-- 卡片悬浮控件：改为与画笔颜色胶囊同源的胶囊外观（亚克力底 + 大圆角 + 投影）。
+                 圆角 / 投影 / 描边画刷均与 PenOptionsCapsule 对齐；固定高度使 CornerRadius=高/2 ⇒ 真胶囊。
+                 内部按钮的三态反馈在步骤 2 接管（本步只改容器外观，按钮仍透明）。 -->
+            <Border x:Name="CanvasCardToolbar" Visibility="Collapsed" Opacity="0"
                     HorizontalAlignment="Left" VerticalAlignment="Top"
-                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
-                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="6" Padding="2">
-                <StackPanel Orientation="Horizontal" Spacing="2">
-                    <Button x:Name="CanvasEditButton" Click="CanvasEditButton_Click"
-                            Padding="6,3" Background="Transparent" BorderThickness="0"
-                            ToolTipService.ToolTip="编辑文本">
+                    Background="{ThemeResource FlyoutPresenterBackground}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="20" Height="42" Padding="6,4"
+                    local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18">
+                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                    <!-- 按钮三态与缩放胶囊 -/+ 完全一致：ButtonNoStateMachineStyle（已提升 App.xaml 全局）+ transparentAtRest
+                         （静止并入亚克力胶囊、看不到圆边界）；圆形 32×32 / CornerRadius=16 照抄 -/+ 按钮。
+                         刻意不挂 ToolTipService.ToolTip：图标的语义已足够自明，用户不要悬浮气泡（会盖住卡片上沿）。 -->
+                    <Button x:Name="CanvasEditButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEditButton_Click"
+                            Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                            Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Background="Transparent" BorderThickness="0">
                         <SymbolIcon Symbol="Edit"/>
                     </Button>
-                    <Button x:Name="CanvasDeleteButton" Click="CanvasDeleteButton_Click"
-                            Padding="6,3" Background="Transparent" BorderThickness="0"
-                            ToolTipService.ToolTip="删除卡片">
+                    <!-- 颜色（步骤 3）：与两侧按钮同尺寸同三态；点击行为在步骤 4 接二级颜色胶囊，
+                         本步只落按钮本体，故暂不挂 Click（避免留一个空转的事件处理器）。
+                         ⚠ 图标用 FontIcon E790（调色盘）而非 SymbolIcon：Symbol 枚举**没有** Color 成员
+                         （实测 XamlCompiler WMC0055），语义最近的只有 FontColor（E8D3，A+色条）。
+                         E790/E8D3 均已确认存在于 SegoeIcons.ttf 的 cmap；SymbolThemeFontFamily
+                         就是符号字体族（实测其在 Microsoft.ui.xaml.resources.19h1.dll 的 XBF 字符串表里
+                         取值 = "Segoe Fluent Icons,Segoe MDL2 Assets" ⇒ 与 SymbolIcon 同一套字体、Win10 自动回退 MDL2）。
+                         FontSize=20 对齐 SymbolIcon 的默认字号（SymbolIcon 内部 FontSize 默认 20），否则 FontIcon 字号偏小会小一圈。 -->
+                    <Button x:Name="CanvasColorButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasColorButton_Click"
+                            Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                            Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Background="Transparent" BorderThickness="0">
+                        <FontIcon Glyph="&#xE790;" FontSize="20"
+                                  FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
+                    </Button>
+                    <!-- 二级颜色：内联展开（替代原下方弹出胶囊）。默认折叠；点颜色按钮时 7 色圆点在颜色按钮右侧展开、撑长胶囊，
+                         颜色按钮保留可见（二次点击即可收起）；选完色回到原样。圆点落在 CanvasCardToolbar 内，属同一颗浮层 chrome，不再与卡片重叠。
+                         ⚠ 左右间隔必须对称（用户口径：以「颜色按钮 ↔ 首位灰点」的间距为准）：
+                            左侧 = 外层 Spacing(4) + 分隔线(宽 1 + 右边距 4) + 内层 Spacing(8) = 17；
+                            右侧原本只有外层 Spacing(4) ⇒ 末尾黑点紧贴删除按钮。
+                            故在面板右缘补 Margin.Right=13（= 分隔线 1 + 右边距 4 + 内层 Spacing 8），两侧同为 17。 -->
+                    <StackPanel x:Name="CanvasColorDotPanel" Visibility="Collapsed" Orientation="Horizontal" Spacing="8"
+                                VerticalAlignment="Center" Margin="0,0,13,0">
+                        <Border Width="1" Margin="0,3,4,3" Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                        <!-- 首位 = 卡片边框默认灰 #8A8F98，与后 6 色完全同一套逻辑（静止/悬浮/按下都是自身色，选中放大）。 -->
+                        <Button x:Name="CanvasColorDefaultBtn" Click="CanvasColorDot_Click" Tag="#8A8F98" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#8A8F98" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#8A8F98"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#8A8F98"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasColorBlueBtn" Click="CanvasColorDot_Click" Tag="#2E6FE0" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2E6FE0" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#2E6FE0"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2E6FE0"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasColorCyanBtn" Click="CanvasColorDot_Click" Tag="#16B1C4" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#16B1C4" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#16B1C4"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#16B1C4"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasColorGreenBtn" Click="CanvasColorDot_Click" Tag="#2FA84F" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2FA84F" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#2FA84F"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2FA84F"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasColorYellowBtn" Click="CanvasColorDot_Click" Tag="#F2C200" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#F2C200" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#F2C200"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#F2C200"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasColorRedBtn" Click="CanvasColorDot_Click" Tag="#E5393B" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E5393B" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#E5393B"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#E5393B"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasColorBlackBtn" Click="CanvasColorDot_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Black"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Black"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                    </StackPanel>
+                    <Button x:Name="CanvasDeleteButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasDeleteButton_Click"
+                            Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                            Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Background="Transparent" BorderThickness="0">
                         <SymbolIcon Symbol="Delete"/>
                     </Button>
                 </StackPanel>
@@ -134,12 +236,20 @@
                  Win2D 实测值（仅供"点击落光标"的命中映射对齐，不影响可见渲染，因为渲染已交给 Win2D）。
                  代价是它天生富文本控件，故关闭格式化快捷键、复制/粘贴按纯文本，保持卡片"纯文本"语义。
                  边框由 Win2D(DrawCanvasCard) 在编辑态按【选中】强调色绘制，不再需要上层 CanvasEditFrame。
-                 RequestedTheme="Light"：局部锁浅色，深色主题下其（虽不可见的）滚动条 thumb 度量不被反转。
+                 ⚠ 刻意【不再】局部锁 RequestedTheme="Light"：WinUI 内置的文本右键菜单（剪切/复制/粘贴/全选）
+                 **镜像它所依附的文本控件的主题**，锁浅色会把深色模式下的菜单文字锁成黑色，而菜单底板走弹层
+                 自己的深色档 ⇒ 深底黑字不可读（用户报告）；去掉锁之后又在浅色模式下变成白底白字 —— 底板与
+                 文字来自两套主题，怎么配都不对。并且它是独立弹层，弹出即夺走焦点 → CanvasEditBox_LostFocus
+                 → EndCanvasEdit(commit) ⇒ "右键后拖选消失"，菜单项还作用在已折叠的隐形宿主上（用户报告）。
+                 ⇒ 现改为【自绘非聚焦菜单】：在 **ContextMenuOpening** 里 Handled=true 抑制系统菜单，改由覆盖层内的
+                 CanvasEditContextMenu 承担（见下方）。
+                 ⚠ 拦截入口只能是 ContextMenuOpening，**不是 ContextRequested**：RichEditBox 弹出内置菜单走的是
+                 控件自己的 ContextMenuOpening（实测 ContextRequested 里 Handled=true 完全无效，菜单照出）。
+                 也不要挂 ContextFlyout —— 那仍是弹层，一样抢焦点。
                  Opacity="0" 让它可见性完全交给 Win2D；Visibility 在编辑期切到 Visible、退出编辑 Collapsed。 -->
             <local:CanvasEditHostBox x:Name="CanvasEditBox" Visibility="Collapsed" Opacity="0"
                      HorizontalAlignment="Left" VerticalAlignment="Top"
                      RenderTransformOrigin="0,0"
-                     RequestedTheme="Light"
                      FontFamily="Segoe UI"
                      BorderThickness="0"
                      UseSystemFocusVisuals="False"
@@ -150,6 +260,7 @@
                      ClipboardCopyFormat="PlainText"
                      ScrollViewer.VerticalScrollBarVisibility="Hidden"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     ContextMenuOpening="CanvasEditBox_ContextMenuOpening"
                      LostFocus="CanvasEditBox_LostFocus"
                      TextChanged="CanvasEditBox_TextChanged"
                      PreviewKeyDown="CanvasEditBox_PreviewKeyDown"
@@ -165,6 +276,102 @@
                     <Thickness x:Key="TextControlBorderThemeThicknessPointerOver">0</Thickness>
                 </local:CanvasEditHostBox.Resources>
             </local:CanvasEditHostBox>
+
+            <!-- ===== 编辑态文本右键菜单（自绘，非弹层）=====
+                 承接 CanvasEditBox 的 ContextMenuOpening（那边 Handled=true 抑制系统菜单，本菜单由代码摆位）。为什么不用系统菜单：
+                 ① 主题错配 —— 内置文本菜单镜像【文本控件】的主题，而底板走弹层自己的主题，深色下"深底黑字"、
+                    去掉局部浅色锁后又变成"白底白字"（两次用户报告都是这个机制）；
+                 ② 抢焦点 —— 系统菜单是独立弹层，弹出即把焦点从编辑框拿走 → CanvasEditBox_LostFocus
+                    → EndCanvasEdit(commit) ⇒ 右键后拖选当场消失，且菜单项作用在已折叠的隐形宿主上，
+                    看起来"全选无效"。
+                 ⇒ 本菜单刻意全是【非聚焦】元素：每一行是 Grid 而不是 Button（Button 按下会拿焦点），
+                    只走 PointerPressed ⇒ 编辑框全程持有焦点，选区/光标/IME 状态零变动。
+                 底板/描边/圆角/投影与卡片胶囊同一套主题资源，深浅主题自动跟随；悬停底色复用 App.xaml 里
+                 「…」溢出菜单那一档（MenuFlyoutItemBackgroundPointerOver），不新造颜色。 -->
+            <Border x:Name="CanvasEditContextMenu" Visibility="Collapsed"
+                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                    Background="{ThemeResource FlyoutPresenterBackground}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="4"
+                    local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18"
+                    PointerPressed="CanvasEditContextMenu_PointerPressed">
+                <StackPanel Width="184">
+                    <Grid x:Name="CanvasEditMenuCut" Tag="cut" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="&#xE8C6;" FontSize="14" VerticalAlignment="Center"
+                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
+                            <TextBlock x:Name="CanvasEditMenuCutText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="Ctrl+X" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="CanvasEditMenuCopy" Tag="copy" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="&#xE8C8;" FontSize="14" VerticalAlignment="Center"
+                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
+                            <TextBlock x:Name="CanvasEditMenuCopyText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="Ctrl+C" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="CanvasEditMenuPaste" Tag="paste" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="&#xE77F;" FontSize="14" VerticalAlignment="Center"
+                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
+                            <TextBlock x:Name="CanvasEditMenuPasteText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="Ctrl+V" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Grid>
+                    <Border Height="1" Margin="8,4" Opacity="0.6"
+                            Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                    <Grid x:Name="CanvasEditMenuSelectAll" Tag="selectall" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="&#xE8B3;" FontSize="14" VerticalAlignment="Center"
+                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
+                            <TextBlock x:Name="CanvasEditMenuSelectAllText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="Ctrl+A" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Grid>
+                </StackPanel>
+            </Border>
 
         </Grid>
 

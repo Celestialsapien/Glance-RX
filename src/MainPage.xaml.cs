@@ -401,6 +401,7 @@ public sealed partial class MainPage : Page
         GpuViewer.CanvasNodeResizeCompleted += GpuCanvas_ResizeCompleted;
         GpuViewer.CanvasEdgeDeleteRequested += GpuCanvas_EdgeDeleteRequested;
         GpuViewer.CanvasEdgeStyleChanged += GpuCanvas_EdgeStyleChanged;
+        GpuViewer.CanvasNodeColorChanged += GpuCanvas_NodeColorChanged;
         GpuViewer.CanvasNodeCreateConnectedRequested += GpuCanvas_CreateConnectedRequested;
         GpuViewer.CanvasNodeBringToFrontRequested += GpuCanvas_BringToFront;
         // 编辑框内的 Ctrl+Z/Y 统一走同一撤销栈（编辑框原生撤销会与全局历史脱节）。
@@ -6657,6 +6658,24 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { edge.FromEnd = oldFromEnd; edge.ToEnd = oldToEnd; edge.Color = oldColor; RefreshCanvas(); },
             redo: () => { edge.FromEnd = nFromEnd; edge.ToEnd = nToEnd; edge.Color = nColor; RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>卡片颜色变更（步骤 4）：二级颜色胶囊选色后写回模型并落盘，可撤销。</summary>
+    private void GpuCanvas_NodeColorChanged(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        var node = FindCanvasNode(e.NodeId);
+        if (node == null) return;
+        if (e.NodeColor == null) return;   // 无颜色字段 → 不变更
+        string oldColor = node.Color ?? "";
+        if (string.Equals(oldColor, e.NodeColor, StringComparison.Ordinal)) return;   // 同色 → 不入历史
+        string newColor = e.NodeColor;
+        PushCanvasHistory(
+            undo: () => { node.Color = oldColor; RefreshCanvas(); },
+            redo: () => { node.Color = newColor; RefreshCanvas(); });
+        node.Color = newColor;
         SaveCanvas();
         RefreshCanvas();
     }

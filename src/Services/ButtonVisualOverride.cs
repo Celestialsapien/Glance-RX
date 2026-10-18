@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
@@ -119,6 +120,32 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
             foreach (var link in _instances)
                 if (link.ExcludeFromPageHoverDrive) link.ClearTransparentHoverState();
         }
+
+    /// <summary>某颗按钮因钳制 / 布局改变发生位移后调用：把它立即清回静止，并开启 hover 冷处理窗口
+    /// （默认 900ms，仅由<b>它自己的</b>真实 PointerMoved 提前解除）。
+    /// <para>⚠ 必须用"窗口"而不是"清一次"：<c>ButtonBase</c> 松手时补发假 PointerExited，
+    /// <b>约 380ms 后</b>再补一次 <c>PointerEntered</c>（带松手时的旧坐标）"圆谎"。按钮已滑出光标下方，
+    /// 那个迟到事件仍按旧坐标判定"在按钮里"⇒ 重新点亮，且几何驱动只在真实移动时重算 ⇒ 残留到用户动鼠标。
+    /// 零时长的 <c>true→false</c> 挡不住它（首次修复因此无效）。</para>
+    /// <para>⚠ 传的必须是<b>被按下的那一颗</b>：假事件只发给它自己，否则邻居按钮会被无谓禁亮一个窗口期。
+    /// 不传 / 传未接管的按钮（如颜色圆点）则为空操作。</para></summary>
+    public static void SuppressHoverFor(ButtonBase? clicked) => BeginHoverHoldOffFor(clicked);
+
+    /// <summary><b>权威指派</b>某颗按钮的 hover 状态（几何由调用方按<b>实时指针位置</b>算好）。
+    /// <para>用途：元素因布局变化<b>滑到静止指针下方</b>时，WinUI 不会主动派发 PointerEntered/Moved
+    /// ⇒ 几何驱动没机会重算，光效要等它某次迟到的重新命中测试才亮。此入口让调用方（已知指针未动）
+    /// 在布局落定后补判一次。<b>不受冷处理窗口约束</b>（窗口只针对可能带旧坐标的迟到事件）。</para>
+    /// <para>不属于本类接管的按钮（如实色圆点）为空操作。</para></summary>
+    public static void ForceHover(Button? button, bool hover)
+    {
+        if (button == null) return;
+        foreach (var link in _instances)
+        {
+            if (!ReferenceEquals(link.Button, button)) continue;
+            link.ForceHover(hover);
+            return;
+        }
+    }
 
     /// <summary>浮层预设项「独占 hover」：只让 <paramref name="hovered"/> 那一颗亮，其余
     /// <c>transparentAtRest</c>（= 浮层 8 颗）一律灭。<b>由菜单面板自身的 PointerMoved 实时驱动</b>
