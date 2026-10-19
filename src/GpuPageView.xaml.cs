@@ -2707,7 +2707,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         ButtonVisualOverride.Attach(CanvasEditButton, transparentAtRest: true);
         ButtonVisualOverride.Attach(CanvasColorButton, transparentAtRest: true);
         ButtonVisualOverride.Attach(CanvasDeleteButton, transparentAtRest: true);
-        AttachCanvasColorDotHover();   // 二级颜色胶囊圆点的悬浮/选中放大反馈（照抄 PenOptionsCapsule）
+        // 连线胶囊与卡片胶囊【同一套三态】：主按钮 3 颗（箭头/颜色/删除）+ 二级箭头三选 3 颗。
+        // 展开/收起会让按钮"滑到静止指针下方"，故它们同样要进下面的 hover 补判与冷处理链路。
+        ButtonVisualOverride.Attach(CanvasEdgeArrowButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasEdgeColorButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasEdgeDeleteButton, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasEdgeArrowNoneBtn, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasEdgeArrowSingleBtn, transparentAtRest: true);
+        ButtonVisualOverride.Attach(CanvasEdgeArrowBothBtn, transparentAtRest: true);
+        AttachCanvasColorDotHover();   // 二级颜色胶囊圆点的悬浮/选中放大反馈（照抄 PenOptionsCapsule；卡片 + 连线两副）
         // 胶囊展开/收起会让按钮"滑到静止指针下方"，而 WinUI 不会因此主动派发 hover 事件
         // ⇒ 记下胶囊内的最后指针位置（CanvasOverlay 坐标），在布局落定后主动补判一次几何。
         // PointerPressed 需 handledEventsToo：ButtonBase 会把它标 Handled。
@@ -2719,6 +2727,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             {
                 if (!_cardToolbarShown && CanvasCardToolbar != null)
                     CanvasCardToolbar.Visibility = Visibility.Collapsed;
+            };
+        // 连线胶囊：同一套"记最后指针位置"（展开/收起后按实时指针补判 hover）+ 淡出结束才 Collapsed。
+        CanvasEdgeToolbar.PointerMoved += CanvasCardToolbar_PointerMoved;
+        CanvasEdgeToolbar.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler(CanvasCardToolbar_PointerPressed), true);
+        if (CanvasEdgeToolbarHideAnim != null)
+            CanvasEdgeToolbarHideAnim.Completed += (s, e) =>
+            {
+                if (!_edgeToolbarShown && CanvasEdgeToolbar != null)
+                    CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
             };
         // 滚轮：逻辑处理器挂在 Viewer(ScrollViewer 自身) 上、且用 HandledEventsToo 订阅，
         // 保证必定接管（ScrollViewer 原生处理时会把路由事件标 Handled，普通订阅会被整段吞掉——
@@ -2771,6 +2789,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 只能在模板树中找到 Thumb 实例后订阅；模板在 Loaded 时才就绪，故挂 Viewer.Loaded。
         Viewer.Loaded += (s, e) => HookScrollBarThumbs(Viewer);
         this.Unloaded += (s, e) => _hookedThumbs.Clear(); // 视图重挂载后模板 Thumb 是新实例，清旧引用
+        // 箭头三态符号的「恒定 2 物理像素」描边：Loaded 后应用一次，并挂 RasterizationScale 变化重算
+        // （窗口跨不同 DPI 显示器时 XamlRoot.Changed 触发，幂等）。理由见 ApplyCanvasEdgeArrowGlyphStrokeThickness。
+        Loaded += (s, e) =>
+        {
+            ApplyCanvasEdgeArrowGlyphStrokeThickness();
+            if (!_canvasEdgeGlyphScaleHooked && this.XamlRoot != null)
+            {
+                _canvasEdgeGlyphScaleHooked = true;
+                this.XamlRoot.Changed += (_, __) => ApplyCanvasEdgeArrowGlyphStrokeThickness();
+            }
+        };
         UpdateThemeColors();
         ActualThemeChanged += (s, e) => { UpdateThemeColors(); InvalidateBoth(); };
         // 冷启动(文件关联)加载 PDF 时 GpuViewer 由 Collapsed → Visible：此刻窗口已按保存主题激活，
@@ -3602,9 +3631,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private const float CanvasCardStrokeWidth = 1.0f;
     private const float CanvasCardSelectedStrokeWidth = 2.0f;  // 选中/悬停时边框加粗
     private const float CanvasEdgeStrokeWidth = 1.6f;
+    private const float CanvasEdgeMinWidth = 0.75f;   // 连线描边下限（屏幕 DIP）：小缩放时仍较清晰，不无限变细
     // 箭头尺寸以【页局部 PDF 点】计：调用处再乘缩放 z 得到屏幕 DIP，从而随页面缩放（与卡片手柄 CanvasHandleRadius 同约定）。
     // 等边三角形：高 = 页局部点 × z；半宽 = 高 / √3，由 DrawArrowHead 推导，不再单独存常量。
     private const float CanvasArrowLen = 9f;   // 箭头高（页局部 PDF 点），×z 即屏幕像素
+    private const float CanvasArrowMinLen = 6f;   // 箭头高下限（屏幕 DIP）：小缩放时仍完全清晰可辨（覆盖 CanvasArrowLen·z），与命中下限同量级
     private static readonly Windows.UI.Color CanvasCardFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
     private static readonly Windows.UI.Color CanvasCardStroke = Windows.UI.Color.FromArgb(255, 138, 143, 152);
     private static readonly Windows.UI.Color CanvasCardText = Windows.UI.Color.FromArgb(255, 32, 32, 34);
@@ -3764,7 +3795,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_selectedCanvasEdgeId != null && !ContainsEdge(e, _selectedCanvasEdgeId))
         {
             _selectedCanvasEdgeId = null;
-            if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+            HideCanvasEdgeToolbar();
         }
         if (_hoverCanvasEdgeId != null && !ContainsEdge(e, _hoverCanvasEdgeId))
             _hoverCanvasEdgeId = null;
@@ -4595,7 +4626,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             var edgeColor = ParseCanvasColor(edge.Color) ?? CanvasEdgeColor;   // 线自己的颜色，全程用它
             _edgeEmph.TryGetValue(edge.Id, out float emph);                    // 0=原样, 1=完全强调
             // 箭头高随缩放：页局部点 × z = 屏幕 DIP（与卡片手柄同约定），缩小时箭头变小、放大时变大。
-            float arrowLen = CanvasArrowLen * (float)z;
+            float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)z);
+            // 线宽随缩放（沿用上方箭头/卡片手柄的 ×z 约定）：卡片边框经页变换、箭头经 arrowLen·z 都已随 z 缩放，
+            // 连线描边若用定值会保持原粗，小缩放时相对已缩小的卡片显得过粗。z=1 时即原 1.6DIP，零行为变化。
+            float edgeW = MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)z);
             bool toArrow = IsArrowEnd(edge.ToEnd);
             bool fromArrow = IsArrowEnd(edge.FromEnd);
 
@@ -4640,7 +4674,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             using (var baseGeo = BuildBezier(l0, c1, c2, l3))
             {
                 if (baseGeo != null)
-                    ds.DrawGeometry(baseGeo, edgeColor, CanvasEdgeStrokeWidth);
+                    ds.DrawGeometry(baseGeo, edgeColor, edgeW);
             }
 
             // 强调层（学 Obsidian）：主线变粗到箭头底边一半 + 同色极淡光晕（两倍底边）。
@@ -4655,13 +4689,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 using (var haloGeo = BuildBezier(a1, c1, c2, a2))
                 {
                     if (haloGeo != null)
-                        ds.DrawGeometry(haloGeo, WithAlpha(edgeColor, 0.3f * emph), Lerp(CanvasEdgeStrokeWidth, emphHaloW, emph));
+                        ds.DrawGeometry(haloGeo, WithAlpha(edgeColor, 0.3f * emph), Lerp(edgeW, emphHaloW, emph));
                 }
                 // 主线：收缩到箭头底边再向顶点延伸 seamOv（消缝），宽随 p 从细线宽插值到箭头底边一半，仍为线自身颜色。
                 using (var mainGeo = BuildBezier(l0, c1, c2, l3))
                 {
                     if (mainGeo != null)
-                        ds.DrawGeometry(mainGeo, edgeColor, Lerp(CanvasEdgeStrokeWidth, emphMainW, emph));
+                        ds.DrawGeometry(mainGeo, edgeColor, Lerp(edgeW, emphMainW, emph));
                 }
             }
 
@@ -5128,7 +5162,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             // 箭头高随缩放（页局部点 × z），与已存连线一致；连线收缩到箭头底边，尖端落在卡片边框。
             // 线端向顶点再延伸一小段与三角重叠：消除平头线帽与三角底边之间的抗锯齿接缝（与 DrawCanvasEdges 同法）；
             // 预览线很细、重叠段完全藏在实心三角之下，无露角副作用。箭头底边仍用 arrowBase（尖端压边框）。
-            float arrowLen = CanvasArrowLen * (float)CurrentZoom;
+            float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)CurrentZoom);
             var d = a2 - c2;
             Vector2 arrowBase = d.Length() > 1e-3f ? a2 - (d / d.Length()) * arrowLen : a2;
             float seamOv = MathF.Max(1.5f, 0.15f * arrowLen);
@@ -5136,7 +5170,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             if (d.Length() > 1e-3f) lineEnd = arrowBase + (d / d.Length()) * seamOv;
             using (var geo = BuildBezier(a1, c1, c2, lineEnd))
             {
-                if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, CanvasEdgeStrokeWidth);
+                if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom));
             }
             DrawArrowHead(ds, arrowBase, a2, _canvasAccentColor);
             // 目标吸附边的提示环，明确"将连到哪条边"。
@@ -5146,7 +5180,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             using (var geo = BuildBezier(a1, c1, c2, a2))
             {
-                if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, CanvasEdgeStrokeWidth);
+                if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom));
             }
             ds.FillCircle(a2, 3.5f, _canvasAccentColor);
         }
@@ -5271,6 +5305,21 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private double _canvasEdgeToolbarW, _canvasEdgeToolbarH;
     private double _canvasEdgeToolbarLeft, _canvasEdgeToolbarTop;
     private bool _canvasEdgeToolbarPlaced;
+    // ── 浮层安全区（上层遮挡带）──
+    // MainPage 的顶层浮层盖在本视图【之上】并吞掉指针：顶栏宿主（透明底、整条顶边，约一条工具栏高）、
+    // 底部缩放胶囊（右下角）、对比视图的 +/× 圆钮（上左右角）。被钳制到这些带里的悬浮胶囊会
+    // "看得见点不到"（用户报告：钳到视口上边缘时 100% 按钮失效）⇒ 钳制必须避开它们。
+    // 由 MainPage 把"四边被占掉多少 DIP"推下来（见 SetCanvasViewportInsets）。
+    private double _canvasInsetL, _canvasInsetT, _canvasInsetR, _canvasInsetB;
+    // 连线胶囊的淡入淡出去重（与 _cardToolbarShown 同源）：仅 Visible↔Collapsed 跳变才起停动画。
+    private bool _edgeToolbarShown;
+    // 连线胶囊内两个二级面板：默认折叠、互斥（同一时刻只开一个）；展开态真实宽度用于右缘钳制。
+    private bool _canvasEdgeArrowPickerShown;
+    private bool _canvasEdgeColorPickerShown;
+    private double _canvasEdgeToolbarExpandedW;
+    private Button? _canvasEdgeColorSelectedDot;   // 当前连线已应用颜色对应的圆点（展开时放大）
+    // 箭头符号描边是否已挂 RasterizationScale 变化（Loaded 后只挂一次；跨不同 DPI 显示器时重算描边宽）。
+    private bool _canvasEdgeGlyphScaleHooked;
     // 二级颜色胶囊（内联展开到卡片胶囊内）：是否展开（展开时隐藏颜色按钮、显示 7 色圆点、胶囊变宽）。
     private bool _canvasColorPickerShown;
     // 二级颜色胶囊圆点尺寸（与 PenOptionsCapsule 同源：悬浮/选中放大 1.6×，负 Margin 抵消布局位移）。
@@ -5326,6 +5375,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (id != _selectedCanvasNodeId) HideCanvasColorPicker();
         _selectedCanvasNodeId = id;
         _selectedCanvasEdgeId = null;   // 与连线选中互斥
+        HideCanvasEdgePickers();       // 选中卡片即收起连线胶囊的二级面板（胶囊本身随后由定位链路隐藏）
         // 选中即置顶，且必须是【永久】的：这里只发请求，真正的重排与落盘由 MainPage 改模型数组完成
         // （jsoncanvas 的 z 序 = nodes 数组顺序）。否则取消选中后 topId 失效，卡片会掉回出生层级。
         if (id != null)
@@ -5350,6 +5400,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         string? id = string.IsNullOrEmpty(edgeId) ? null : edgeId;
         if (_selectedCanvasEdgeId == id && _selectedCanvasNodeId == null) { SyncCanvasOverlayNow(); return; }
+        // 换一条线（或取消选中）：上一个二级面板立即收起 —— 否则"上一条线展开着的颜色面板"会带过来。
+        HideCanvasEdgePickers();
         _selectedCanvasEdgeId = id;
         _selectedCanvasNodeId = null;   // 与卡片选中互斥
         InvalidateOverlay();
@@ -5362,6 +5414,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_selectedCanvasEdgeId == null && _hoverCanvasEdgeId == null) return;
         _selectedCanvasEdgeId = null;
         _hoverCanvasEdgeId = null;
+        HideCanvasEdgePickers();
         InvalidateOverlay();
     }
 
@@ -6172,13 +6225,37 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void CanvasDeleteButton_Click(object sender, RoutedEventArgs e)
         => DeleteSelectedCanvasNode();
 
-    // ---- 边工具栏（P6）：删除 / 箭头样式三态 / 颜色 ----
+    // ---- 连线悬浮胶囊（P6）：[箭头样式] [颜色] [删除]，箭头/颜色各有一个默认折叠的二级面板 ----
 
     private void CanvasEdgeDeleteButton_Click(object sender, RoutedEventArgs e)
         => DeleteSelectedCanvasEdge();
 
-    /// <summary>箭头样式按钮：Tag = none / single / both。</summary>
-    private void CanvasEdgeArrow_Click(object sender, RoutedEventArgs e)
+    /// <summary>箭头样式按钮：切换二级箭头面板的展开 / 收起（与颜色面板互斥 —— 同一时刻只开一个）。</summary>
+    private void CanvasEdgeArrowButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasEdgeId == null) return;
+        double oldLeft = _canvasEdgeToolbarLeft;
+        if (_canvasEdgeArrowPickerShown) HideCanvasEdgeArrowPicker();
+        else { HideCanvasEdgeColorPicker(); ShowCanvasEdgeArrowPicker(); }
+        SyncCanvasOverlayNow();   // 展开态按真实宽度做右缘钳制（正常不位移、越界才最小左移）
+        ClearCanvasEdgeToolbarHoverIfMoved(oldLeft, sender as Button);
+        RequestCapsuleHoverSyncAfterLayout();
+    }
+
+    /// <summary>颜色按钮：切换二级颜色面板的展开 / 收起（与箭头面板互斥）。</summary>
+    private void CanvasEdgeColorButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCanvasEdgeId == null) return;
+        double oldLeft = _canvasEdgeToolbarLeft;
+        if (_canvasEdgeColorPickerShown) HideCanvasEdgeColorPicker();
+        else { HideCanvasEdgeArrowPicker(); ShowCanvasEdgeColorPicker(); }
+        SyncCanvasOverlayNow();
+        ClearCanvasEdgeToolbarHoverIfMoved(oldLeft, sender as Button);
+        RequestCapsuleHoverSyncAfterLayout();
+    }
+
+    /// <summary>箭头三选之一：Tag = none / single / both，选完即收起面板（回到窄态）。</summary>
+    private void CanvasEdgeArrowOption_Click(object sender, RoutedEventArgs e)
     {
         if (_selectedCanvasEdgeId == null) return;
         string style = (sender as FrameworkElement)?.Tag as string ?? "single";
@@ -6188,10 +6265,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             ArrowStyle = style
         });
         RefreshEdgeArrowButtons();
+        double oldLeft = _canvasEdgeToolbarLeft;
+        HideCanvasEdgeArrowPicker();
+        SyncCanvasOverlayNow();   // 收起回窄态居中（若之前被钳制左移过，这里复原）
+        ClearCanvasEdgeToolbarHoverIfMoved(oldLeft, sender as Button);
+        RequestCapsuleHoverSyncAfterLayout();
+        InvalidateOverlay();
     }
 
-    /// <summary>颜色块按钮：Tag = "#RRGGBB"。</summary>
-    private void CanvasEdgeColor_Click(object sender, RoutedEventArgs e)
+    /// <summary>颜色圆点：Tag = "#RRGGBB"，7 色一视同仁（首位灰也只是其中一色），选完即收起面板。</summary>
+    private void CanvasEdgeColorDot_Click(object sender, RoutedEventArgs e)
     {
         if (_selectedCanvasEdgeId == null) return;
         string hex = (sender as FrameworkElement)?.Tag as string ?? "";
@@ -6200,7 +6283,91 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             EdgeId = _selectedCanvasEdgeId,
             EdgeColor = hex
         });
+        double oldLeft = _canvasEdgeToolbarLeft;
+        HideCanvasEdgeColorPicker();
+        SyncCanvasOverlayNow();
+        // ⚠ 传入的是圆点：圆点不归 ButtonVisualOverride 接管 ⇒ 不会触发任何冷处理（与卡片胶囊同理）。
+        ClearCanvasEdgeToolbarHoverIfMoved(oldLeft, sender as Button);
+        RequestCapsuleHoverSyncAfterLayout();
         InvalidateOverlay();
+    }
+
+    // ---- 连线胶囊的两个二级面板：内联展开 / 收起（照抄卡片胶囊的二级颜色胶囊）----
+
+    private void HideCanvasEdgePickers()
+    {
+        HideCanvasEdgeArrowPicker();
+        HideCanvasEdgeColorPicker();
+    }
+
+    private void ShowCanvasEdgeArrowPicker()
+    {
+        if (CanvasEdgeArrowPanel == null || CanvasEdgeToolbar == null) return;
+        CanvasEdgeArrowPanel.Visibility = Visibility.Visible;
+        _canvasEdgeArrowPickerShown = true;
+        RefreshEdgeArrowButtons();   // 展开时把"当前连线已应用的箭头样式"强调出来
+        MeasureCanvasEdgeToolbarExpanded();
+    }
+
+    private void HideCanvasEdgeArrowPicker()
+    {
+        if (CanvasEdgeArrowPanel == null) return;
+        CanvasEdgeArrowPanel.Visibility = Visibility.Collapsed;
+        _canvasEdgeArrowPickerShown = false;
+    }
+
+    private void ShowCanvasEdgeColorPicker()
+    {
+        if (CanvasEdgeColorDotPanel == null || CanvasEdgeToolbar == null) return;
+        CanvasEdgeColorDotPanel.Visibility = Visibility.Visible;
+        _canvasEdgeColorPickerShown = true;
+        SyncCanvasEdgeColorDotSelection();   // 展开时把"当前连线已应用颜色"对应的圆点放大
+        MeasureCanvasEdgeToolbarExpanded();
+    }
+
+    private void HideCanvasEdgeColorPicker()
+    {
+        if (CanvasEdgeColorDotPanel == null) return;
+        CanvasEdgeColorDotPanel.Visibility = Visibility.Collapsed;
+        _canvasEdgeColorPickerShown = false;
+    }
+
+    /// <summary>量一次【展开态真实宽度】缓存起来，供定位时按真实宽度做右缘钳制（只在越界时左移，正常不位移）。
+    /// ⚠ DesiredSize 含 Margin：测前把 Margin 归零，否则上次定位的 left/top 会被算进宽度、测出畸大值。</summary>
+    private void MeasureCanvasEdgeToolbarExpanded()
+    {
+        if (CanvasEdgeToolbar == null) return;
+        var saved = CanvasEdgeToolbar.Margin;
+        CanvasEdgeToolbar.Margin = new Thickness(0);
+        CanvasEdgeToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        _canvasEdgeToolbarExpandedW = CanvasEdgeToolbar.DesiredSize.Width;
+        CanvasEdgeToolbar.Margin = saved;
+    }
+
+    /// <summary>展开时按当前选中连线的颜色高亮对应圆点。7 色一视同仁按 Tag 比较；
+    /// 连线未着色（null/空）以默认灰呈现，故高亮首位灰圆点。</summary>
+    private void SyncCanvasEdgeColorDotSelection()
+    {
+        if (CanvasEdgeColorDotPanel == null) return;
+        string current = CanvasCardDefaultGrayHex;
+        var id = _selectedCanvasEdgeId;
+        if (id != null)
+        {
+            lock (_canvasLock)
+            {
+                foreach (var e in _canvasEdges)
+                    if (string.Equals(e.Id, id, StringComparison.Ordinal))
+                    { current = string.IsNullOrEmpty(e.Color) ? CanvasCardDefaultGrayHex : e.Color; break; }
+            }
+        }
+        Button? match = null;
+        foreach (var child in CanvasEdgeColorDotPanel.Children)
+        {
+            if (child is Button b && b.Tag?.ToString() is string tag &&
+                string.Equals(tag, current, StringComparison.OrdinalIgnoreCase))
+            { match = b; break; }
+        }
+        HighlightCanvasColorDot(match, edge: true);
     }
 
     // ---- 卡片二级颜色胶囊（步骤 4）：由卡片胶囊的"颜色"按钮触发 ----
@@ -6273,6 +6440,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             ButtonVisualOverride.SuppressHoverFor(clicked);
     }
 
+    /// <summary>连线胶囊版：判据是【连线胶囊】自己的 left（与卡片胶囊互不相干，别共用同一个字段）。</summary>
+    private void ClearCanvasEdgeToolbarHoverIfMoved(double oldLeft, Button? clicked)
+    {
+        if (Math.Abs(_canvasEdgeToolbarLeft - oldLeft) > 0.5)
+            ButtonVisualOverride.SuppressHoverFor(clicked);
+    }
+
     // ---- 胶囊位移后按"最后一次指针位置"补判 hover ----
     // 背景：WinUI 不会因为布局变化而给"刚滑到静止指针下方"的元素补发 PointerEntered/Moved，
     // 几何驱动（只在真实移动时重算）也就没有机会跑 ⇒ 悬浮底色要等它某次迟到的重新命中测试才亮。
@@ -6333,6 +6507,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         ApplyCapsuleHoverOne(CanvasEditButton, p);
         ApplyCapsuleHoverOne(CanvasColorButton, p);
         ApplyCapsuleHoverOne(CanvasDeleteButton, p);
+        // 连线胶囊（同一套补判）：主按钮 3 颗 + 二级箭头三选。收在折叠面板里的按钮 ActualWidth=0 ⇒ 恒判"不在内"，无副作用。
+        ApplyCapsuleHoverOne(CanvasEdgeArrowButton, p);
+        ApplyCapsuleHoverOne(CanvasEdgeColorButton, p);
+        ApplyCapsuleHoverOne(CanvasEdgeDeleteButton, p);
+        ApplyCapsuleHoverOne(CanvasEdgeArrowNoneBtn, p);
+        ApplyCapsuleHoverOne(CanvasEdgeArrowSingleBtn, p);
+        ApplyCapsuleHoverOne(CanvasEdgeArrowBothBtn, p);
     }
 
     private void ApplyCapsuleHoverOne(Button? button, Point p)
@@ -6362,8 +6543,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         b.Margin = new Thickness(-inset);
     }
 
+    /// <summary>圆点属于哪一张面板（卡片 / 连线）⇒ 取它那张面板的"当前选中圆点"。
+    /// 两副圆点共用同一套悬浮/离开处理器，靠父元素区分，避免为连线再抄一份。</summary>
+    private Button? SelectedDotOf(Button b)
+        => ReferenceEquals(b.Parent, CanvasEdgeColorDotPanel) ? _canvasEdgeColorSelectedDot : _canvasColorSelectedDot;
+
     private void RefreshCanvasColorDotState(Button b)
-        => SetCanvasColorDotSize(b, b == _canvasColorSelectedDot);
+        => SetCanvasColorDotSize(b, b == SelectedDotOf(b));
 
     private void CanvasColorDot_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
@@ -6375,12 +6561,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (sender is Button b) RefreshCanvasColorDotState(b);
     }
 
-    /// <summary>把"当前卡片已应用颜色"对应的圆点置为选中(放大)态。7 色一视同仁：只放大、不改底色。</summary>
-    private void HighlightCanvasColorDot(Button? selected)
+    /// <summary>把"当前已应用颜色"对应的圆点置为选中(放大)态。7 色一视同仁：只放大、不改底色。
+    /// <paramref name="edge"/> = true 时作用于连线胶囊的圆点面板，否则作用于卡片胶囊的圆点面板。</summary>
+    private void HighlightCanvasColorDot(Button? selected, bool edge = false)
     {
-        _canvasColorSelectedDot = selected;
-        if (CanvasColorDotPanel == null) return;
-        foreach (var child in CanvasColorDotPanel.Children)
+        var panel = edge ? CanvasEdgeColorDotPanel : CanvasColorDotPanel;
+        if (edge) _canvasEdgeColorSelectedDot = selected; else _canvasColorSelectedDot = selected;
+        if (panel == null) return;
+        foreach (var child in panel.Children)
         {
             if (child is Button b) RefreshCanvasColorDotState(b);
         }
@@ -6411,12 +6599,19 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HighlightCanvasColorDot(match);
     }
 
-    /// <summary>给 7 个颜色圆点逐个挂悬浮/离开事件（悬浮预览放大用）。绝不在此写 element.Resources
-    /// （运行时写 Resources 在主题切换会闪退，2026-09-29 崩溃根因；底色档已在 XAML 解析期逐按钮声明）。</summary>
+    /// <summary>给【两副】7 色圆点（卡片胶囊 / 连线胶囊）逐个挂悬浮/离开事件（悬浮预览放大用）。
+    /// 绝不在此写 element.Resources（运行时写 Resources 在主题切换会闪退，2026-09-29 崩溃根因；
+    /// 底色档已在 XAML 解析期逐按钮声明）。</summary>
     private void AttachCanvasColorDotHover()
     {
-        if (CanvasColorDotPanel == null) return;
-        foreach (var child in CanvasColorDotPanel.Children)
+        AttachCanvasColorDotHoverIn(CanvasColorDotPanel);
+        AttachCanvasColorDotHoverIn(CanvasEdgeColorDotPanel);
+    }
+
+    private void AttachCanvasColorDotHoverIn(StackPanel? panel)
+    {
+        if (panel == null) return;
+        foreach (var child in panel.Children)
         {
             if (child is Button b)
             {
@@ -6426,10 +6621,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
-    /// <summary>按选中连线的实际样式刷新三态箭头按钮的强调态（选中态=不透明，未选=半透明）。</summary>
+    /// <summary>按选中连线的实际样式刷新箭头相关显示：① 胶囊主按钮的字形 = 当前样式（收起态也能看出当前值）；
+    /// ② 展开面板里三项的强调态（当前 1.0 / 其余 0.4）。</summary>
     private void RefreshEdgeArrowButtons()
     {
         if (CanvasEdgeToolbar == null) return;
+        // 每次刷新都按当前 DPI 重算描边宽（幂等、同值不触发失效）：见方法注释。
+        ApplyCanvasEdgeArrowGlyphStrokeThickness();
         string style = "single";
         var id = _selectedCanvasEdgeId;
         if (id != null)
@@ -6442,6 +6640,44 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (CanvasEdgeArrowNoneBtn != null) CanvasEdgeArrowNoneBtn.Opacity = style == "none" ? 1.0 : 0.4;
         if (CanvasEdgeArrowSingleBtn != null) CanvasEdgeArrowSingleBtn.Opacity = style == "single" ? 1.0 : 0.4;
         if (CanvasEdgeArrowBothBtn != null) CanvasEdgeArrowBothBtn.Opacity = style == "both" ? 1.0 : 0.4;
+        SetCanvasEdgeArrowGlyph(style);
+    }
+
+    /// <summary>按当前箭头样式切换主按钮三态符号（none=直线 / single=右箭头 / both=双向箭头，均自绘 Path 描边，照抄 -/+ 方法）。
+    /// 三态互斥：只显示当前样式对应的那个，避免叠加。</summary>
+    private void SetCanvasEdgeArrowGlyph(string style)
+    {
+        if (CanvasEdgeArrowNoneGlyph != null)
+            CanvasEdgeArrowNoneGlyph.Visibility = style == "none" ? Visibility.Visible : Visibility.Collapsed;
+        if (CanvasEdgeArrowSingleGlyph != null)
+            CanvasEdgeArrowSingleGlyph.Visibility = style == "single" ? Visibility.Visible : Visibility.Collapsed;
+        if (CanvasEdgeArrowBothGlyph != null)
+            CanvasEdgeArrowBothGlyph.Visibility = style == "both" ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// 连线箭头三态符号的描边宽：照抄缩放胶囊 -/+ 的「恒定 2 物理像素」规则
+    /// （<c>StrokeThickness = 2 / RasterizationScale</c>，同一推导见 MainPage.ApplyGlyphStrokeThickness）。
+    /// <para>为什么必须按 DPI 算：固定写 2 DIP 时，125% 设备宽 = 2.5px、175% = 3.5px（半像素），
+    /// 直线上下两边各带 25%~50% 覆盖的灰边（截图取证：上下各 0.25 覆盖行）；三角形斜边可接受，直线不可。
+    /// 配合 XAML 里「坐标取 4 的倍数、线心 y=16」，任意常用缩放（100/125/150/175/200%）下
+    /// 中心与描边两边都落在整设备像素上 ⇒ 硬边、上下对称。</para>
+    /// </summary>
+    private void ApplyCanvasEdgeArrowGlyphStrokeThickness()
+    {
+        double scale = 1.0;
+        try { scale = XamlRoot?.RasterizationScale ?? 1.0; } catch { }
+        if (!(scale > 0)) scale = 1.0;
+        double t = 2.0 / scale;
+
+        if (CanvasEdgeArrowNoneGlyph != null) CanvasEdgeArrowNoneGlyph.StrokeThickness = t;
+        if (CanvasEdgeArrowSingleGlyph != null) CanvasEdgeArrowSingleGlyph.StrokeThickness = t;
+        if (CanvasEdgeArrowBothGlyph != null) CanvasEdgeArrowBothGlyph.StrokeThickness = t;
+
+        // 三选按钮的内容就是符号 Path 本身（XAML 里未命名）⇒ 直接从 Content 取。
+        if (CanvasEdgeArrowNoneBtn?.Content is Microsoft.UI.Xaml.Shapes.Path pNone) pNone.StrokeThickness = t;
+        if (CanvasEdgeArrowSingleBtn?.Content is Microsoft.UI.Xaml.Shapes.Path pSingle) pSingle.StrokeThickness = t;
+        if (CanvasEdgeArrowBothBtn?.Content is Microsoft.UI.Xaml.Shapes.Path pBoth) pBoth.StrokeThickness = t;
     }
 
     /// <summary>把一条连线的两端箭头归并成工具栏三态：none / single / both。</summary>
@@ -6915,10 +7151,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasEditContextMenu.UpdateLayout();
         double w = CanvasEditContextMenu.ActualWidth > 0 ? CanvasEditContextMenu.ActualWidth : 192;
         double h = CanvasEditContextMenu.ActualHeight > 0 ? CanvasEditContextMenu.ActualHeight : 152;
-        double maxX = Math.Max(4, CanvasOverlay.ActualWidth - w - 4);
-        double maxY = Math.Max(4, CanvasOverlay.ActualHeight - h - 4);
-        CanvasEditContextMenu.Margin = new Thickness(
-            Math.Clamp(pos.X, 4, maxX), Math.Clamp(pos.Y, 4, maxY), 0, 0);
+        // 同样走安全区：菜单若被钳到顶栏宿主底下，里面的行也一样点不动。
+        CanvasEditContextMenu.Margin = new Thickness(ClampOverlayX(pos.X, w), ClampOverlayY(pos.Y, h), 0, 0);
         _canvasEditMenuOpen = true;
     }
 
@@ -7121,6 +7355,33 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         });
     }
 
+    /// <summary>设置视口四边被【上层浮层】占掉的量（DIP），悬浮胶囊/文本菜单的钳制会避开这些带。
+    /// 由 MainPage 在布局变化（窗口尺寸 / 顶栏尺寸 / 侧栏开合）时推送。全 0 = 不避让（旧行为）。</summary>
+    public void SetCanvasViewportInsets(double left, double top, double right, double bottom)
+    {
+        if (Math.Abs(_canvasInsetL - left) < 0.5 && Math.Abs(_canvasInsetT - top) < 0.5 &&
+            Math.Abs(_canvasInsetR - right) < 0.5 && Math.Abs(_canvasInsetB - bottom) < 0.5) return;
+        _canvasInsetL = left; _canvasInsetT = top; _canvasInsetR = right; _canvasInsetB = bottom;
+        // 安全区变了 ⇒ 按新边界重新钳制（两张胶囊都要重落位，否则会停在旧的越界位置）。
+        _canvasToolbarPlaced = false;
+        _canvasEdgeToolbarPlaced = false;
+        SyncCanvasOverlayNow();
+    }
+
+    /// <summary>水平钳制：左/右各让开安全区 + 4 DIP 余量。</summary>
+    private double ClampOverlayX(double x, double w)
+    {
+        double min = 4 + _canvasInsetL;
+        return Math.Clamp(x, min, Math.Max(min, _vpW - w - 4 - _canvasInsetR));
+    }
+
+    /// <summary>垂直钳制：上/下各让开安全区 + 4 DIP 余量。</summary>
+    private double ClampOverlayY(double y, double h)
+    {
+        double min = 4 + _canvasInsetT;
+        return Math.Clamp(y, min, Math.Max(min, _vpH - h - 4 - _canvasInsetB));
+    }
+
     /// <summary>按当前视图状态把浮动控件/编辑框摆到目标卡片或连线上；不可见则整体隐藏。</summary>
     private void SyncCanvasOverlayNow()
     {
@@ -7144,13 +7405,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             if (editing) return;   // 编辑中：编辑框已摆好，别把整体藏掉
             CanvasOverlay.Visibility = Visibility.Collapsed;
             HideCanvasCardToolbar();
-            CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+            HideCanvasEdgeToolbar();
             return;
         }
 
         CanvasOverlay.Visibility = Visibility.Visible;
         ShowCanvasCardToolbar();   // 编辑态也保持显示（摆位随卡片走；用户要求）
-        CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasEdgeToolbar();
         // 浮动控件尺寸固定（两颗按钮），测一次即缓存：拖动时每次指针事件都会走到这里，
         // 重复 Measure 会白白触发布局。位置未变（<0.5px）也不再写 Margin，进一步省掉无效布局。
         if (_canvasToolbarW <= 0)
@@ -7175,10 +7436,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             (double)CanvasConnHandleHitMinDip, (double)CanvasConnHandleHitMaxDip);
         double gap = Math.Max(CanvasToolbarGap, handleBand + 4);
         double top = rect.Y - szH - gap;
-        left = Math.Clamp(left, 4, Math.Max(4, _vpW - clampW - 4));
+        // ⚠ 钳制必须走【安全区】：顶栏宿主/底部胶囊等上层浮层会吞掉指针，钳到它们底下的胶囊按钮点不动。
+        left = ClampOverlayX(left, clampW);
         // 双向钳制：上方空间不够时【不再翻到卡片下方】（避免一步跳变），而是停在视口上缘、允许侵入卡片内部；
         // 向下滚→钉上缘、向右滚→钉左缘，移出视口即停在对应边缘。
-        top = Math.Clamp(top, 4, Math.Max(4, _vpH - szH - 4));
+        top = ClampOverlayY(top, szH);
         if (!_canvasToolbarPlaced ||
             Math.Abs(left - _canvasToolbarLeft) > 0.5 || Math.Abs(top - _canvasToolbarTop) > 0.5)
         {
@@ -7219,6 +7481,32 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasCardToolbarHideAnim?.Begin();
     }
 
+    // 连线胶囊显隐：与卡片胶囊同源的淡入淡出（0.15s），淡出结束才 Collapsed（放掉命中）。
+    private void ShowCanvasEdgeToolbar()
+    {
+        if (CanvasEdgeToolbar == null) return;
+        CanvasEdgeToolbarHideAnim?.Stop();
+        if (_edgeToolbarShown) return;
+        _edgeToolbarShown = true;
+        CanvasEdgeToolbar.Visibility = Visibility.Visible;
+        CanvasEdgeToolbar.Opacity = 0;
+        CanvasEdgeToolbarShowAnim?.Begin();
+    }
+
+    private void HideCanvasEdgeToolbar()
+    {
+        if (CanvasEdgeToolbar == null) return;
+        HideCanvasEdgePickers();   // 连线胶囊收起（取消选中/切卡片/退出模式）→ 两个二级面板一并收起
+        if (!_edgeToolbarShown)
+        {
+            CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _edgeToolbarShown = false;
+        CanvasEdgeToolbarShowAnim?.Stop();
+        CanvasEdgeToolbarHideAnim?.Begin();
+    }
+
     /// <summary>把边工具栏摆到选中连线锚点附近（仿 Obsidian Canvas）：
     /// X=连线贝塞尔中点 X，Y=靠上方卡片连接点 Y；出厂在视口外时【双向钳制】到视口边缘，
     /// 并尽可能满足原 XY（向下滚→钉视口上缘，向右滚→钉视口左缘，皆不够则停最近角）。</summary>
@@ -7228,25 +7516,35 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             !TryGetCanvasEdgeToolbarAnchorScreen(_selectedCanvasEdgeId, out var anchor))
         {
             CanvasOverlay.Visibility = Visibility.Collapsed;
-            CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+            HideCanvasEdgeToolbar();
             return;
         }
         CanvasOverlay.Visibility = Visibility.Visible;
         HideCanvasCardToolbar();
-        CanvasEdgeToolbar.Visibility = Visibility.Visible;
-        RefreshEdgeArrowButtons();
+        ShowCanvasEdgeToolbar();
+        RefreshEdgeArrowButtons();   // 主按钮字形 = 当前箭头样式
         if (_canvasEdgeToolbarW <= 0)
         {
+            // ⚠ Measure 的 DesiredSize【含 Margin】（卡片胶囊踩过同一个坑）：上次定位写入的 (left,top) 会被算进
+            //    宽高 ⇒ 宽度畸大、left/top 被钳到视口左上，看起来"脱离连线"。故测前把 Margin 归零并强制重新落位。
+            var saved = CanvasEdgeToolbar.Margin;
+            CanvasEdgeToolbar.Margin = new Thickness(0);
+            _canvasEdgeToolbarPlaced = false;
             CanvasEdgeToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             var m = CanvasEdgeToolbar.DesiredSize;
             _canvasEdgeToolbarW = m.Width;
             _canvasEdgeToolbarH = m.Height;
+            CanvasEdgeToolbar.Margin = saved;
         }
         // 锚点在工具栏上方留出间隙；双向各自钳制到 [4, 视口 - 工具栏尺寸 - 4]
-        double left = anchor.X - _canvasEdgeToolbarW / 2.0;
+        // 展开二级面板时右缘钳制要用【展开态真实宽】，否则内容被视口截断、圆角还在（同卡片胶囊）。
+        double clampW = ((_canvasEdgeArrowPickerShown || _canvasEdgeColorPickerShown) && _canvasEdgeToolbarExpandedW > 0)
+            ? _canvasEdgeToolbarExpandedW : _canvasEdgeToolbarW;
+        double left = anchor.X - _canvasEdgeToolbarW / 2.0;   // 窄态宽度跟踪连线中点（展开时不重新居中）
         double top = anchor.Y - _canvasEdgeToolbarH - CanvasToolbarGap;
-        left = Math.Clamp(left, 4, Math.Max(4, _vpW - _canvasEdgeToolbarW - 4));
-        top = Math.Clamp(top, 4, Math.Max(4, _vpH - _canvasEdgeToolbarH - 4));
+        // 同上：钳到上层浮层底下就点不动了，一律走安全区。
+        left = ClampOverlayX(left, clampW);
+        top = ClampOverlayY(top, _canvasEdgeToolbarH);
         if (!_canvasEdgeToolbarPlaced ||
             Math.Abs(left - _canvasEdgeToolbarLeft) > 0.5 || Math.Abs(top - _canvasEdgeToolbarTop) > 0.5)
         {
@@ -7320,7 +7618,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasEditBox.Margin = new Thickness(0);
         CanvasEditBox.RenderTransform = new MatrixTransform { Matrix = m };
 
-        CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasEdgeToolbar();
         CanvasOverlay.Visibility = Visibility.Visible;
         CanvasEditBox.Visibility = Visibility.Visible;   // Opacity=0（XAML）→ 不可见、但可命中/可输入
         EnsureCanvasEditLineSpacing();   // 行距锁到 Win2D 实测值（仅供点击落光标的命中映射对齐）

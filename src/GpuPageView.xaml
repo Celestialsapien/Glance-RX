@@ -57,12 +57,24 @@
                 <Storyboard x:Name="CanvasCardToolbarHideAnim">
                     <DoubleAnimation Storyboard.TargetName="CanvasCardToolbar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
                 </Storyboard>
+                <!-- 连线胶囊：与卡片胶囊同一套淡入淡出（0.15s）。淡出结束时才 Collapsed（放掉命中，
+                     避免透明态仍拦截点击）—— 由 CanvasEdgeToolbarHideAnim.Completed 收尾。 -->
+                <Storyboard x:Name="CanvasEdgeToolbarShowAnim">
+                    <DoubleAnimation Storyboard.TargetName="CanvasEdgeToolbar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/>
+                </Storyboard>
+                <Storyboard x:Name="CanvasEdgeToolbarHideAnim">
+                    <DoubleAnimation Storyboard.TargetName="CanvasEdgeToolbar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
+                </Storyboard>
             </Grid.Resources>
 
             <!-- 卡片悬浮控件：改为与画笔颜色胶囊同源的胶囊外观（亚克力底 + 大圆角 + 投影）。
                  圆角 / 投影 / 描边画刷均与 PenOptionsCapsule 对齐；固定高度使 CornerRadius=高/2 ⇒ 真胶囊。
                  内部按钮的三态反馈在步骤 2 接管（本步只改容器外观，按钮仍透明）。 -->
+            <!-- ⚠ Z 序：本胶囊用 Canvas.ZIndex 提到【不可见输入宿主】CanvasEditBox 之上 —— 它在 XAML 里声明得更晚
+                 （更晚 = 更靠上），一旦胶囊因钳制压到卡片矩形上，点击就会被那个 Opacity=0 的编辑框吃掉
+                 ⇒ "看得见点不动"。浮层 chrome 必须永远在输入宿主之上。 -->
             <Border x:Name="CanvasCardToolbar" Visibility="Collapsed" Opacity="0"
+                    Canvas.ZIndex="10"
                     HorizontalAlignment="Left" VerticalAlignment="Top"
                     Background="{ThemeResource FlyoutPresenterBackground}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -169,62 +181,158 @@
                 </StackPanel>
             </Border>
 
-            <Border x:Name="CanvasEdgeToolbar" Visibility="Collapsed"
+            <!-- 连线悬浮控件：与卡片胶囊【完全同源】（亚克力底 + 大圆角 + 投影 + 同一套按钮三态），
+                 让"选中卡片"与"选中连线"两处浮层的观感与手感一致。
+                 两个二级面板（箭头样式 / 颜色）默认折叠，点各自按钮在其右侧内联展开、二者互斥（同一时刻只开一个）；
+                 选完即收起并回到窄态 —— 与卡片胶囊的二级颜色胶囊同一套交互语言。
+                 ⚠ 与卡片胶囊一样刻意【不挂】ToolTipService.ToolTip：图标语义自明，气泡会盖住连线上方区域。
+                 ⚠ 左右间距对称（与卡片胶囊同一口径，以"按钮 ↔ 面板首个元素"的间距为准）：
+                    箭头面板：左侧 = 外层 Spacing(4) + 分隔线(1 + 右距 4) + 内层 Spacing(4) = 13 ⇒ 右缘补 Margin.Right=9（+外层 4 = 13）；
+                    颜色面板：左侧 = 外层 Spacing(4) + 分隔线(1 + 右距 4) + 内层 Spacing(8) = 17 ⇒ 右缘补 Margin.Right=13（+外层 4 = 17）。 -->
+            <!-- 同卡片胶囊：Canvas.ZIndex 提到不可见输入宿主之上（理由见上）。 -->
+            <Border x:Name="CanvasEdgeToolbar" Visibility="Collapsed" Opacity="0"
+                    Canvas.ZIndex="10"
                     HorizontalAlignment="Left" VerticalAlignment="Top"
-                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
-                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="6" Padding="2">
-                <StackPanel Orientation="Horizontal" Spacing="2">
-                    <Button x:Name="CanvasEdgeDeleteButton" Click="CanvasEdgeDeleteButton_Click"
-                            Padding="6,3" Background="Transparent" BorderThickness="0"
-                            ToolTipService.ToolTip="删除连线">
-                        <SymbolIcon Symbol="Delete"/>
+                    Background="{ThemeResource FlyoutPresenterBackground}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="20" Height="42" Padding="6,4"
+                    local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18">
+                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                    <!-- 箭头样式：按钮本体【显示当前样式】（无=横线 / 单=横线+右箭头 / 双=横线+双箭头），点击在右侧展开三选。
+                         全部自绘矢量（XAML Path），不依赖 Segoe 字形，规避描边不一致 / 拼接缝 / 占位不等。 -->
+                    <Button x:Name="CanvasEdgeArrowButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEdgeArrowButton_Click"
+                            Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                            Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Background="Transparent" BorderThickness="0">
+                        <!-- 当前箭头样式（三态互斥）：none=横线 / single=横线+右箭头 / both=横线+双箭头。
+                             【完全照抄缩放胶囊 -/+ 的方法，两条缺一不可】：
+                             ① 描边宽恒定 2【物理像素】——XAML 不写死 DIP，由
+                                ApplyCanvasEdgeArrowGlyphStrokeThickness() 按 2 / RasterizationScale 写入；
+                             ② 坐标一律取 4 DIP 的倍数（8/12/16/20/24），线心 y=16 ⇒ 100/125/150/175/200% 下
+                                中心与描边两边都落整设备像素 ⇒ 直线上下无软边、上下对称。
+                             每个符号【单一描边 Path】(Stretch=None + Flat 端帽)，箭头用 45° 开口箭头(chevron)，
+                             斜边虚边可接受。几何 bbox 中心均为 (16,16) ⇒ 三态天然对齐。 -->
+                        <Grid>
+                            <Path x:Name="CanvasEdgeArrowNoneGlyph" Width="32" Height="32" Stretch="None"
+                                  Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="2"
+                                  StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"
+                                  Data="M8,16 L24,16" Visibility="Collapsed" IsHitTestVisible="False"/>
+                            <Path x:Name="CanvasEdgeArrowSingleGlyph" Width="32" Height="32" Stretch="None"
+                                  Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="2"
+                                  StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"
+                                  Data="M8,16 L20,16 M20,12 L24,16 L20,20" Visibility="Collapsed" IsHitTestVisible="False"/>
+                            <Path x:Name="CanvasEdgeArrowBothGlyph" Width="32" Height="32" Stretch="None"
+                                  Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="2"
+                                  StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"
+                                  Data="M12,16 L20,16 M20,12 L24,16 L20,20 M12,12 L8,16 L12,20" Visibility="Collapsed" IsHitTestVisible="False"/>
+                        </Grid>
                     </Button>
-                    <Border Width="1" Margin="1,3"
-                            Background="{ThemeResource ControlStrokeColorDefaultBrush}"/>
-                    <Button x:Name="CanvasEdgeArrowNoneBtn" Tag="none" Click="CanvasEdgeArrow_Click"
-                            Padding="6,3" Background="Transparent" BorderThickness="0"
-                            ToolTipService.ToolTip="无箭头">
-                        <TextBlock Text="—" FontSize="12"/>
-                    </Button>
-                    <Button x:Name="CanvasEdgeArrowSingleBtn" Tag="single" Click="CanvasEdgeArrow_Click"
-                            Padding="6,3" Background="Transparent" BorderThickness="0"
-                            ToolTipService.ToolTip="单向箭头">
-                        <TextBlock Text="→" FontSize="12"/>
-                    </Button>
-                    <Button x:Name="CanvasEdgeArrowBothBtn" Tag="both" Click="CanvasEdgeArrow_Click"
-                            Padding="6,3" Background="Transparent" BorderThickness="0"
-                            ToolTipService.ToolTip="双向箭头">
-                        <TextBlock Text="↔" FontSize="12"/>
-                    </Button>
-                    <Border Width="1" Margin="1,3"
-                            Background="{ThemeResource ControlStrokeColorDefaultBrush}"/>
-                    <StackPanel Orientation="Horizontal" Spacing="1" VerticalAlignment="Center">
-                        <Button Tag="#606670" Click="CanvasEdgeColor_Click" Padding="2"
-                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="默认灰">
-                            <Ellipse Width="12" Height="12" Fill="#606670"/>
+                    <!-- 二级箭头：内联展开（默认折叠）。选中态用【不透明度】表达（当前 1.0 / 其余 0.4），
+                         由 RefreshEdgeArrowButtons 按选中连线的实际两端写。 -->
+                    <StackPanel x:Name="CanvasEdgeArrowPanel" Visibility="Collapsed" Orientation="Horizontal" Spacing="4"
+                                VerticalAlignment="Center" Margin="0,0,9,0">
+                        <Border Width="1" Margin="0,3,4,3" Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                        <Button x:Name="CanvasEdgeArrowNoneBtn" Tag="none" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEdgeArrowOption_Click"
+                                Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                                Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="Transparent" BorderThickness="0">
+                            <Path Width="32" Height="32" Stretch="None" Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="2"
+                                  StrokeStartLineCap="Flat" StrokeEndLineCap="Flat" Data="M8,16 L24,16" IsHitTestVisible="False"/>
                         </Button>
-                        <Button Tag="#3B82F6" Click="CanvasEdgeColor_Click" Padding="2"
-                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="蓝">
-                            <Ellipse Width="12" Height="12" Fill="#3B82F6"/>
+                        <Button x:Name="CanvasEdgeArrowSingleBtn" Tag="single" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEdgeArrowOption_Click"
+                                Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                                Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="Transparent" BorderThickness="0">
+                            <Path Width="32" Height="32" Stretch="None" Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="2"
+                                  StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"
+                                  Data="M8,16 L20,16 M20,12 L24,16 L20,20" IsHitTestVisible="False"/>
                         </Button>
-                        <Button Tag="#22C55E" Click="CanvasEdgeColor_Click" Padding="2"
-                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="绿">
-                            <Ellipse Width="12" Height="12" Fill="#22C55E"/>
-                        </Button>
-                        <Button Tag="#F59E0B" Click="CanvasEdgeColor_Click" Padding="2"
-                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="橙">
-                            <Ellipse Width="12" Height="12" Fill="#F59E0B"/>
-                        </Button>
-                        <Button Tag="#EF4444" Click="CanvasEdgeColor_Click" Padding="2"
-                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="红">
-                            <Ellipse Width="12" Height="12" Fill="#EF4444"/>
-                        </Button>
-                        <Button Tag="#A855F7" Click="CanvasEdgeColor_Click" Padding="2"
-                                Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="紫">
-                            <Ellipse Width="12" Height="12" Fill="#A855F7"/>
+                        <Button x:Name="CanvasEdgeArrowBothBtn" Tag="both" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEdgeArrowOption_Click"
+                                Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                                Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="Transparent" BorderThickness="0">
+                            <Path Width="32" Height="32" Stretch="None" Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="2"
+                                  StrokeStartLineCap="Flat" StrokeEndLineCap="Flat"
+                                  Data="M12,16 L20,16 M20,12 L24,16 L20,20 M12,12 L8,16 L12,20" IsHitTestVisible="False"/>
                         </Button>
                     </StackPanel>
+                    <!-- 颜色：与卡片胶囊同一个调色盘图标（FontIcon E790；Symbol 枚举无 Color 成员）。 -->
+                    <Button x:Name="CanvasEdgeColorButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEdgeColorButton_Click"
+                            Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                            Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Background="Transparent" BorderThickness="0">
+                        <FontIcon Glyph="&#xE790;" FontSize="20"
+                                  FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
+                    </Button>
+                    <!-- 二级颜色：7 色与卡片胶囊【同一套色值】，且一视同仁 —— 首位灰只是"其中一色"，
+                         不再承担"恢复默认"的特殊语义（连线未着色时本就以默认灰绘制，见 DrawCanvasEdge 的 CanvasEdgeColor）。
+                         底色档照抄卡片：逐按钮在 XAML 解析期声明（运行时写 Resources 会在主题切换时闪退）。 -->
+                    <StackPanel x:Name="CanvasEdgeColorDotPanel" Visibility="Collapsed" Orientation="Horizontal" Spacing="8"
+                                VerticalAlignment="Center" Margin="0,0,13,0">
+                        <Border Width="1" Margin="0,3,4,3" Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                        <Button x:Name="CanvasEdgeColorGrayBtn" Click="CanvasEdgeColorDot_Click" Tag="#8A8F98" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#8A8F98" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#8A8F98"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#8A8F98"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasEdgeColorBlueBtn" Click="CanvasEdgeColorDot_Click" Tag="#2E6FE0" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2E6FE0" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#2E6FE0"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2E6FE0"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasEdgeColorCyanBtn" Click="CanvasEdgeColorDot_Click" Tag="#16B1C4" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#16B1C4" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#16B1C4"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#16B1C4"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasEdgeColorGreenBtn" Click="CanvasEdgeColorDot_Click" Tag="#2FA84F" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#2FA84F" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#2FA84F"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2FA84F"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasEdgeColorYellowBtn" Click="CanvasEdgeColorDot_Click" Tag="#F2C200" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#F2C200" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#F2C200"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#F2C200"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasEdgeColorRedBtn" Click="CanvasEdgeColorDot_Click" Tag="#E5393B" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="#E5393B" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#E5393B"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#E5393B"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="CanvasEdgeColorBlackBtn" Click="CanvasEdgeColorDot_Click" Tag="#000000" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="Black" BorderThickness="2" BorderBrush="Transparent" Padding="0">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Black"/>
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Black"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+                            </Button.Resources>
+                        </Button>
+                    </StackPanel>
+                    <Button x:Name="CanvasEdgeDeleteButton" Style="{StaticResource ButtonNoStateMachineStyle}" Click="CanvasEdgeDeleteButton_Click"
+                            Width="32" Height="32" CornerRadius="16" UseLayoutRounding="True"
+                            Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Background="Transparent" BorderThickness="0">
+                        <SymbolIcon Symbol="Delete"/>
+                    </Button>
                 </StackPanel>
             </Border>
 
@@ -287,8 +395,10 @@
                  ⇒ 本菜单刻意全是【非聚焦】元素：每一行是 Grid 而不是 Button（Button 按下会拿焦点），
                     只走 PointerPressed ⇒ 编辑框全程持有焦点，选区/光标/IME 状态零变动。
                  底板/描边/圆角/投影与卡片胶囊同一套主题资源，深浅主题自动跟随；悬停底色复用 App.xaml 里
-                 「…」溢出菜单那一档（MenuFlyoutItemBackgroundPointerOver），不新造颜色。 -->
+                 「…」溢出菜单那一档（MenuFlyoutItemBackgroundPointerOver），不新造颜色。
+                 ⚠ Z 序：菜单必须在【两张胶囊之上、且压住不可见输入宿主】，故取更高的 ZIndex。 -->
             <Border x:Name="CanvasEditContextMenu" Visibility="Collapsed"
+                    Canvas.ZIndex="20"
                     HorizontalAlignment="Left" VerticalAlignment="Top"
                     Background="{ThemeResource FlyoutPresenterBackground}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"

@@ -851,6 +851,9 @@ public sealed partial class MainPage : Page
             if (PenOptionsPopup != null && PenOptionsPopup.IsOpen)
                 PositionPenOptionsPopup();
         };
+        // 视图区自身尺寸变化（含首次打开文档由 Collapsed→Visible，0 → 实际尺寸）也要重算白板胶囊的安全区：
+        // 否则"打开文档后第一次钳制"用的还是 0 内缩，胶囊照样会被顶栏宿主压住。
+        GpuViewer.SizeChanged += (s, args) => UpdateCanvasViewportInsets();
 
         // Pen mode 按钮的勾选态：底色 + 符号前景都跟随实时画笔色，交给 ToggleButtonVisualOverride 的
         // 单按钮覆写委托处理（见上面 Attach 调用）。背景三态分键，且**与阅读模式按钮同一机制**：
@@ -4854,6 +4857,7 @@ public sealed partial class MainPage : Page
         if (TopToolbarHost == null) return;
         TopToolbarHost.Margin = new Thickness(0, -1, 0, 0);
         UpdateTopToolbarClip();
+        UpdateCanvasViewportInsets();   // 顶栏几何变了 ⇒ 同步白板胶囊的安全区
     }
 
     /// <summary>
@@ -5365,6 +5369,60 @@ public sealed partial class MainPage : Page
         var p = ThumbnailSidebarPanel.Padding;
         if (Math.Abs(p.Top - top) > 0.5)
             ThumbnailSidebarPanel.Padding = new Thickness(p.Left, top, p.Right, p.Bottom);
+
+        UpdateCanvasViewportInsets();   // 顶栏高度变了 ⇒ 白板悬浮胶囊的安全区也要跟着变
+    }
+
+    /// <summary>
+    /// 把【盖在 GpuPageView 之上、会吞掉指针】的那层浮层占掉的视口四边量告诉 GpuPageView，
+    /// 让白板悬浮胶囊（卡片 / 连线）与文本菜单的视口钳制避开这些带 —— 否则胶囊被钳到它们底下时
+    /// 会"看得见点不动"（用户报告：钳到视口上边缘时 100% 按钮失效）。
+    /// <para>⚠ 根因（与 <see cref="UpdateSidebarTopInset"/> 同一条）：顶部工具栏宿主是
+    /// <c>Canvas.ZIndex="50"</c> 的<b>透明底</b> Grid，SidebarSplitView（含 GpuPageView）是 ZIndex=0，
+    /// 恒在其下 ⇒ 整条顶边都被它吃掉指针；底部缩放胶囊与对比视图 +/- 圆钮同理（ZIndex 40/50）。</para>
+    /// 口径同样取自【实测】矩形，不硬编码；只统计<b>贴边</b>的浮层，居中遮罩不该吃掉整条边。
+    /// </summary>
+    private void UpdateCanvasViewportInsets()
+    {
+        if (GpuViewer == null) return;
+        double vw = GpuViewer.ActualWidth, vh = GpuViewer.ActualHeight;
+        if (vw <= 0 || vh <= 0) return;
+
+        // 只避让【顶 / 底】两条带：左右两侧只有角上的圆钮占位，为它们整条内缩会把中间的可用宽度也吃掉，
+        // 不划算；角上的圆钮本就贴在顶带下方，直接并入顶带（见下）即可。
+        double top = BottomOf(TopToolbarHost);          // 透明底宿主：整条顶边都吃指针
+        top = Math.Max(top, BottomOf(SecondaryOpenPillBorder));    // 左上角「+」（单文档时常驻可见）
+        top = Math.Max(top, BottomOf(SecondaryClosePillBorder));   // 右上角「×」（对比视图展开时常驻）
+        // 缩放胶囊（BottomZoomPillBorder）靠 Opacity 淡入淡出隐藏，但 Opacity=0 的元素【仍参与命中测试、
+        // 仍拦截指针】，与「可见性」无关。故无论其当前是否淡出，都必须预留整行高度；否则悬浮胶囊钳到视口
+        // 底部时会正好压在缩放胶囊矩形内而「看得见点不动」。提起一行 = 胶囊自身高度 + 其底边外边距，
+        // 这样钳制后永不与缩放胶囊有任何重合。
+        double zoomPillH = BottomZoomPillBorder?.ActualHeight ?? 0;
+        if (zoomPillH <= 0 && BottomZoomPillBorder != null && !double.IsNaN(BottomZoomPillBorder.Height))
+            zoomPillH = BottomZoomPillBorder.Height;                // 未布局/已脱树兜底：用设计高度
+        if (zoomPillH <= 0) zoomPillH = 42;                        // 最坏兜底：设计稿高度
+        double zoomPillBottomMargin = BottomZoomPill?.Margin.Bottom ?? 10;
+        double bottom = zoomPillH + zoomPillBottomMargin;          // 永远预留，与缩放胶囊错开
+        GpuViewer.SetCanvasViewportInsets(0, top, 0, bottom);
+
+        // 元素在 GpuViewer 坐标系里的上/下沿；不可见 / 已淡出 / 已脱树 ⇒ 0（= 不占边）。
+        double BottomOf(FrameworkElement? el)
+        {
+            var t = TopOf(el);
+            if (t == 0) return 0;
+            return t + (el?.ActualHeight ?? 0);
+        }
+
+        double TopOf(FrameworkElement? el)
+        {
+            if (el == null || el.Visibility != Visibility.Visible || el.Opacity <= 0.05) return 0;
+            if (el.ActualWidth <= 0 || el.ActualHeight <= 0) return 0;
+            try
+            {
+                return el.TransformToVisual(GpuViewer).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+            }
+            catch { return 0; }   // 元素已脱树（窗口关闭中）⇒ 当作不占边
+        }
     }
 
 
