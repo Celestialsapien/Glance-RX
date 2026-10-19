@@ -4102,10 +4102,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         try
         {
             var selColor = GetCanvasSelectionColor();   // 循环外取一次（主题字典查找，不必每行重取）
-            int len = _canvasEditText.Length;
+            var live = _canvasEditLive;
+            string display = live?.DisplayText ?? _canvasEditText;
+            int len = display.Length;
             var sel = CanvasEditBox.Document.Selection;
-            int a = Math.Clamp(Math.Min(sel.StartPosition, sel.EndPosition), 0, len);
-            int b = Math.Clamp(Math.Max(sel.StartPosition, sel.EndPosition), 0, len);
+            // 选区是【源串】下标，排版是【显示串】⇒ 先映射（隐藏的标记会让两边差若干个字符）。
+            int a = live != null ? live.ToDisplay(Math.Clamp(Math.Min(sel.StartPosition, sel.EndPosition), 0, _canvasEditText.Length))
+                                 : Math.Clamp(Math.Min(sel.StartPosition, sel.EndPosition), 0, len);
+            int b = live != null ? live.ToDisplay(Math.Clamp(Math.Max(sel.StartPosition, sel.EndPosition), 0, _canvasEditText.Length))
+                                 : Math.Clamp(Math.Max(sel.StartPosition, sel.EndPosition), 0, len);
+            a = Math.Clamp(a, 0, len);
+            b = Math.Clamp(b, 0, len);
             if (b <= a) return;
             var lms = layout.LineMetrics;
             if (lms == null) return;
@@ -4133,7 +4140,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                     // 正是"跨行蓝底不完全"的根因）。末字符是换行符 '\n' → 取它的 leading（= 换行符之前 = 行末）；
                     // 末行无换行符 → 取其 trailing（= 文末）。
                     int last = lineEnd - 1;
-                    bool lastIsNewline = last >= 0 && last < _canvasEditText.Length && _canvasEditText[last] == '\n';
+                    bool lastIsNewline = last >= 0 && last < display.Length && display[last] == '\n';
                     pR = layout.GetCaretPosition(last, !lastIsNewline);
                 }
                 else
@@ -4179,6 +4186,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _canvasSelLastEnd = en;
             _canvasSelLastActive = active;
             int ci = active;
+            // 活动端是【源串】偏移，layout 是【显示串】⇒ 过映射后再取坐标（被隐藏的标记会少若干个字符）。
+            if (_canvasEditLive is { } live)
+                ci = Math.Clamp(live.ToDisplay(active), 0, live.DisplayText.Length);
             float cx, cy, ch;
             if (layout != null)
             {
@@ -4281,6 +4291,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 选中态单击就已经进编辑（与 Obsidian 一致），所以第二下其实落在编辑态内部：原生会把它当成
         // "双击选词"（甚至整段选中）。用户要的是"光标停在第一下算好的位置"，故这里把选区恢复成
         // 进编辑时的折叠光标。（这次手势顺带补发的菜单请求由 ContextMenuOpening 的"左键不开菜单"规则压掉。）
+        bool entryDoubleTap = false;
         if (_canvasEditEntryVp is { } entryVp && _canvasEditEntryTick != 0)
         {
             double elapsedMs = (Stopwatch.GetTimestamp() - _canvasEditEntryTick) * 1000.0 / Stopwatch.Frequency;
@@ -4288,6 +4299,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 Math.Abs(p.X - entryVp.X) <= CanvasDoubleClickSlopDip &&
                 Math.Abs(p.Y - entryVp.Y) <= CanvasDoubleClickSlopDip)
             {
+                entryDoubleTap = true;
                 _canvasEditEntryTick = 0;   // 只处理一次（第三下起交回原生行为）
                 e.Handled = true;           // 别再冒泡给 Viewer（那边会把这次按下当成新的卡片手势）
                 int restore = _canvasEditEntryCaret;
@@ -4308,6 +4320,20 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                         ScreenCanvas.Invalidate();
                     });
                 }
+            }
+        }
+        // 点击定位接管（C）：可见串已按光标隐藏了部分标记 ⇒ 原生命中测试按【文档排版】算会偏，
+        // 一律改用"编辑 layout 命中 → 反查源偏移"。双击/三击（同点连击）不接管：交给原生的选词/选段，
+        // 只把该行标记全部展开（用户口径：双击该行展开该行全部语法）。
+        if (!entryDoubleTap)
+        {
+            int docOffset = MapCanvasEditPointToDocOffset(p);
+            if (docOffset >= 0)
+            {
+                _canvasEditDragAnchor = docOffset;
+                _canvasEditDragLast = docOffset;
+                if (IsCanvasEditClickRepeat(p)) ExpandCanvasEditLine(docOffset);
+                else ApplyCanvasEditCaretAt(docOffset);
             }
         }
         _canvasPointerPos = p;
@@ -4650,33 +4676,100 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // 编辑态用单独缓存：编辑中的卡片文字以【实时文本】(_canvasEditText) 排版，不能与节点文本(node.Text)的缓存混用
     // （否则提交前的实时文本会污染节点缓存）。每次编辑进入只可能有一张卡 ⇒ 单槽即可。
     private CanvasTextLayout? _canvasEditTextLayout;
-    private string _canvasEditTextLayoutText = "";
+    private int _canvasEditTextLayoutKey = -1;   // 缓存键 = 可见串版本号（随光标/选区/展开状态递增）
     private double _canvasEditTextLayoutW, _canvasEditTextLayoutH;
     private int _canvasEditTextLayoutLineCount = 1;
     // 编辑态的行内代码/高亮底纹（随编辑 layout 一起重建）。
     private readonly List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> _canvasEditBackdrops = new();
+
+    // ---- 实时渲染（C，Obsidian 式逐处展开）----
+    // 可见串随光标变化：成对标记默认隐藏，光标落在哪一对里就展开哪一对；双击展开整行；全选展开全文。
+    // ⇒ 布局/命中在【显示串】坐标，光标/选区在【源串】坐标，两边都要过 _canvasEditLive 的映射。
+    private CanvasMarkdownLiveResult? _canvasEditLive;
+    private string _canvasEditLiveSrc = "";         // 这次可见串对应的源文本（引用比较即可，每次编辑都换新串）
+    private int _canvasEditLiveVersion;             // 每次重算 +1：布局缓存据此失效（不拼字符串 key，避免每帧分配）
+    private int _canvasEditLiveA = -1, _canvasEditLiveB = -1;
+    private int _canvasEditLiveE0 = -2, _canvasEditLiveE1 = -2;
+    private bool _canvasEditLiveAll;
+    // 双击展开整行：只记"行首偏移 + 是否生效"，展开范围每次按【当前光标行】现算 ——
+    // 存死区间会在行内插入/删除后错位（区间漂到相邻行 ⇒ 展开错行的标记）。
+    private bool _canvasEditExpandActive;
+    private int _canvasEditExpandLineStart = -1;
+    private int _canvasEditDragAnchor = -1;         // 编辑态拖选锚点（源串偏移）
+    private int _canvasEditDragLast = -1;           // 上一次已落定的拖选活动端（去重，免得每次移动都写 TOM）
+    private int _canvasEditPendingCaret = -1;       // 排队中的"单击落光标"请求（拖选/新点击会把它作废）
+    private long _canvasEditClickTick;              // 编辑态"点击序列"识别（双击展开行）
+    private Point _canvasEditClickVp;
+
+    /// <summary>按当前光标/选区/展开状态算出这一帧的可见串（含双向映射）。参数全没变时直接返回缓存 ——
+    /// 绘制每帧都会调用它，故这里刻意零字符串分配（不拼 key，改比"源串引用 + 四个下标 + 全选标志"）。</summary>
+    private CanvasMarkdownLiveResult BuildCanvasEditLive(string text)
+    {
+        int a = 0, b = 0;
+        try
+        {
+            var sel = CanvasEditBox.Document.Selection;
+            a = Math.Clamp(sel.StartPosition, 0, text.Length);
+            b = Math.Clamp(sel.EndPosition, 0, text.Length);
+        }
+        catch { }
+        if (a > b) (a, b) = (b, a);
+
+        // 光标所在行（展开范围按它现算）
+        int lineStart = a;
+        while (lineStart > 0 && text[lineStart - 1] != '\n') lineStart--;
+        // 双击展开的行只在"光标仍在该行内"时有效：点/移到别的行 = 自动收起。
+        if (_canvasEditExpandActive && lineStart != _canvasEditExpandLineStart) _canvasEditExpandActive = false;
+        int e0 = -1, e1 = -1;
+        if (_canvasEditExpandActive)
+        {
+            e0 = lineStart;
+            e1 = lineStart;
+            while (e1 < text.Length && text[e1] != '\n') e1++;
+        }
+
+        // 全选 = 展开全文标记（用户口径："全选才是展开全部文字的语法"）。
+        bool expandAll = text.Length > 0 && a == 0 && b == text.Length;
+        if (_canvasEditLive != null && ReferenceEquals(_canvasEditLiveSrc, text) &&
+            a == _canvasEditLiveA && b == _canvasEditLiveB &&
+            e0 == _canvasEditLiveE0 && e1 == _canvasEditLiveE1 &&
+            expandAll == _canvasEditLiveAll)
+            return _canvasEditLive;
+
+        _canvasEditLive = CanvasMarkdown.ParseLive(text, a, b, e0, e1, expandAll);
+        _canvasEditLiveSrc = text;
+        _canvasEditLiveA = a;
+        _canvasEditLiveB = b;
+        _canvasEditLiveE0 = e0;
+        _canvasEditLiveE1 = e1;
+        _canvasEditLiveAll = expandAll;
+        _canvasEditLiveVersion++;
+        return _canvasEditLive;
+    }
+
     private CanvasTextLayout? GetCanvasEditTextLayout(double maxW, double maxH)
     {
-        if (maxW <= 0 || maxH <= 0 || string.IsNullOrEmpty(_canvasEditText)) return null;
-        if (_canvasEditTextLayout != null && _canvasEditTextLayoutText == _canvasEditText &&
+        if (maxW <= 0 || maxH <= 0) return null;
+        var live = BuildCanvasEditLive(_canvasEditText);
+        string display = live.DisplayText;
+        if (display.Length == 0) return null;   // 空文本：调用方（光标/选区）各自走"无排版"分支
+        if (_canvasEditTextLayout != null && _canvasEditTextLayoutKey == _canvasEditLiveVersion &&
             Math.Abs(_canvasEditTextLayoutW - maxW) < 0.5 && Math.Abs(_canvasEditTextLayoutH - maxH) < 0.5)
             return _canvasEditTextLayout;
         _canvasEditTextLayout?.Dispose();
         _canvasTextFormat ??= CreateCanvasTextFormat();
-        _canvasEditTextLayout = new CanvasTextLayout(ScreenCanvas, _canvasEditText, _canvasTextFormat, (float)maxW, (float)maxH);
-        // 编辑态套样式：只改字重/字形/删除线/等宽，**不剔除任何字符**（标记照常显示），
-        // 故字符下标与文档 1:1，光标/选区/命中全部不用换算。未闭合标记按单边语法生效（见 ParseStyling）。
-        var spans = CanvasMarkdown.ParseStyling(_canvasEditText);
-        ApplyCanvasMarkdownFormatting(_canvasEditTextLayout, _canvasEditText.Length, spans);
-        BuildCanvasEditBackdrops(_canvasEditTextLayout, _canvasEditText.Length, spans);
+        _canvasEditTextLayout = new CanvasTextLayout(ScreenCanvas, display, _canvasTextFormat, (float)maxW, (float)maxH);
+        // 样式区间由 ParseLive 直接给在【显示串】坐标上（含单边语法延到文末），这里不用再换算。
+        ApplyCanvasMarkdownFormatting(_canvasEditTextLayout, display.Length, live.Spans);
+        BuildCanvasEditBackdrops(_canvasEditTextLayout, display.Length, live.Spans);
         // 顺带缓存【真实行数】：用高度不限的 layout 量，与阅读态 GetCanvasTextLayout 同一口径（留白公式要用）。
         try
         {
-            using var full = new CanvasTextLayout(ScreenCanvas, _canvasEditText, _canvasTextFormat, (float)maxW, 1e5f);
+            using var full = new CanvasTextLayout(ScreenCanvas, display, _canvasTextFormat, (float)maxW, 1e5f);
             _canvasEditTextLayoutLineCount = Math.Max(1, full.LineCount);
         }
         catch { _canvasEditTextLayoutLineCount = 1; }
-        _canvasEditTextLayoutText = _canvasEditText;
+        _canvasEditTextLayoutKey = _canvasEditLiveVersion;
         _canvasEditTextLayoutW = maxW;
         _canvasEditTextLayoutH = maxH;
         return _canvasEditTextLayout;
@@ -5642,6 +5735,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 二者叠加：元素级管卡内元素的即时求值，资源级兜住框架按下/捕获期间按箭头槽的求值。
         CanvasEditBox.OverrideCursor(CanvasIBeamCursor);
         _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;   // 选区活动端基线随会话重置
+        // 实时渲染（C）的会话态：展开行 / 连击识别 / 拖选锚点 / 可见串缓存，每次进编辑都从零开始。
+        _canvasEditExpandActive = false;
+        _canvasEditExpandLineStart = -1;
+        _canvasEditClickTick = 0;
+        _canvasEditDragAnchor = _canvasEditDragLast = _canvasEditPendingCaret = -1;
+        _canvasEditLive = null;
+        _canvasEditTextLayoutKey = -1;
         StartCaretBlink();
         InvalidateOverlay();   // 编辑卡本体由 Win2D 绘制（与阅读/选中态同源）
         DispatcherQueue.TryEnqueue(() =>
@@ -5737,6 +5837,110 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return displayIndex >= map.Count ? map[map.Count - 1] : map[displayIndex];
     }
 
+    /// <summary>【编辑态】视口点击点 → 源串（文档）偏移；-1 = 取不到（卡外 / 排版未就绪）。
+    /// 与 <see cref="MapCanvasClickToEditOffset"/> 的区别：那个用于"从阅读态点进来"（按阅读 layout 命中），
+    /// 本方法用于**编辑态内部**的点击/拖选（按编辑 layout 命中）。
+    /// 为什么必须自己算：可见串已按光标隐藏了部分标记 ⇒ 与原文档排版不同宽，
+    /// 让 RichEditBox 用自己的排版去做命中，光标会落在错字上。几何口径与 DrawCanvasCard 编辑分支完全一致
+    /// （topPad 用 ComputeCanvasEditTopPad，scrollY 取宿主 ScrollViewer 并夹到真实可滚动量）。</summary>
+    private int MapCanvasEditPointToDocOffset(Point vp)
+    {
+        if (_canvasEditNodeId == null) return -1;
+        CanvasNode? node;
+        lock (_canvasLock) _canvasIndex.TryGetValue(_canvasEditNodeId, out node);
+        if (node == null) return -1;
+        if (!CanvasViewportToPage(vp, out int pageIdx, out double px, out double py) || pageIdx != node.GlancePage)
+            return -1;
+
+        double w = Math.Max(12, node.Width);
+        double h = Math.Max(12, node.Height);
+        double tw = Math.Max(1, w - 2 * CanvasCardPadX);
+        double th = Math.Max(1, h - 2 * CanvasCardPadY);
+        CanvasTextLayout? layout;
+        try { layout = GetCanvasEditTextLayout(tw, th); }   // 顺带保证 _canvasEditLive 与可见串是最新的
+        catch { return -1; }                                  // 设备丢失等：不接管，交回原生（宁可略偏也别崩）
+        if (layout == null) return 0;
+        double topPad = ComputeCanvasEditTopPad(tw, th);
+        double scrollY = TryGetCanvasEditScrollMetrics(node, out _, out _, out double visMax)
+            ? Math.Clamp(_canvasEditScrollViewer!.VerticalOffset, 0, visMax)
+            : 0;
+
+        float lx = (float)(px - (node.X + CanvasCardPadX));
+        float ly = (float)(py - (node.Y + CanvasCardPadY + topPad - scrollY));
+        try
+        {
+            if (ly < 0) return 0;   // 文字上方 → 起点
+            float textBottom = 0;
+            var lms = layout.LineMetrics;
+            if (lms != null) foreach (var lm in lms) textBottom += lm.Height;
+            if (ly >= textBottom) return _canvasEditText.Length;   // 文字下方 → 末尾（与系统文本框语义一致）
+
+            layout.HitTest(lx, ly, out var region, out bool trailingSide);
+            int dispIndex = region.CharacterIndex + (trailingSide ? 1 : 0);
+            var live = _canvasEditLive;
+            if (live == null) return Math.Clamp(dispIndex, 0, _canvasEditText.Length);
+            return Math.Clamp(live.ToDoc(dispIndex), 0, _canvasEditText.Length);
+        }
+        catch { return -1; }
+    }
+
+    /// <summary>把选区设成 [start,end]（源串偏移）。自绘光标的活动端推断基线一并清掉，下一帧直接按新选区推。</summary>
+    private void SetCanvasEditSelection(int start, int end)
+    {
+        try
+        {
+            var sel = CanvasEditBox.Document.Selection;
+            sel.SetRange(start, end);
+            _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;
+        }
+        catch { }
+        ResetCaretBlink();
+        ScreenCanvas.Invalidate();
+    }
+
+    /// <summary>单击落光标：原生命中处理在类处理器里先跑（且按文档排版算）⇒ 排到队尾覆盖，才能赢。
+    /// 与"双击补救"同一手法。</summary>
+    private void ApplyCanvasEditCaretAt(int docOffset)
+    {
+        _canvasEditPendingCaret = docOffset;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_canvasEditNodeId == null) return;
+            // 排队期间若已开始拖选 / 又点了一下 ⇒ 这个请求作废（否则会把新选区又塌回收缩光标）。
+            if (_canvasEditPendingCaret != docOffset) return;
+            _canvasEditPendingCaret = -1;
+            SetCanvasEditSelection(docOffset, docOffset);
+        });
+    }
+
+    /// <summary>双击该行 ⇒ 展开这一行【所有】成对标记（收起条件：光标离开该行，见 BuildCanvasEditLive）。</summary>
+    private void ExpandCanvasEditLine(int docOffset)
+    {
+        string t = _canvasEditText;
+        if (t.Length == 0) return;
+        int start = Math.Clamp(docOffset, 0, t.Length);
+        while (start > 0 && t[start - 1] != '\n') start--;
+        if (_canvasEditExpandActive && start == _canvasEditExpandLineStart) return;
+        _canvasEditExpandActive = true;
+        _canvasEditExpandLineStart = start;
+        ScreenCanvas.Invalidate();
+    }
+
+    /// <summary>这一下按下是不是"同一处的连击"（双击/三击）。是 → 不再接管光标（交给原生选词/选段），
+    /// 只把该行标记全部展开。</summary>
+    private bool IsCanvasEditClickRepeat(Point p)
+    {
+        long now = Stopwatch.GetTimestamp();
+        double ms = _canvasEditClickTick == 0 ? double.MaxValue
+            : (now - _canvasEditClickTick) * 1000.0 / Stopwatch.Frequency;
+        bool repeat = ms <= CanvasDoubleClickWindowMs &&
+            Math.Abs(p.X - _canvasEditClickVp.X) <= CanvasDoubleClickSlopDip &&
+            Math.Abs(p.Y - _canvasEditClickVp.Y) <= CanvasDoubleClickSlopDip;
+        _canvasEditClickTick = now;
+        _canvasEditClickVp = p;
+        return repeat;
+    }
+
     /// <summary>退出（关闭）当前编辑；commit=true 时把文本提交给 MainPage。</summary>
     private void EndCanvasEdit(bool commit)
     {
@@ -5753,6 +5957,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasEditLastPressWasLeft = false;
         _canvasEditLastPressTick = 0;
         _canvasEditLastPressDevice = Microsoft.UI.Input.PointerDeviceType.Touch;   // 回默认值 = "未知来源"，与初值一致
+        // 实时渲染（C）的会话态一并清掉：下次进编辑重新按当时的文本/光标算。
+        _canvasEditExpandActive = false;
+        _canvasEditExpandLineStart = -1;
+        _canvasEditClickTick = 0;
+        _canvasEditDragAnchor = _canvasEditDragLast = _canvasEditPendingCaret = -1;
+        _canvasEditLive = null;
+        _canvasEditTextLayoutKey = -1;
         StopCaretBlink();
         ExitIbeamScope();                                              // 退出编辑态：停工字作用域、恢复系统光标
         CanvasEditBox.OverrideCursor(null);                            // 复位光标覆盖（防残留箭头）
@@ -7086,6 +7297,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         string plain = (text ?? "").Replace("\r\n", "\n").Replace('\r', '\n');
         _canvasEditText = plain;
+        _canvasEditLive = null;          // 文本换了 ⇒ 可见串/映射/布局缓存一律作废
+        _canvasEditTextLayoutKey = -1;
         _canvasEditLineSpacingSet = -1f;   // 下面 SetText 会重置段落格式 ⇒ 已锁值作废，需重新锁
         string doc = plain.Replace('\n', '\r');
         try
@@ -8012,6 +8225,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 指针滑过控件带也不切光标；元素级工字（箭头槽替换态由工字作用域轮询维持）。
         if (e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed)
         {
+            // 拖选接管：可见串 ≠ 文档串，原生按自己的文档排版拖选会偏 ⇒ 按可见 layout 反查源偏移，自己维护选区。
+            int off = MapCanvasEditPointToDocOffset(p);
+            if (off >= 0 && _canvasEditDragAnchor >= 0 && off != _canvasEditDragLast)
+            {
+                _canvasEditDragLast = off;
+                _canvasEditPendingCaret = -1;   // 已经在拖选 ⇒ 作废排队中的"单击落光标"
+                SetCanvasEditSelection(_canvasEditDragAnchor, off);
+            }
             CanvasEditBox.OverrideCursor(CanvasIBeamCursor);
             return;
         }
@@ -8052,6 +8273,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 收不到 PointerExited），供工字作用域轮询下一拍决定装/卸工字。</summary>
     private void OnCanvasEditBoxPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        _canvasEditDragAnchor = _canvasEditDragLast = _canvasEditPendingCaret = -1;   // 一次拖选收尾：下次按下重新取锚点
         _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
         _canvasPointerValid = true;
         _canvasPointerOnEditCard = IsPointOnCanvasEditCard(_canvasPointerPos);
