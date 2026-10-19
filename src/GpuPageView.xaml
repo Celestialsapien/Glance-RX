@@ -474,7 +474,11 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <FontIcon Glyph="&#xE8B3;" FontSize="14" VerticalAlignment="Center"
+                            <!-- 全选图标：Segoe E71A（空心方框），与剪切/复制/粘贴同源。
+                                 ✅ E71A 在 Segoe Fluent Icons 与 Segoe MDL2 Assets 里【都有】⇒ Win10 不会缺字；
+                                    造型随字体版本略有差异（Win11/Fluent 圆角、Win10/MDL2 直角），但都是空心框。
+                                 ⛔ 别用 F1A2（四角括号）：MDL2 无此码位，Win10 会渲染成 tofu 空心方块。 -->
+                            <FontIcon Glyph="&#xE71A;" FontSize="14" VerticalAlignment="Center"
                                       FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
                             <TextBlock x:Name="CanvasEditMenuSelectAllText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
                             <TextBlock Grid.Column="2" Text="Ctrl+A" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>

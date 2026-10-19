@@ -3639,6 +3639,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private static readonly Windows.UI.Color CanvasCardFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
     private static readonly Windows.UI.Color CanvasCardStroke = Windows.UI.Color.FromArgb(255, 138, 143, 152);
     private static readonly Windows.UI.Color CanvasCardText = Windows.UI.Color.FromArgb(255, 32, 32, 34);
+    // 行内 Markdown 的底纹（卡片恒为不透明白卡面，故这两色不随主题变化）：
+    // 行内代码用极浅灰垫底 + 等宽字体；高亮用柔和黄底。都是"先画底纹、再画文字"。
+    private static readonly Windows.UI.Color CanvasMarkdownCodeBackdrop = Windows.UI.Color.FromArgb(255, 236, 236, 241);
+    private static readonly Windows.UI.Color CanvasMarkdownHighlightBackdrop = Windows.UI.Color.FromArgb(255, 255, 236, 140);
+    private const string CanvasMarkdownCodeFontFamily = "Consolas";
+    private static readonly Windows.UI.Text.FontWeight CanvasMarkdownBoldWeight = new() { Weight = 700 };
 
     /// <summary>卡片"淡色底纹"的 alpha（0-255，约 10%）。只给「后 6 色」用：在白色卡面之上再薄薄叠一层本色，
     /// 使卡片内部带一点同色氛围；首位默认灰不上底纹（灰底纹会显脏，且用户明确排除）。
@@ -3758,6 +3764,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         public double MaxHeight;
         public int LineCount;            // 真实行数（不限高，溢出行也计入）——滚动条显隐/长度用
         public CanvasTextLayout? Layout; // IDisposable
+        // 行内 Markdown（只作用于阅读态）：排版用显示串，样式表与底纹矩形随 layout 一起缓存，
+        // 避免绘制期每帧重算（底纹矩形要调 GetCharacterRegions，会分配数组）。
+        public string DisplayText = "";
+        public IReadOnlyList<CanvasMarkdownSpan> Spans = Array.Empty<CanvasMarkdownSpan>();
+        public IReadOnlyList<int>? SourceIndexMap;   // 显示下标 → 源串下标（null = 1:1）
+        public List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> Backdrops = new();
     }
 
     /// <summary>安装/替换白板数据（UI 线程调用）。节点数组与 id 索引一起原子换入，绘制侧加锁读取。</summary>
@@ -4069,8 +4081,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             if (editing) DrawCanvasEditSelection(ds, layout, textRect, topPad, scrollY);   // 选区高亮（layout 空时内部返回）
             if (layout != null)
+            {
+                // 行内代码/高亮底纹先铺，文字压在上面。两态各有各的排版串（编辑态标记是显示的），故各自取缓存。
+                if (editing) DrawCanvasEditMarkdownBackdrops(ds, textRect, topPad, scrollY);
+                else DrawCanvasMarkdownBackdrops(ds, node, textRect, topPad, scrollY);
                 ds.DrawTextLayout(layout,
                     new Vector2((float)textRect.X, (float)(textRect.Y + topPad - scrollY)), CanvasCardText);
+            }
             if (editing) DrawCanvasEditCaret(ds, layout, textRect, topPad, scrollY, z);    // 光标（空文本时画在原点）
         }
     }
@@ -4251,26 +4268,48 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_canvasEditNodeId == null) return;
         var pt = e.GetCurrentPoint(Viewer);
         bool isRight = pt.Properties.IsRightButtonPressed;
-        _canvasEditLastPressWasRight = isRight;
-        _canvasEditLastPressDevice = e.Pointer.PointerDeviceType;
-        if (isRight)
-        {
-            // 右键 = 新的意图，清掉"刚在拖选"的标记：否则"先拖选、再右键复制"这个最常用动作会被
-            // 当成拖选尾巴压掉，菜单根本不出现。
-            _canvasEditPressMoved = false;
-            _canvasEditLastLeftInteractTick = 0;
-            return;
-        }
+        // 与根级记录同源的 4 个字段（这里只补设备/左右键，时刻由 RecordCanvasEditPressOrigin 记）：
+        // 编辑框通道在本事件里能更早拿到，根级通道随后会在同一事件里再写一遍（同值，不会分叉）。
+        RecordCanvasEditPressOrigin(e);
+        if (isRight) return;   // 右键 = 要菜单，交给 ContextMenuOpening（见 IsCanvasEditMenuRequestAuthorized）
         if (!pt.Properties.IsLeftButtonPressed) return;
-        // 拖选尾巴识别基线：记按下点与时刻，供 OnCanvasEditBoxPointerMoved 判位移、
-        // 供 ContextMenuOpening 判"这次请求是不是刚做完一次拖选"。
-        _canvasEditPressPoint = pt.Position;
-        _canvasEditPressMoved = false;
-        _canvasEditLastLeftInteractTick = System.Diagnostics.Stopwatch.GetTimestamp();
         // 左键落在文本区 = 改光标 / 重开拖选 ⇒ 右键菜单的落点与可用性都失效，先收起。
         // （右键不在此收：它要弹菜单，见 CanvasEditBox_ContextMenuOpening。）
         HideCanvasEditContextMenu();
         var p = pt.Position;
+        // 双击的第二下：**什么都不做**。
+        // 选中态单击就已经进编辑（与 Obsidian 一致），所以第二下其实落在编辑态内部：原生会把它当成
+        // "双击选词"（甚至整段选中）。用户要的是"光标停在第一下算好的位置"，故这里把选区恢复成
+        // 进编辑时的折叠光标。（这次手势顺带补发的菜单请求由 ContextMenuOpening 的"左键不开菜单"规则压掉。）
+        if (_canvasEditEntryVp is { } entryVp && _canvasEditEntryTick != 0)
+        {
+            double elapsedMs = (Stopwatch.GetTimestamp() - _canvasEditEntryTick) * 1000.0 / Stopwatch.Frequency;
+            if (elapsedMs <= CanvasDoubleClickWindowMs &&
+                Math.Abs(p.X - entryVp.X) <= CanvasDoubleClickSlopDip &&
+                Math.Abs(p.Y - entryVp.Y) <= CanvasDoubleClickSlopDip)
+            {
+                _canvasEditEntryTick = 0;   // 只处理一次（第三下起交回原生行为）
+                e.Handled = true;           // 别再冒泡给 Viewer（那边会把这次按下当成新的卡片手势）
+                int restore = _canvasEditEntryCaret;
+                if (restore >= 0)
+                {
+                    // 原生在本事件处理之后才落定选区 ⇒ 排到队尾覆盖回去，才能赢。
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_canvasEditNodeId == null) return;
+                        try
+                        {
+                            var sel = CanvasEditBox.Document.Selection;
+                            sel.SetRange(restore, restore);
+                            _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;
+                        }
+                        catch { }
+                        ResetCaretBlink();
+                        ScreenCanvas.Invalidate();
+                    });
+                }
+            }
+        }
         _canvasPointerPos = p;
         _canvasPointerValid = true;
         UpdateCanvasNodeHover(p);
@@ -4483,7 +4522,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// <summary>取（阅读/选中态）卡片文本的 Win2D layout（走 ConditionalWeakTable 缓存）。
-    /// 顺带用"高度不限"的 layout 缓存真实行数，供滚动条显隐/长度与上方留白公式使用。</summary>
+    /// 顺带用"高度不限"的 layout 缓存真实行数，供滚动条显隐/长度与上方留白公式使用。
+    /// 排版对象是【行内 Markdown 的显示串】：无标记时它与 node.Text 逐字相同 ⇒ 与未启用时像素一致。</summary>
     private CanvasTextLayout? GetCanvasTextLayout(CanvasNode node, double maxW, double maxH)
     {
         if (maxW <= 0 || maxH <= 0 || string.IsNullOrEmpty(node.Text)) return null;
@@ -4494,12 +4534,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         cache.Layout?.Dispose();
         _canvasTextFormat ??= CreateCanvasTextFormat();
-        cache.Layout = new CanvasTextLayout(ScreenCanvas, node.Text, _canvasTextFormat, (float)maxW, (float)maxH);
+        var md = CanvasMarkdown.Parse(node.Text);
+        cache.DisplayText = md.DisplayText;
+        cache.Spans = md.Spans;
+        cache.SourceIndexMap = md.SourceIndexMap;
+        cache.Layout = new CanvasTextLayout(ScreenCanvas, md.DisplayText, _canvasTextFormat, (float)maxW, (float)maxH);
+        ApplyCanvasMarkdownFormatting(cache.Layout, md.DisplayText.Length, md.Spans);
+        BuildCanvasMarkdownBackdrops(cache);
         // 顺带缓存【真实行数】：用高度不限的 layout 量，溢出的行也计入 —— 滚动条的显隐与长度要用它。
         // 放在这里可复用同一套"文本或宽度变了才重算"的失效判据，避免每帧重建 layout。
         try
         {
-            using var full = new CanvasTextLayout(ScreenCanvas, node.Text, _canvasTextFormat, (float)maxW, 1e5f);
+            using var full = new CanvasTextLayout(ScreenCanvas, md.DisplayText, _canvasTextFormat, (float)maxW, 1e5f);
             cache.LineCount = Math.Max(1, full.LineCount);
         }
         catch { cache.LineCount = 1; }
@@ -4509,12 +4555,106 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return cache.Layout;
     }
 
+    /// <summary>把区间样式套到 layout 上。只做【不改变行高】的样式（字重/字形/删除线/等宽字体）——
+    /// 一旦改字号（标题等），"行数 × 标称行高"的滚动与留白公式就会失准，那部分属 P2，另行处理。</summary>
+    private static void ApplyCanvasMarkdownFormatting(CanvasTextLayout layout, int textLength,
+        IReadOnlyList<CanvasMarkdownSpan> spans)
+    {
+        if (spans.Count == 0) return;
+        foreach (var span in spans)
+        {
+            int start = Math.Clamp(span.Start, 0, textLength);
+            int count = Math.Clamp(span.Length, 0, textLength - start);
+            if (count <= 0) continue;
+            switch (span.Kind)
+            {
+                case CanvasMarkdownSpanKind.Bold:
+                    layout.SetFontWeight(start, count, CanvasMarkdownBoldWeight);
+                    break;
+                case CanvasMarkdownSpanKind.Italic:
+                    layout.SetFontStyle(start, count, Windows.UI.Text.FontStyle.Italic);
+                    break;
+                case CanvasMarkdownSpanKind.Strike:
+                    layout.SetStrikethrough(start, count, true);
+                    break;
+                case CanvasMarkdownSpanKind.Code:
+                    layout.SetFontFamily(start, count, CanvasMarkdownCodeFontFamily);
+                    break;
+                // Highlight 无字体属性可设，只在 Draw 阶段垫底纹 —— 见 BuildCanvasMarkdownBackdrops。
+            }
+        }
+    }
+
+    /// <summary>预先算好行内代码/高亮的底纹矩形（layout 坐标，绘制时再平移到文本原点）。
+    /// 用 GetCharacterRegions 拿每行上的实际字框：代码跨行时自然分成多个矩形。</summary>
+    private static void BuildCanvasMarkdownBackdrops(CachedCanvasText cache)
+    {
+        cache.Backdrops.Clear();
+        var layout = cache.Layout;
+        if (layout == null || cache.Spans.Count == 0) return;
+
+        int textLength = cache.DisplayText.Length;
+        foreach (var span in cache.Spans)
+        {
+            if (span.Kind != CanvasMarkdownSpanKind.Code && span.Kind != CanvasMarkdownSpanKind.Highlight) continue;
+            int start = Math.Clamp(span.Start, 0, textLength);
+            int count = Math.Clamp(span.Length, 0, textLength - start);
+            if (count <= 0) continue;
+            foreach (var region in layout.GetCharacterRegions(start, count))
+            {
+                var bounds = region.LayoutBounds;
+                if (bounds.Width <= 0 || bounds.Height <= 0) continue;
+                cache.Backdrops.Add((bounds, span.Kind));
+            }
+        }
+    }
+
+    /// <summary>画行内代码/高亮底纹（必须在文字之前调，才在文字下面）。</summary>
+    private void DrawCanvasMarkdownBackdrops(CanvasDrawingSession ds, CanvasNode node, Rect textRect,
+        double topPad, double scrollY)
+    {
+        if (!_canvasTextCache.TryGetValue(node, out var cache) || cache.Backdrops.Count == 0) return;
+        DrawCanvasMarkdownBackdropRects(ds, cache.Backdrops, textRect, topPad, scrollY);
+    }
+
+    /// <summary>编辑态版本：底纹来自编辑 layout 的缓存。</summary>
+    private void DrawCanvasEditMarkdownBackdrops(CanvasDrawingSession ds, Rect textRect,
+        double topPad, double scrollY)
+    {
+        if (_canvasEditBackdrops.Count == 0) return;
+        DrawCanvasMarkdownBackdropRects(ds, _canvasEditBackdrops, textRect, topPad, scrollY);
+    }
+
+    private static void DrawCanvasMarkdownBackdropRects(CanvasDrawingSession ds,
+        List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> backdrops, Rect textRect, double topPad, double scrollY)
+    {
+        double ox = textRect.X;
+        double oy = textRect.Y + topPad - scrollY;
+        foreach (var (bounds, kind) in backdrops)
+        {
+            if (kind == CanvasMarkdownSpanKind.Code)
+            {
+                ds.FillRoundedRectangle(
+                    new Rect(bounds.X + ox - 1.2, bounds.Y + oy - 1.0, bounds.Width + 2.4, bounds.Height + 2.0),
+                    2f, 2f, CanvasMarkdownCodeBackdrop);
+            }
+            else
+            {
+                ds.FillRectangle(
+                    new Rect(bounds.X + ox - 0.6, bounds.Y + oy - 1.0, bounds.Width + 1.2, bounds.Height + 2.0),
+                    CanvasMarkdownHighlightBackdrop);
+            }
+        }
+    }
+
     // 编辑态用单独缓存：编辑中的卡片文字以【实时文本】(_canvasEditText) 排版，不能与节点文本(node.Text)的缓存混用
     // （否则提交前的实时文本会污染节点缓存）。每次编辑进入只可能有一张卡 ⇒ 单槽即可。
     private CanvasTextLayout? _canvasEditTextLayout;
     private string _canvasEditTextLayoutText = "";
     private double _canvasEditTextLayoutW, _canvasEditTextLayoutH;
     private int _canvasEditTextLayoutLineCount = 1;
+    // 编辑态的行内代码/高亮底纹（随编辑 layout 一起重建）。
+    private readonly List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> _canvasEditBackdrops = new();
     private CanvasTextLayout? GetCanvasEditTextLayout(double maxW, double maxH)
     {
         if (maxW <= 0 || maxH <= 0 || string.IsNullOrEmpty(_canvasEditText)) return null;
@@ -4524,6 +4664,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasEditTextLayout?.Dispose();
         _canvasTextFormat ??= CreateCanvasTextFormat();
         _canvasEditTextLayout = new CanvasTextLayout(ScreenCanvas, _canvasEditText, _canvasTextFormat, (float)maxW, (float)maxH);
+        // 编辑态套样式：只改字重/字形/删除线/等宽，**不剔除任何字符**（标记照常显示），
+        // 故字符下标与文档 1:1，光标/选区/命中全部不用换算。未闭合标记按单边语法生效（见 ParseStyling）。
+        var spans = CanvasMarkdown.ParseStyling(_canvasEditText);
+        ApplyCanvasMarkdownFormatting(_canvasEditTextLayout, _canvasEditText.Length, spans);
+        BuildCanvasEditBackdrops(_canvasEditTextLayout, _canvasEditText.Length, spans);
         // 顺带缓存【真实行数】：用高度不限的 layout 量，与阅读态 GetCanvasTextLayout 同一口径（留白公式要用）。
         try
         {
@@ -4535,6 +4680,28 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasEditTextLayoutW = maxW;
         _canvasEditTextLayoutH = maxH;
         return _canvasEditTextLayout;
+    }
+
+    /// <summary>编辑态版本：底纹矩形按【编辑 layout】预算（文本与文档 1:1，不含剔除）。
+    /// 与阅读态那份分开缓存 —— 两态的字符串很可能不同（标记在编辑态是显示的）。</summary>
+    private void BuildCanvasEditBackdrops(CanvasTextLayout layout, int textLength,
+        IReadOnlyList<CanvasMarkdownSpan> spans)
+    {
+        _canvasEditBackdrops.Clear();
+        if (spans.Count == 0) return;
+        foreach (var span in spans)
+        {
+            if (span.Kind != CanvasMarkdownSpanKind.Code && span.Kind != CanvasMarkdownSpanKind.Highlight) continue;
+            int start = Math.Clamp(span.Start, 0, textLength);
+            int count = Math.Clamp(span.Length, 0, textLength - start);
+            if (count <= 0) continue;
+            foreach (var region in layout.GetCharacterRegions(start, count))
+            {
+                var bounds = region.LayoutBounds;
+                if (bounds.Width <= 0 || bounds.Height <= 0) continue;
+                _canvasEditBackdrops.Add((bounds, span.Kind));
+            }
+        }
     }
 
     /// <summary>编辑态实时文本的【真实行数】（走编辑专用缓存；空文本按 1 行）。</summary>
@@ -5452,6 +5619,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
         if (node == null) return;
         _canvasEditNodeId = nodeId;
+        // 双击补救基线：带落点时记下落点与时刻；不带落点（工具栏「编辑」/新建卡片）清零。
+        _canvasEditEntryVp = clickVp;
+        _canvasEditEntryTick = clickVp is null ? 0 : Stopwatch.GetTimestamp();
         // ⚠ 时序：_canvasEditNodeRef 必须在 SetCanvasEditText 之前赋值 —— SetCanvasEditText 内部会调
         //    EnsureCanvasEditLineSpacing，而那要用 _canvasEditNodeRef 去取"阅读态那份 layout 的实测行高"
         //    （仅用于把编辑框行距锁到 Win2D 同值，使"点击落光标"的命中映射与 Win2D 渲染对齐；不影响可见渲染）。
@@ -5480,6 +5650,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             // 带双击/点击落点：光标落在点击位置（Obsidian 行为）；映射失败回退文本末尾。
             int caret = clickVp is { } cvp ? MapCanvasClickToEditOffset(node, cvp) : -1;
             if (caret < 0) caret = editDocEnd;
+            _canvasEditEntryCaret = caret;   // 双击第二下要恢复到这个位置（见 OnCanvasEditBoxPointerPressed）
             CanvasEditBox.Document.Selection.SetRange(caret, caret);
             ResetCaretBlink();
             ScreenCanvas.Invalidate();
@@ -5507,13 +5678,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// <summary>视口点击点 → 编辑框文档的光标偏移；-1 = 无法映射（落点在卡外/排版不可用，调用方回退文本末尾）。
-    /// 用与可见文字【同源】的编辑态 layout（GetCanvasEditTextLayout）做命中测试，坐标口径与绘制一致：
-    /// 内容坐标 = 点击点 − 文字区原点(node.X+PadX, node.Y+PadY+topPad−scrollY)。RichEdit 文档把 \n 换成 \r
-    /// 且长度不变（SetCanvasEditText），DWrite 字符下标与文档偏移 1:1 ⇒ 直接可用。文字区域外对齐系统文本框语义：
+    /// ⚠ 必须用【阅读态】layout 命中，再换算回源串（原文）下标：
+    /// 双击那一刻用户看到的是【渲染后】的文字（Markdown 标记已剔除），而编辑态显示的是带标记的原文；
+    /// 若直接拿编辑态 layout 做命中，同一个屏幕点会落到另一段文字上 —— 表现为"光标不在双击的那几个字上"。
+    /// 几何口径与 DrawCanvasCard 的阅读态完全一致：内容坐标 = 点击点 − (node.X+PadX, node.Y+PadY+topPad−scrollY)，
+    /// topPad / scrollY 都按阅读态公式（真实行数 × 标称行高，滚动量取卡片自身的滚动偏移并夹到可滚动范围）。
+    /// 命中的是【显示串】下标，经 SourceIndexMap 换成源串下标；RichEdit 文档把 \n 换成 \r 且长度不变
+    /// （SetCanvasEditText）⇒ 源串下标可直接当文档偏移。文字区域外对齐系统文本框语义：
     /// 上方 → 文本起点；下方 → 文本末尾；左右侧 → DWrite 最近字符沿（行首/行尾）。</summary>
     private int MapCanvasClickToEditOffset(CanvasNode node, Point vp)
     {
-        if (node == null || string.IsNullOrEmpty(_canvasEditText)) return 0;
+        if (node == null || string.IsNullOrEmpty(node.Text)) return 0;
         if (!CanvasViewportToPage(vp, out int pageIdx, out double px, out double py) ||
             pageIdx != node.GlancePage)
             return -1;
@@ -5521,31 +5696,45 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double h = Math.Max(12, node.Height);
         double tw = w - 2 * CanvasCardPadX;
         double th = h - 2 * CanvasCardPadY;
-        double topPad = ComputeCanvasEditTopPad(tw, th);
-        double scrollY = TryGetCanvasEditScrollMetrics(node, out _, out _, out double visMax)
-            ? Math.Clamp(_canvasEditScrollViewer!.VerticalOffset, 0, visMax)
-            : 0;
-        var layout = GetCanvasEditTextLayout(tw, th);
+        var layout = GetCanvasTextLayout(node, tw, th);   // 顺带刷新缓存（显示串 / 样式表 / 下标映射）
         if (layout == null) return -1;
+
+        // 阅读态留白与滚动（与 DrawCanvasCard 阅读分支同一公式，改动须同步）
+        double realContentH = GetCachedCanvasLineCount(node, tw, th) * CanvasLineHeight;
+        double topPad = Math.Min(0.5 * CanvasLineHeight, Math.Max(0, (th - Math.Min(th, realContentH)) / 2.0));
+        double maxScroll = Math.Max(0, realContentH - th);
+        double scrollY = Math.Clamp(GetCanvasScrollY(node.Id), 0, maxScroll);
+
         float lx = (float)(px - (node.X + CanvasCardPadX));
         float ly = (float)(py - (node.Y + CanvasCardPadY + topPad - scrollY));
         try
         {
-            if (ly < 0) return 0;   // 文字上方 → 起点
+            if (ly < 0) return 0;   // 文字上方 → 起点（源串 0：光标落在标记之前）
             float textBottom = 0;
             var lms = layout.LineMetrics;
             if (lms != null) foreach (var lm in lms) textBottom += lm.Height;
-            if (ly >= textBottom) return _canvasEditText.Length;   // 文字下方 → 末尾（与系统文本框一致）
+            if (ly >= textBottom) return Math.Clamp(node.Text.Length, 0, _canvasEditText.Length);   // 文字下方 → 末尾
             // 界外（行首左/行尾右）也返回最近字符簇：region.CharacterIndex + trailingSide 即光标位。
             layout.HitTest(lx, ly, out var region, out bool trailingSide);
-            int ci = region.CharacterIndex;
-            // 命中簇是换行符（点击落在某行末尾右侧的空白）→ 光标钉在该行末尾（'\n' 之前），
+            int displayIndex = region.CharacterIndex + (trailingSide ? 1 : 0);
+            int src = MapCanvasDisplayIndexToSource(node, displayIndex);
+            // 命中点越到换行符（点击落在某行末尾右侧的空白）→ 光标钉在该行末尾（'\n' 之前），
             // 绝不越过换行 —— 否则表现成"在 line1 末尾点击/双击，光标跳到 line2 开头"。
-            if (ci >= 0 && ci < _canvasEditText.Length && _canvasEditText[ci] == '\n')
-                return Math.Clamp(ci, 0, _canvasEditText.Length);
-            return Math.Clamp(ci + (trailingSide ? 1 : 0), 0, _canvasEditText.Length);
+            if (src >= 0 && src < _canvasEditText.Length && _canvasEditText[src] == '\n')
+                return src;
+            return Math.Clamp(src, 0, _canvasEditText.Length);
         }
         catch { return -1; }
+    }
+
+    /// <summary>显示串下标 → 源串下标（无 Markdown 标记、未剔除任何字符时两者 1:1）。</summary>
+    private int MapCanvasDisplayIndexToSource(CanvasNode node, int displayIndex)
+    {
+        if (displayIndex <= 0) return 0;
+        if (!_canvasTextCache.TryGetValue(node, out var cache) || cache.SourceIndexMap == null)
+            return displayIndex;
+        var map = cache.SourceIndexMap;
+        return displayIndex >= map.Count ? map[map.Count - 1] : map[displayIndex];
     }
 
     /// <summary>退出（关闭）当前编辑；commit=true 时把文本提交给 MainPage。</summary>
@@ -5557,6 +5746,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasEditNodeId = null;
         _canvasEditControlGesture = false;
         _canvasEditMenuClickPending = false;
+        _canvasEditEntryTick = 0;                                      // 双击补救基线失效
+        _canvasEditEntryCaret = -1;
+        _canvasEditMenuKeyTick = 0;
+        _canvasEditLastPressWasRight = false;
+        _canvasEditLastPressWasLeft = false;
+        _canvasEditLastPressTick = 0;
+        _canvasEditLastPressDevice = Microsoft.UI.Input.PointerDeviceType.Touch;   // 回默认值 = "未知来源"，与初值一致
         StopCaretBlink();
         ExitIbeamScope();                                              // 退出编辑态：停工字作用域、恢复系统光标
         CanvasEditBox.OverrideCursor(null);                            // 复位光标覆盖（防残留箭头）
@@ -6719,6 +6915,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// </summary>
     private void CanvasEditBox_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // 键盘请求文本菜单（Shift+F10 / Application 键）：先记一笔放行 —— 紧随其后的 ContextMenuOpening
+        // 没有指针按下可供判断来源，只能靠这个标记区分"键盘要菜单"与"左键手势的尾巴"。
+        // 不标 Handled：让框架照常走它自己的菜单请求链路。
+        if (IsCanvasEditMenuKey(e)) _canvasEditMenuKeyTick = System.Diagnostics.Stopwatch.GetTimestamp();
         bool ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)
                      & Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
         if (!ctrl) return;
@@ -6772,13 +6972,33 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         if (_canvasEditNodeId == null) return;
         _canvasEditText = GetCanvasEditText();  // 刷新缓存（绘制/提交都读它，避免每帧去读 TOM 文档）
+        ApplyCanvasEditCharacterFormatting();   // 样式跟着文本走（只为让原生命中测试与可见排版同宽）
         // 行数变化 → 上方自适应留空随之变化（与阅读态同公式），同步到编辑框内边距（只改 top）。
         SyncCanvasEditTopPad();
         // 文字变化 → 立刻刷新 Win2D 绘制（文字/光标/滚动条皆由 Win2D 画，当帧反映，不再慢半拍）。
         ResetCaretBlink();                     // 打字时光标保持亮，停手后才开始闪烁
         ScreenCanvas.Invalidate();
-        // 打字过程中不逐字符入史（否则 Ctrl+Z 变成逐字符退格）：停顿 400ms 视为一段输入结束，
-        // 提交为一步；连续输入仍合并为一步。这样"多次输入"才能分成多步撤销。
+        ScheduleCanvasEditCommit();
+    }
+
+    /// <summary>程序化改文档（剪切/粘贴这类走 TOM 的路径）之后必须调用：RichEditBox 对
+    /// <c>Selection.SetText</c> 不保证触发 TextChanged，只 Invalidate 会拿旧快照重画 ⇒
+    /// 表现为"删掉/粘上的文字要退出编辑才生效"（用户报告）。</summary>
+    private void RefreshCanvasEditAfterProgrammaticEdit()
+    {
+        if (_canvasEditNodeId == null) return;
+        _canvasEditText = GetCanvasEditText();
+        ApplyCanvasEditCharacterFormatting();
+        SyncCanvasEditTopPad();
+        ResetCaretBlink();
+        ScreenCanvas.Invalidate();
+        ScheduleCanvasEditCommit();   // 程序化改动同样要能入撤销栈
+    }
+
+    /// <summary>打字过程中不逐字符入史（否则 Ctrl+Z 变成逐字符退格）：停顿 400ms 视为一段输入结束，
+    /// 提交为一步；连续输入仍合并为一步。这样"多次输入"才能分成多步撤销。</summary>
+    private void ScheduleCanvasEditCommit()
+    {
         _canvasEditCommitTimer ??= DispatcherQueue.CreateTimer();
         _canvasEditCommitTimer.Stop();
         _canvasEditCommitTimer.Interval = TimeSpan.FromMilliseconds(CanvasEditCommitDebounceMs);
@@ -6874,7 +7094,63 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         catch { return doc.Length + 1; }
         EnsureCanvasEditLineSpacing();   // SetText 会把段落格式重置成默认值 ⇒ 每次重建文档后都要重新锁一次行距
+        _canvasEditFormattedFor = null;  // 文档刚被重写 ⇒ 字符格式也回到默认，必须重贴
+        ApplyCanvasEditCharacterFormatting();
         return doc.Length + 1;
+    }
+
+    // 编辑态字符格式（只为"度量对齐"，不可见）：隐形 RichEditBox 负责点击落光标/拖选/双击选词的命中测试，
+    // 它按自己的排版定位。若 Win2D 把某些字画粗/画成等宽、而文档里没这些格式，两者宽度就会分叉 ⇒
+    // 点哪儿都不准（粗体越长偏得越多）。故把同一套样式也贴到文档的字符格式上。
+    private bool _canvasEditApplyingFormat;
+    private string? _canvasEditFormattedFor;
+
+    /// <summary>把行内 Markdown 样式同步成编辑框的【字符格式】。只动字符级（Bold/Italic/Strikethrough/Name），
+    /// 绝不碰段落级（行距由 <see cref="EnsureCanvasEditLineSpacing"/> 独占）。
+    /// ⚠ 格式改动可能再次触发 TextChanged ⇒ 用 <see cref="_canvasEditApplyingFormat"/> 防重入。</summary>
+    private void ApplyCanvasEditCharacterFormatting()
+    {
+        if (_canvasEditNodeId == null || CanvasEditBox?.Document == null) return;
+        if (_canvasEditApplyingFormat) return;
+        if (string.Equals(_canvasEditFormattedFor, _canvasEditText, StringComparison.Ordinal)) return;
+
+        _canvasEditApplyingFormat = true;
+        try
+        {
+            var doc = CanvasEditBox.Document;
+            int len = _canvasEditText.Length;
+            var all = doc.GetRange(0, len);
+            all.CharacterFormat.Bold = Microsoft.UI.Text.FormatEffect.Off;
+            all.CharacterFormat.Italic = Microsoft.UI.Text.FormatEffect.Off;
+            all.CharacterFormat.Strikethrough = Microsoft.UI.Text.FormatEffect.Off;
+            all.CharacterFormat.Name = "Segoe UI";
+
+            foreach (var span in CanvasMarkdown.ParseStyling(_canvasEditText))
+            {
+                int start = Math.Clamp(span.Start, 0, len);
+                int end = Math.Clamp(span.Start + span.Length, start, len);
+                if (end <= start) continue;
+                var r = doc.GetRange(start, end);
+                switch (span.Kind)
+                {
+                    case CanvasMarkdownSpanKind.Bold:
+                        r.CharacterFormat.Bold = Microsoft.UI.Text.FormatEffect.On;
+                        break;
+                    case CanvasMarkdownSpanKind.Italic:
+                        r.CharacterFormat.Italic = Microsoft.UI.Text.FormatEffect.On;
+                        break;
+                    case CanvasMarkdownSpanKind.Strike:
+                        r.CharacterFormat.Strikethrough = Microsoft.UI.Text.FormatEffect.On;
+                        break;
+                    case CanvasMarkdownSpanKind.Code:
+                        r.CharacterFormat.Name = CanvasMarkdownCodeFontFamily;
+                        break;
+                }
+            }
+            _canvasEditFormattedFor = _canvasEditText;
+        }
+        catch { }
+        finally { _canvasEditApplyingFormat = false; }
     }
 
     /// <summary>编辑态目标行高（页局部单位 = DIP）：取【阅读态那份 layout 的实测自然行高】(LineMetrics[0].Height)
@@ -6961,13 +7237,30 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 与 _canvasEditControlGesture 同一思路：交互期间编辑态零变动。</summary>
     private bool _canvasEditMenuClickPending;
 
-    // ---- 拖选尾巴识别：左键"有位移的按下"之后的这一次 ContextMenuOpening 是选择手势的尾巴，不是要菜单 ----
-    private Point _canvasEditPressPoint;
-    private bool _canvasEditPressMoved;
-    private long _canvasEditLastLeftInteractTick;                 // 最近一次左键按下/抬起
+    // ---- 菜单来源判定：左键只有选取语义（单击/双击/多击/拖选），菜单只由 右键 / 键盘 / 触控长按 触发。
+    //      判据是【允许清单】，来源取自根级记录的"最近一次按下"（见 RecordCanvasEditPressOrigin）----
     private bool _canvasEditLastPressWasRight;                    // 最近一次按下是不是右键（含笔筒键）
+    /// <summary>键盘（Shift+F10 / Application 菜单键）明确请求了文本菜单的时刻：这一次请求放行。
+    /// 键盘触发没有指针按下，不能靠"最近一次按下"判来源，故显式记一笔（ContextMenuOpening 消费即清，
+    /// 且只在 1s 内有效 —— 过期标记绝不能放行后面某次左键手势的请求）。</summary>
+    private long _canvasEditMenuKeyTick;
+
+    // ---- 双击补救：选中态下"第一次单击"就进编辑（与 Obsidian 一致），于是双击的第二下其实落在编辑态里。
+    // 编辑态显示的是带标记的原文且 Markdown 会重排 ⇒ 原生按下会把光标放到原文的那个位置（错位）。
+    // 记下进编辑的落点与时刻：若紧接着（双击窗口内、几乎同一点）再来一次按下，按【阅读态】重新映射光标。
+    private Point? _canvasEditEntryVp;
+    private long _canvasEditEntryTick;
+    /// <summary>进编辑时最终落定的光标偏移。双击的第二下要"原地不动"，恢复的就是这个值。</summary>
+    private int _canvasEditEntryCaret = -1;
+    private const int CanvasDoubleClickWindowMs = 500;
+    private const double CanvasDoubleClickSlopDip = 4;
     private Microsoft.UI.Input.PointerDeviceType _canvasEditLastPressDevice;
-    private static readonly long CanvasEditDragTailTicks = System.Diagnostics.Stopwatch.Frequency / 4;   // 250ms
+    /// <summary>最近一次按下是不是左键（与 <see cref="_canvasEditLastPressWasRight"/> 互斥；触控/笔两者皆假）。</summary>
+    private bool _canvasEditLastPressWasLeft;
+    /// <summary>最近一次按下的时刻。菜单请求只在"这次按下的窗口内"才可能被授权，避免用很久以前的一次右键放行。</summary>
+    private long _canvasEditLastPressTick;
+    /// <summary>键盘菜单请求标记的有效期（1s）：过期标记绝不能放行后面某次左键手势的请求。</summary>
+    private static readonly long CanvasEditLeftMenuBlockTicks = System.Diagnostics.Stopwatch.Frequency;
 
     // ---- 菜单落点：右键/触控按下时就地记下（覆盖层坐标）----
     // 为什么不靠 ContextMenuEventArgs.CursorLeft/Top：WinUI 3 里它不是"相对控件"，
@@ -6978,9 +7271,25 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private long _canvasEditMenuAnchorTick;      // 记下时刻：只认"刚刚那一下"的按下（触控长按要等 ~0.6s 才请求菜单，窗口不能太窄）
     private static readonly long CanvasEditMenuAnchorTicks = System.Diagnostics.Stopwatch.Frequency * 2;   // 2s
 
-    private bool IsCanvasEditLeftInteractRecent() =>
-        _canvasEditLastLeftInteractTick != 0 &&
-        System.Diagnostics.Stopwatch.GetTimestamp() - _canvasEditLastLeftInteractTick < CanvasEditDragTailTicks;
+    /// <summary>这一次菜单请求有没有"该弹菜单"的来源。用**允许清单**判，不做排除法：
+    /// ① 键盘（Shift+F10 / Application 键，KeyDown 时记的标记）；② 鼠标右键（含笔筒键）；③ 触控/笔（长按）。
+    /// 其余一律不弹 —— 左键只有选取语义。排除法（"刚拖选过/刚双击过"）必然漏：框架对**任意**左键手势都会补发
+    /// 本事件，且左键可能落在菜单上（按下点根本到不了编辑框，靠"编辑框最近按下"记的东西就全是过期值）。
+    /// 判据取**根级**记录的"最近一次按下"，它在整个视图内都收得到（handledEventsToo）。</summary>
+    private bool IsCanvasEditMenuRequestAuthorized()
+    {
+        bool keyboard = _canvasEditMenuKeyTick != 0 &&
+            System.Diagnostics.Stopwatch.GetTimestamp() - _canvasEditMenuKeyTick < CanvasEditLeftMenuBlockTicks;
+        _canvasEditMenuKeyTick = 0;   // 一次请求只消费一次
+        if (keyboard) return true;
+        // 触控 / 笔：没有左右键之分，长按就是合法的菜单入口（可能按住 >2s，不能套鼠标的时间窗）。
+        if (_canvasEditLastPressDevice != Microsoft.UI.Input.PointerDeviceType.Mouse) return true;
+        // 鼠标：只认"右键按下"，并且必须还在窗口内 —— 否则一次旧的右键会给后续请求长期授权。
+        // 再加一条物理判据：左键此刻按着 ⇒ 绝不可能是右键请求（不依赖"本事件究竟在按下还是松手时发出"）。
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        bool fresh = _canvasEditLastPressTick != 0 && now - _canvasEditLastPressTick < CanvasEditMenuAnchorTicks;
+        return fresh && _canvasEditLastPressWasRight && !_canvasEditLastPressWasLeft && !IsCanvasLeftButtonDown();
+    }
 
     /// <summary>鼠标左键此刻是否按着（VK_LBUTTON）。包 try：鼠标键非常规入参，不支持时只当"没按着"。</summary>
     private static bool IsCanvasLeftButtonDown()
@@ -6993,12 +7302,44 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         catch { return false; }
     }
 
+    /// <summary>根级记下"最近一次按下"的来源（设备 / 左右键 / 时刻）。必须在**根**上记，不能只在编辑框上记：
+    /// 点自绘菜单的行时按下点根本到不了编辑框，编辑框那条通道会一直持有上一次右键的旧值，
+    /// 从而把随后"左键点菜单"补发的请求误判成右键（用户报告：点复制/全选不断弹出新菜单）。</summary>
+    private void RecordCanvasEditPressOrigin(PointerRoutedEventArgs e)
+    {
+        if (_canvasEditNodeId == null) return;
+        try
+        {
+            var pt = e.GetCurrentPoint(Viewer);
+            _canvasEditLastPressDevice = e.Pointer.PointerDeviceType;
+            _canvasEditLastPressWasRight = pt.Properties.IsRightButtonPressed;
+            _canvasEditLastPressWasLeft = pt.Properties.IsLeftButtonPressed;
+            _canvasEditLastPressTick = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+        catch { }
+    }
+
+    /// <summary>按键是不是"请求文本菜单"的组合：Shift+F10 / Application（菜单）键。</summary>
+    private static bool IsCanvasEditMenuKey(KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Application) return true;
+        if (e.Key != VirtualKey.F10) return false;
+        try
+        {
+            return (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift)
+                    & Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
+        }
+        catch { return false; }
+    }
+
     /// <summary>根级按下监听（handledEventsToo 常驻）：菜单开着时，**菜单外的任何按下都立即收起**。
     /// 挂在根上而不是 Viewer 上，是因为卡片胶囊 / 连线工具条这类子控件会自己把 PointerPressed 标 Handled，
     /// 事件根本到不了 Viewer（用户报告"点工具栏不关菜单"）。</summary>
     private void OnRootPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        // 先记落点，与菜单是否已开无关：右键 / 触控长按随后请求菜单时，要靠它把菜单摆到"按下的那一点"。
+        // 先记"这次按下的来源"，与菜单是否已开无关：菜单请求的授权判据完全依赖它（见 IsCanvasEditMenuRequestAuthorized）。
+        RecordCanvasEditPressOrigin(e);
+        // 再记落点：右键 / 触控长按随后请求菜单时，要靠它把菜单摆到"按下的那一点"。
         RecordCanvasEditMenuAnchor(e);
         if (!_canvasEditMenuOpen) return;
         var pt = e.GetCurrentPoint(Viewer);
@@ -7046,29 +7387,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     /// <summary>右键/键盘请求弹出文本菜单。**必须在 ContextMenuOpening 里拦**：RichEditBox 的内置菜单走的是
     /// 控件自己的这个事件；实测在 ContextRequested 里 Handled=true 完全无效（系统菜单照出）。
-    /// 触发来源与系统一致：右键 / Shift+F10 / Application 菜单键 / 触控长按都弹。
-    /// 唯一例外：**左键拖选结束时框架也会补发一次本事件** —— 那不是"要菜单"，要压掉（见下）。</summary>
+    /// 触发来源只有三种：**右键 / Shift+F10（含 Application 菜单键）/ 触控长按**，其余一律不弹
+    /// （框架对任何左键手势都会补发本事件，左键只管选取）。判据集中在 <see cref="IsCanvasEditMenuRequestAuthorized"/>。</summary>
     private void CanvasEditBox_ContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
         if (_canvasEditNodeId == null) return;
-        e.Handled = true;   // ← 系统菜单不再出现的唯一开关
-        // 拖选尾巴：框架在"左键拖选并松开"之后也会补发一次本事件 —— 那不是"要菜单"（用户报告）。
-        // 判据与系统语义对齐：
-        //   · 最近一次按下是右键（含笔筒键）⇒ 正当请求；
-        //   · 触控 / 笔 ⇒ 长按本来就该弹（"拖选"是鼠标专属的歧义）；
-        //   · 距最近一次左键交互已超过 250ms（或从未有过）⇒ 键盘触发（Shift+F10 / Application 键）；
-        //   · 其余（刚拖选完、或鼠标左键还按着）⇒ 压掉。
-        bool dragTail = !_canvasEditLastPressWasRight
-            && _canvasEditLastPressDevice == Microsoft.UI.Input.PointerDeviceType.Mouse
-            && _canvasEditPressMoved
-            && IsCanvasEditLeftInteractRecent();
-        bool mouseDragging = _canvasEditLastPressDevice == Microsoft.UI.Input.PointerDeviceType.Mouse
-            && IsCanvasLeftButtonDown();
-        if (dragTail || mouseDragging)
-        {
-            _canvasEditPressMoved = false;
-            return;
-        }
+        e.Handled = true;   // ← 系统菜单不再出现（框架据此根本不构建它）；本方法返回后不再有任何菜单工作
+        if (!IsCanvasEditMenuRequestAuthorized()) return;
         Point pos;
         // ① 首选：刚刚那一下右键/触控的按下点（坐标空间确定 = 菜单 Margin 用的同一套）。
         if (IsCanvasEditMenuAnchorFresh())
@@ -7243,6 +7568,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                     CopyCanvasSelectionToClipboard();
                     // 选区替换成空串 = 删除选区（与粘贴用同一 API，语义一致）
                     CanvasEditBox.Document.Selection.SetText(Microsoft.UI.Text.TextSetOptions.None, "");
+                    // ⚠ TOM 改动不保证触发 TextChanged ⇒ 必须显式刷新文本快照，否则 Win2D 仍按旧串重画
+                    RefreshCanvasEditAfterProgrammaticEdit();
                     break;
                 case "copy":
                     CopyCanvasSelectionToClipboard();
@@ -7322,8 +7649,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasEditBox.Document.Selection.SetText(Microsoft.UI.Text.TextSetOptions.None,
             text.Replace("\r\n", "\r").Replace('\n', '\r'));
         CanvasEditBox.Document.Selection.Collapse(false);
-        ResetCaretBlink();
-        ScreenCanvas.Invalidate();
+        RefreshCanvasEditAfterProgrammaticEdit();   // 同上：TOM 改动不一定触发 TextChanged
     }
 
     /// <summary>把编辑框当前文本作为一步提交（不关闭编辑框）；与上次提交相同则忽略。
@@ -7669,6 +7995,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             return;
         }
         EnsureCanvasEditLineSpacing();   // 行距自愈（仅供点击落光标的命中映射对齐）
+        ApplyCanvasEditCharacterFormatting();   // 字符格式同样自愈：进入编辑当帧文档可能还没就绪（首贴会失败）
         if (_canvasEditScrollViewer == null) EnsureCanvasEditScrollHost();   // 幂等：拿到 sv 后由内部退订
         else ScreenCanvas.Invalidate();                                     // 每帧兜底刷新 Win2D 绘制
     }
@@ -7681,14 +8008,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_canvasEditNodeId == null) return;
         var p = e.GetCurrentPoint(Viewer).Position;
         _canvasPointerOnEditCard = true;   // 编辑框通道收到移动 ⇒ 指针在编辑卡上
-        // 文本拖选进行中（左键按住、非卡片手势）：冻结边框控件交互 —— 不刷新手柄显形/悬停，
+        // 文本拖选进行中（左键按住）：冻结边框控件交互 —— 不刷新手柄显形/悬停，
         // 指针滑过控件带也不切光标；元素级工字（箭头槽替换态由工字作用域轮询维持）。
         if (e.GetCurrentPoint(Viewer).Properties.IsLeftButtonPressed)
         {
-            // 拖选识别：按住左键移动超过 6 DIP ⇒ 这是一次文字选择手势（而非点选/长按）。
-            if (!_canvasEditPressMoved &&
-                (Math.Abs(p.X - _canvasEditPressPoint.X) > 6 || Math.Abs(p.Y - _canvasEditPressPoint.Y) > 6))
-                _canvasEditPressMoved = true;
             CanvasEditBox.OverrideCursor(CanvasIBeamCursor);
             return;
         }
@@ -7729,7 +8052,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 收不到 PointerExited），供工字作用域轮询下一拍决定装/卸工字。</summary>
     private void OnCanvasEditBoxPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        _canvasEditLastLeftInteractTick = System.Diagnostics.Stopwatch.GetTimestamp();   // 拖选尾巴判定窗口的起点
         _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
         _canvasPointerValid = true;
         _canvasPointerOnEditCard = IsPointOnCanvasEditCard(_canvasPointerPos);
