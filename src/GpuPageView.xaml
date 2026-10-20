@@ -462,6 +462,129 @@
                     </Grid>
                     <Border Height="1" Margin="8,4" Opacity="0.6"
                             Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                    <!-- ===== Markdown 快捷格式组 =====
+                         作用对象是【编辑框当前选区】（与剪切/复制同一套选区，不另存状态）。点一下把选区用对应标记
+                         包起来；再点一下（同一标记）把它拆掉 ⇒ 一组行既是"加"也是"减"，无需额外的"清除格式"。
+                         左列用 B / I / S / <> / 色块做图（语言无关、无字体缺字风险），右列用等宽字直接标出
+                         实际插入的字符 —— 既是提示也是语法教学，比硬造快捷键提示诚实（这几项没有快捷键）。
+                         ⚠ 右列对齐（用户报告"歪歪扭扭"）：Auto 列会把宽度不同的标记各自右对齐 ⇒ 左右参差。
+                           故固定 Width="22" + TextAlignment="Center" 管水平；竖直再按【字形墨迹位置】逐个微调
+                           TranslateTransform（等宽字体里 * 和 ` 的墨迹偏上、~ 和 = 偏下，文字块居中 ≠ 墨迹居中）：
+                           `**`/`*` +0.8、`~~`/`==` -2、`` ` ` `` +2.4（单位 DIP，按屏截图实测定标）。
+                           改字号/换字体后这些偏移要重测，别凭感觉调。 -->
+                    <Grid x:Name="CanvasEditMenuBold" Tag="bold" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="B" FontSize="13" FontWeight="Bold" Opacity="0.85"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CanvasEditMenuBoldText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="**" FontSize="12" Opacity="0.45"
+                                       FontFamily="Consolas" VerticalAlignment="Center" TextAlignment="Center">
+                                <TextBlock.RenderTransform><TranslateTransform Y="0.8"/></TextBlock.RenderTransform>
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="CanvasEditMenuItalic" Tag="italic" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="I" FontSize="14" FontStyle="Italic" Opacity="0.85"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CanvasEditMenuItalicText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="*" FontSize="12" Opacity="0.45"
+                                       FontFamily="Consolas" VerticalAlignment="Center" TextAlignment="Center">
+                                <TextBlock.RenderTransform><TranslateTransform Y="0.8"/></TextBlock.RenderTransform>
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="CanvasEditMenuStrike" Tag="strike" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="S" FontSize="13" TextDecorations="Strikethrough" Opacity="0.85"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CanvasEditMenuStrikeText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="~~" FontSize="12" Opacity="0.45"
+                                       FontFamily="Consolas" VerticalAlignment="Center" TextAlignment="Center">
+                                <TextBlock.RenderTransform><TranslateTransform Y="-2"/></TextBlock.RenderTransform>
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="CanvasEditMenuCode" Tag="code" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="&lt;&gt;" FontSize="12" FontFamily="Consolas" Opacity="0.85"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CanvasEditMenuCodeText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <!-- 右列必须显示【真的标记】反引号，不能拿方框代替：方框会被读成 "[]"，
+                                 而且与高亮那个色块只差颜色 ⇒ 两个图标分不清（用户报告）。
+                                 两个反引号要【紧挨着】—— 中间夹空格会与其它行（`**` `~~` `==` 都紧贴）不成一体。 -->
+                            <TextBlock Grid.Column="2" Text="``" FontSize="12" Opacity="0.6"
+                                       FontFamily="Consolas" VerticalAlignment="Center" TextAlignment="Center">
+                                <TextBlock.RenderTransform><TranslateTransform Y="2.4"/></TextBlock.RenderTransform>
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="CanvasEditMenuHighlight" Tag="highlight" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+                            <!-- 色块颜色由代码从 CanvasMarkdownHighlightBackdrop 直接取（不在这里写死十六进制），
+                                 保证"菜单里看到的黄"与"卡片里高亮的黄"永远是同一个常量。 -->
+                            <Border x:Name="CanvasEditMenuHighlightSwatch"
+                                    Width="13" Height="10" CornerRadius="2"
+                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CanvasEditMenuHighlightText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="==" FontSize="12" Opacity="0.45"
+                                       FontFamily="Consolas" VerticalAlignment="Center" TextAlignment="Center">
+                                <TextBlock.RenderTransform><TranslateTransform Y="-2"/></TextBlock.RenderTransform>
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <Border Height="1" Margin="8,4" Opacity="0.6"
+                            Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
                     <Grid x:Name="CanvasEditMenuSelectAll" Tag="selectall" Height="32" Background="Transparent"
                           PointerEntered="CanvasEditMenuItem_PointerEntered"
                           PointerExited="CanvasEditMenuItem_PointerExited"

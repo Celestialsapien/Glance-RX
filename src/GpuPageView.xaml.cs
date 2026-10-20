@@ -7768,22 +7768,40 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void ShowCanvasEditContextMenu(Point pos)
     {
         if (CanvasEditContextMenu == null || _canvasEditNodeId == null) return;
+        // 快照可能落后一拍（TOM 路径不保证触发 TextChanged）⇒ 弹出前重读一次，可用性判断才不会用到旧串。
+        _canvasEditText = GetCanvasEditText();
         // 文案每次弹出时取（语言可在运行期变化；弹出不是高频路径，字典查找无感）。
         CanvasEditMenuCutText.Text = GlanceRX.Services.LocalizationService.Get("CanvasCut");
         CanvasEditMenuCopyText.Text = GlanceRX.Services.LocalizationService.Get("CanvasCopy");
         CanvasEditMenuPasteText.Text = GlanceRX.Services.LocalizationService.Get("CanvasPaste");
         CanvasEditMenuSelectAllText.Text = GlanceRX.Services.LocalizationService.Get("CanvasSelectAll");
+        CanvasEditMenuBoldText.Text = GlanceRX.Services.LocalizationService.Get("CanvasBold");
+        CanvasEditMenuItalicText.Text = GlanceRX.Services.LocalizationService.Get("CanvasItalic");
+        CanvasEditMenuStrikeText.Text = GlanceRX.Services.LocalizationService.Get("CanvasStrike");
+        CanvasEditMenuCodeText.Text = GlanceRX.Services.LocalizationService.Get("CanvasInlineCode");
+        CanvasEditMenuHighlightText.Text = GlanceRX.Services.LocalizationService.Get("CanvasHighlight");
+        // 高亮色块：直接取渲染用的同一个常量，且**不透明**。半透明色块会跟菜单底色混合（浅色菜单偏白、
+        // 深色菜单偏土黄），与卡片里看到的高亮永远对不上；而卡片恒为白底（CanvasCardFill=#FFFFFFFF），
+        // 故这里用"已合到白底上的实色"才是所见即所得。
+        CanvasEditMenuHighlightSwatch.Background = new SolidColorBrush(CanvasMarkdownHighlightBackdrop);
         // 可用性：无选区 → 剪切/复制灰掉；剪贴板无文本 → 粘贴灰掉；空文档 → 全选灰掉。
         SetCanvasEditMenuItemEnabled(CanvasEditMenuCut, CanvasEditHasSelection());
         SetCanvasEditMenuItemEnabled(CanvasEditMenuCopy, CanvasEditHasSelection());
         SetCanvasEditMenuItemEnabled(CanvasEditMenuPaste, CanvasClipboardHasText());
         SetCanvasEditMenuItemEnabled(CanvasEditMenuSelectAll, _canvasEditText.Length > 0);
+        // 格式组：空卡片没东西可包 ⇒ 灰掉；有文字就可用（无选区时点一下 = 插入一对标记并把光标放中间）。
+        bool hasText = _canvasEditText.Length > 0;
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuBold, hasText);
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuItalic, hasText);
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuStrike, hasText);
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuCode, hasText);
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuHighlight, hasText);
         CanvasEditContextMenu.Visibility = Visibility.Visible;
         // 先量出实际尺寸再钳制落点：菜单贴右/贴下会溢出视口。UpdateLayout 是同步的，
         // 这里只在"用户右键"这一下发生，不在绘制/滚动路径上。
         CanvasEditContextMenu.UpdateLayout();
         double w = CanvasEditContextMenu.ActualWidth > 0 ? CanvasEditContextMenu.ActualWidth : 192;
-        double h = CanvasEditContextMenu.ActualHeight > 0 ? CanvasEditContextMenu.ActualHeight : 152;
+        double h = CanvasEditContextMenu.ActualHeight > 0 ? CanvasEditContextMenu.ActualHeight : 316;
         // 同样走安全区：菜单若被钳到顶栏宿主底下，里面的行也一样点不动。
         CanvasEditContextMenu.Margin = new Thickness(ClampOverlayX(pos.X, w), ClampOverlayY(pos.Y, h), 0, 0);
         _canvasEditMenuOpen = true;
@@ -7799,6 +7817,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         SetCanvasEditMenuRowHover(CanvasEditMenuCut, false);
         SetCanvasEditMenuRowHover(CanvasEditMenuCopy, false);
         SetCanvasEditMenuRowHover(CanvasEditMenuPaste, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuBold, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuItalic, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuStrike, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuCode, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuHighlight, false);
         SetCanvasEditMenuRowHover(CanvasEditMenuSelectAll, false);
     }
 
@@ -7885,6 +7908,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 case "paste":
                     PasteCanvasClipboardText();
                     break;
+                // ---- Markdown 快捷格式：对当前选区做"包/拆"切换（同一标记再点一次即取消）----
+                case "bold": ToggleCanvasMarkdownWrap("**"); break;
+                case "italic": ToggleCanvasMarkdownWrap("*"); break;
+                case "strike": ToggleCanvasMarkdownWrap("~~"); break;
+                case "code": ToggleCanvasMarkdownWrap("`"); break;
+                case "highlight": ToggleCanvasMarkdownWrap("=="); break;
                 case "selectall":
                 {
                     int len = GetCanvasEditText().Length;
@@ -7903,6 +7932,105 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 选区/文字变化不经过 TextChanged（全选只动选区）⇒ 这里统一补一次重绘与光标重置。
         ResetCaretBlink();
         ScreenCanvas.Invalidate();
+    }
+
+    // ===== Markdown 快捷格式（自绘右键菜单的格式组）=====
+
+    /// <summary>把选区用 <paramref name="marker"/> 包起来；若已经带着这一对标记，则改为拆掉（同一项再点一次 = 取消）。
+    /// 四种落点：
+    /// ① 选区【外】两侧已是该标记（拖选的是正文）⇒ 删外侧那一对；
+    /// ② 选区【首尾】自带该标记（拖选时把标记也框进来了）⇒ 删里面那一对；
+    /// ③ 有选区、无标记 ⇒ 包起来，并保持"正文仍处于选中"（便于立刻叠加第二种格式，如加粗+高亮）；
+    /// ④ 光标（零宽选区）⇒ 插一对空标记、光标落中间，等同手打 <c>****</c> 后往里写。
+    /// ⚠ 一律走 TOM 区段编辑（GetRange/SetText），<b>不整篇重写文档</b>：整篇重写会连带重置编辑框滚动位置与
+    /// 段落格式，长卡片上表现为"点一下格式，正文跳回开头"。
+    /// ⚠ 位置索引以 <see cref="GetCanvasEditText"/> 的归一化串为准：段落符在两侧都是单字符（\r 对 \n），
+    /// 故 TOM 的 StartPosition/EndPosition 与它逐字对齐（<see cref="ApplyCanvasEditCharacterFormatting"/> 同源假设）。</summary>
+    private void ToggleCanvasMarkdownWrap(string marker)
+    {
+        if (_canvasEditNodeId == null || CanvasEditBox?.Document == null) return;
+        int ml = marker.Length;
+        if (ml == 0) return;
+        string text = GetCanvasEditText();
+        int start, end;
+        try
+        {
+            var sel = CanvasEditBox.Document.Selection;
+            start = Math.Min(sel.StartPosition, sel.EndPosition);
+            end = Math.Max(sel.StartPosition, sel.EndPosition);
+        }
+        catch { return; }
+        start = Math.Clamp(start, 0, text.Length);
+        end = Math.Clamp(end, start, text.Length);
+
+        // ① 外侧已成对：先删右侧再删左侧（右侧位置在后，删左侧不会影响它）。
+        if (start >= ml && end + ml <= text.Length
+            && string.CompareOrdinal(text, start - ml, marker, 0, ml) == 0
+            && string.CompareOrdinal(text, end, marker, 0, ml) == 0)
+        {
+            CanvasDocReplace(end, end + ml, "");
+            CanvasDocReplace(start - ml, start, "");
+            FinishCanvasMarkdownToggle(start - ml, end - ml);
+            return;
+        }
+
+        // ② 选区自身首尾带标记：同样先删尾部那一对，避免前面的删除挪动后面的索引。
+        if (end - start >= ml * 2
+            && string.CompareOrdinal(text, start, marker, 0, ml) == 0
+            && string.CompareOrdinal(text, end - ml, marker, 0, ml) == 0)
+        {
+            CanvasDocReplace(end - ml, end, "");
+            CanvasDocReplace(start, start + ml, "");
+            FinishCanvasMarkdownToggle(start, end - ml * 2);
+            return;
+        }
+
+        // ④ 零宽：插一对标记，光标夹在中间。
+        if (end == start)
+        {
+            CanvasDocReplace(start, start, marker + marker);
+            FinishCanvasMarkdownToggle(start + ml, start + ml);
+            return;
+        }
+
+        // ③ 包起来。尾部空白（尤其"拖到行尾"带上的段落符）不纳入标记：否则 closer 落到下一行行首，
+        //    解析器认不到配对，看起来"点了加粗却没变粗"；选中全是空白时保持原样，别缩成零宽。
+        int wrapEnd = end;
+        while (wrapEnd > start && char.IsWhiteSpace(text[wrapEnd - 1])) wrapEnd--;
+        if (wrapEnd <= start) wrapEnd = end;
+        CanvasDocReplace(wrapEnd, wrapEnd, marker);   // 先加尾，再加头：尾部插入不影响 start
+        CanvasDocReplace(start, start, marker);
+        FinishCanvasMarkdownToggle(start + ml, wrapEnd + ml);
+    }
+
+    /// <summary>用 TOM 区段把 [start,end) 换成 text（start==end 即纯插入）。失败静默：格式只是锦上添花，
+    /// 不能因一次 TOM 调用失败把整个编辑会话打断。</summary>
+    private void CanvasDocReplace(int start, int end, string text)
+    {
+        try
+        {
+            if (end < start) (start, end) = (end, start);
+            CanvasEditBox.Document.GetRange(start, end)
+                .SetText(Microsoft.UI.Text.TextSetOptions.None, text ?? "");
+        }
+        catch { }
+    }
+
+    /// <summary>文本已被程序化改动 ⇒ 刷新快照/字符格式/留白，再把选区落到 [start,end)（活动端在末尾），
+    /// 并作废"自绘选区活动端"基线（下一帧直接按 End 取活动端）。</summary>
+    private void FinishCanvasMarkdownToggle(int start, int end)
+    {
+        RefreshCanvasEditAfterProgrammaticEdit();
+        try
+        {
+            var sel = CanvasEditBox.Document.Selection;
+            // 与"全选"同一手法：先把活动端放到 end，再把另一端拉回 start——直接 SetRange(start,end)
+            // 会让框架把活动端留在 start（选区方向反了，后续输入的落点跟着反）。
+            sel.SetRange(end, end);
+            sel.StartPosition = start;
+        }
+        catch { }
+        _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;
     }
 
     private bool CanvasEditHasSelection()
