@@ -406,58 +406,43 @@
                     local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18"
                     PointerPressed="CanvasEditContextMenu_PointerPressed">
                 <StackPanel Width="184">
-                    <Grid x:Name="CanvasEditMenuCut" Tag="cut" Height="32" Background="Transparent"
-                          PointerEntered="CanvasEditMenuItem_PointerEntered"
-                          PointerExited="CanvasEditMenuItem_PointerExited"
-                          PointerPressed="CanvasEditMenuItem_PointerPressed">
-                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
-                                Opacity="0" IsHitTestVisible="False"/>
-                        <Grid Padding="8,0" ColumnSpacing="10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="18"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <FontIcon Glyph="&#xE8C6;" FontSize="14" VerticalAlignment="Center"
+                    <!-- ===== 剪贴板三项：单行三个「纯图标」按钮（复制 / 剪切 / 粘贴）=====
+                         原来各占一整行（3×32）纯属浪费纵向空间，压成一行三格、只留图标 + 悬停底色。
+                         仍然是 Grid 而非 Button：不抢焦点（编辑框全程持焦点、选区不丢），
+                         悬停底色沿用各行「第一层 Border + Opacity 0/1」的同一套写法（见 SetCanvasEditMenuRowHover）。
+                         ⚠ 顺序按用户指定：复制、剪切、粘贴（有意不同于 Windows 习惯的"剪切在前"）。 -->
+                    <Grid Height="32" Background="Transparent">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid x:Name="CanvasEditMenuCopy" Tag="copy" Grid.Column="0" Background="Transparent"
+                              PointerEntered="CanvasEditMenuItem_PointerEntered"
+                              PointerExited="CanvasEditMenuItem_PointerExited"
+                              PointerPressed="CanvasEditMenuItem_PointerPressed">
+                            <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                    Opacity="0" IsHitTestVisible="False"/>
+                            <FontIcon Glyph="&#xE8C8;" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"
                                       FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
-                            <TextBlock x:Name="CanvasEditMenuCutText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
-                            <TextBlock Grid.Column="2" Text="Ctrl+X" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
                         </Grid>
-                    </Grid>
-                    <Grid x:Name="CanvasEditMenuCopy" Tag="copy" Height="32" Background="Transparent"
-                          PointerEntered="CanvasEditMenuItem_PointerEntered"
-                          PointerExited="CanvasEditMenuItem_PointerExited"
-                          PointerPressed="CanvasEditMenuItem_PointerPressed">
-                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
-                                Opacity="0" IsHitTestVisible="False"/>
-                        <Grid Padding="8,0" ColumnSpacing="10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="18"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <FontIcon Glyph="&#xE8C8;" FontSize="14" VerticalAlignment="Center"
+                        <Grid x:Name="CanvasEditMenuCut" Tag="cut" Grid.Column="1" Background="Transparent"
+                              PointerEntered="CanvasEditMenuItem_PointerEntered"
+                              PointerExited="CanvasEditMenuItem_PointerExited"
+                              PointerPressed="CanvasEditMenuItem_PointerPressed">
+                            <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                    Opacity="0" IsHitTestVisible="False"/>
+                            <FontIcon Glyph="&#xE8C6;" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"
                                       FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
-                            <TextBlock x:Name="CanvasEditMenuCopyText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
-                            <TextBlock Grid.Column="2" Text="Ctrl+C" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
                         </Grid>
-                    </Grid>
-                    <Grid x:Name="CanvasEditMenuPaste" Tag="paste" Height="32" Background="Transparent"
-                          PointerEntered="CanvasEditMenuItem_PointerEntered"
-                          PointerExited="CanvasEditMenuItem_PointerExited"
-                          PointerPressed="CanvasEditMenuItem_PointerPressed">
-                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
-                                Opacity="0" IsHitTestVisible="False"/>
-                        <Grid Padding="8,0" ColumnSpacing="10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="18"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <FontIcon Glyph="&#xE77F;" FontSize="14" VerticalAlignment="Center"
+                        <Grid x:Name="CanvasEditMenuPaste" Tag="paste" Grid.Column="2" Background="Transparent"
+                              PointerEntered="CanvasEditMenuItem_PointerEntered"
+                              PointerExited="CanvasEditMenuItem_PointerExited"
+                              PointerPressed="CanvasEditMenuItem_PointerPressed">
+                            <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                    Opacity="0" IsHitTestVisible="False"/>
+                            <FontIcon Glyph="&#xE77F;" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"
                                       FontFamily="{ThemeResource SymbolThemeFontFamily}"/>
-                            <TextBlock x:Name="CanvasEditMenuPasteText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
-                            <TextBlock Grid.Column="2" Text="Ctrl+V" FontSize="12" Opacity="0.55" VerticalAlignment="Center"/>
                         </Grid>
                     </Grid>
                     <Border Height="1" Margin="8,4" Opacity="0.6"
@@ -581,6 +566,26 @@
                                        FontFamily="Consolas" VerticalAlignment="Center" TextAlignment="Center">
                                 <TextBlock.RenderTransform><TranslateTransform Y="-2"/></TextBlock.RenderTransform>
                             </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <!-- 清除格式：格式组的"减"总闸 —— 把选区里所有成对标记剥掉（含紧贴选区外侧的那一对），
+                         语义上是"这几种样式的统一取消"，所以放在格式组末尾、全选之前。 -->
+                    <Grid x:Name="CanvasEditMenuClearFormat" Tag="clearformat" Height="32" Background="Transparent"
+                          PointerEntered="CanvasEditMenuItem_PointerEntered"
+                          PointerExited="CanvasEditMenuItem_PointerExited"
+                          PointerPressed="CanvasEditMenuItem_PointerPressed">
+                        <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+                                Opacity="0" IsHitTestVisible="False"/>
+                        <Grid Padding="8,0" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+                            <!-- E75C = EraseTool（MDL2 与 Fluent 都有，Win10 不会缺字） -->
+                            <FontIcon Glyph="&#xE75C;" FontSize="14" VerticalAlignment="Center"
+                                      FontFamily="{ThemeResource SymbolThemeFontFamily}" Opacity="0.85"/>
+                            <TextBlock x:Name="CanvasEditMenuClearFormatText" Grid.Column="1" FontSize="13" VerticalAlignment="Center"/>
                         </Grid>
                     </Grid>
                     <Border Height="1" Margin="8,4" Opacity="0.6"

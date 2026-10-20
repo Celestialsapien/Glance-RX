@@ -581,10 +581,12 @@ public sealed partial class MainPage : Page
             // 白板连线拖拽中按 Esc → 取消本次连线（松手落空同样会取消，Esc 只是更快的退出手感）。
             if (GpuViewer.CancelCanvasConnection()) e.Handled = true;
         }
-        else if ((e.Key == VirtualKey.Delete || e.Key == VirtualKey.Back) &&
+        else if (e.Key == VirtualKey.Delete &&
                  !e.Handled && _currentMode == EditMode.Canvas && !GpuViewer.IsCanvasEditing)
         {
             // 白板模式：优先删选中的连线，否则删选中的卡片。编辑文本时交给文本框原生处理。
+            // ⚠ 只认 Delete，**不认 Backspace**：退格是打字/翻页时最容易被误按的键，一按就整张卡片或
+            //   整条连线消失（用户报告"容易误删"）。卡片默认选中态下没有文本可退格，故截断它无副作用。
             if (GpuViewer.HasSelectedCanvasEdge) { GpuViewer.DeleteSelectedCanvasEdge(); e.Handled = true; }
             else if (GpuViewer.HasSelectedCanvasNode) { GpuViewer.DeleteSelectedCanvasNode(); e.Handled = true; }
         }
@@ -1172,6 +1174,11 @@ public sealed partial class MainPage : Page
                 new() { Gesture = "Ctrl + D",         Description = Loc("GuideKeyBookmarkDesc") },
                 new() { Gesture = "Ctrl + Z",         Description = Loc("GuideKeyUndoDesc") },
                 new() { Gesture = "Ctrl + Y",         Description = Loc("GuideKeyRedoDesc") },
+                new() { Gesture = "Ctrl + B",         Description = Loc("GuideKeyBoldDesc") },
+                new() { Gesture = "Ctrl + I",         Description = Loc("GuideKeyItalicDesc") },
+                new() { Gesture = "Ctrl + U",         Description = Loc("GuideKeyStrikeDesc") },
+                new() { Gesture = "Ctrl + H",         Description = Loc("GuideKeyHighlightDesc") },
+                new() { Gesture = "Ctrl + J",         Description = Loc("GuideKeyInlineCodeDesc") },
                 new() { Gesture = "Ctrl + S",         Description = Loc("GuideKeySaveDesc") },
                 new() { Gesture = "Ctrl + P",         Description = Loc("GuideKeyPrintDesc") },
             };

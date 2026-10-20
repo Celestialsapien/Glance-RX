@@ -3818,17 +3818,33 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _hoverCanvasEdgeId = null;
         if (_hoverCanvasNodeId != null && !idx.ContainsKey(_hoverCanvasNodeId))
             _hoverCanvasNodeId = null;
-        // 撤销/重做可能改到【正在编辑】卡片的文本 → 同步编辑框内容并把光标移到末尾。
+        // 撤销/重做可能改到【正在编辑】卡片的文本 → 同步编辑框内容，并把光标放到**改动区末尾**。
         // 否则编辑框残留旧文本，用户失焦提交时会用旧文本覆盖掉刚撤销/重做的结果。
+        // ⚠ 旧实现一律 `SetRange(end,end)`（理由写着"RichEditBox 没有 SelectionStart"），结果一按 Ctrl+Z
+        //   光标就飞到全文末尾，撤销后想接着改前一句必须重新点回去（用户报告"编辑不连贯"）。
+        //   中间一版改成"保留原偏移"，又导致撤销删字后光标停在恢复字**左边**（用户报告）。
+        //   ⇒ 正解是按新旧文本的差分定位改动区，光标取它在新串里的末端（见 CanvasTextChangeEnd）。
         if (_canvasEditNodeId != null && CanvasEditBox != null &&
             idx.TryGetValue(_canvasEditNodeId, out var editNode))
         {
             string t = editNode.Text ?? "";
-            if (!string.Equals(_canvasEditText, t, StringComparison.Ordinal))
+            string oldText = GetCanvasEditText();   // 重写之前读，既是"是否要重写"的判据，也用于定位改动区
+            if (!string.Equals(oldText, t, StringComparison.Ordinal))
             {
-                // 撤销/重做改到正在编辑的卡片 → 重写文档并把光标移到末尾（RichEditBox 没有 Text / SelectionStart）。
-                int end = SetCanvasEditText(t);
-                CanvasEditBox.Document.Selection.SetRange(end, end);
+                SetCanvasEditText(t);
+                // 光标落在【改动区末尾】，而不是"原地保留偏移"：
+                // 原地保留时，撤销"删掉一个字"会把光标留在恢复字**左边**（用户报告），必须再按一次→才到右边。
+                int caret = Math.Clamp(CanvasTextChangeEnd(oldText, t), 0, t.Length);
+                try
+                {
+                    var sel = CanvasEditBox.Document.Selection;
+                    sel.SetRange(caret, caret);
+                }
+                catch { }
+                // 基线直接写成落点（而不是清成 -1）：清 -1 会让绘制层走"默认右端"的兜底，
+                // 与上面"按改动区定位"的意图相悖（折叠光标不受影响，但保持口径一致更稳）。
+                _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = caret;
+                ScreenCanvas.Invalidate();   // 自绘光标/选区当帧跟上（SetText 不保证触发 TextChanged）
             }
             // 撤销/重做改到的文本即新的"已入史基线"，并撤销挂起中的去抖提交 ——
             // 否则停顿 400ms 后会把刚撤销掉的文本当成一次新输入又提交回去。
@@ -5967,14 +5983,20 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         catch { return -1; }
     }
 
-    /// <summary>把选区设成 [start,end]（源串偏移）。自绘光标的活动端推断基线一并清掉，下一帧直接按新选区推。</summary>
+    /// <summary>把选区设成 [start,end]（源串偏移）。调用方约定：<paramref name="end"/> 是**活动端**——
+    /// 拖选时它就是跟着指针走的那一端，单击落光标时两端相同。
+    /// ⚠ 基线必须写成"这次设的选区 + 活动端 = end"，<b>绝不能清成 -1</b>：清掉之后
+    /// <see cref="DrawCanvasEditCaret"/> 会走"无基线 ⇒ 默认右端"的兜底，于是从右往左拖选时
+    /// 光标钉死在右端、不跟指针（用户报告"从右往左拖光标不跟随"）。</summary>
     private void SetCanvasEditSelection(int start, int end)
     {
         try
         {
             var sel = CanvasEditBox.Document.Selection;
             sel.SetRange(start, end);
-            _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;
+            _canvasSelLastStart = Math.Min(start, end);
+            _canvasSelLastEnd = Math.Max(start, end);
+            _canvasSelLastActive = end;
         }
         catch { }
         ResetCaretBlink();
@@ -7229,6 +7251,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             e.Handled = true;
             CanvasRedoRequested?.Invoke(this, EventArgs.Empty);
         }
+        // 行内 Markdown 快捷键（全部 Ctrl + 单字母，且尽量聚在 B/I 一带）：
+        //   Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+U 删除线 / Ctrl+H 高亮 / Ctrl+J 行内代码。
+        // 与右键菜单同一套"包/拆"逻辑，五种样式一视同仁，各给一个键。
+        // 键位核查：U/H/J 此前均未占用（Ctrl+D=书签，S/P/O/Z/Y 已占）；U 取"划线"位（本编辑器没有下划线），
+        // J 与 H 相邻（行内代码原定 Ctrl+E，用户嫌离 B/I 太远，改到 J）。
+        // 必须拦在 PreviewKeyDown：RichEditBox 虽已 DisabledFormattingAccelerators="All"，但让按键落到
+        // 类处理里仍可能插入字符或改富文本格式；这里先 Handled 才干净。
+        else if (e.Key == VirtualKey.B) { e.Handled = true; ApplyCanvasMarkdownShortcut("**"); }
+        else if (e.Key == VirtualKey.I) { e.Handled = true; ApplyCanvasMarkdownShortcut("*"); }
+        else if (e.Key == VirtualKey.U) { e.Handled = true; ApplyCanvasMarkdownShortcut("~~"); }
+        else if (e.Key == VirtualKey.H) { e.Handled = true; ApplyCanvasMarkdownShortcut("=="); }
+        else if (e.Key == VirtualKey.J) { e.Handled = true; ApplyCanvasMarkdownShortcut("`"); }
     }
 
     /// <summary>编辑期间必须【就地终结】的光标导航键。RichEditBox 移动完光标后**不**把事件标为 Handled，
@@ -7384,6 +7418,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             return s;
         }
         catch { return ""; }
+    }
+
+    /// <summary>两串文本的"改动区末尾"在新串里的下标（撤销/重做后光标放这里）。
+    /// 做法：掐掉公共前缀与公共后缀，剩下的就是改动区，光标取其**末端** ——
+    /// 撤销"删掉一个字"时正好落在恢复出来的字右边（用户期望的位置）；
+    /// 撤销一次输入时则落在被删段原来的位置。改动区为空（长度不变、只换了字符）也成立。</summary>
+    private static int CanvasTextChangeEnd(string oldText, string newText)
+    {
+        int minLen = Math.Min(oldText.Length, newText.Length);
+        int prefix = 0;
+        while (prefix < minLen && oldText[prefix] == newText[prefix]) prefix++;
+        int suffix = 0, maxSuffix = minLen - prefix;
+        while (suffix < maxSuffix
+               && oldText[oldText.Length - 1 - suffix] == newText[newText.Length - 1 - suffix])
+            suffix++;
+        return newText.Length - suffix;
     }
 
     /// <summary>写编辑框文本（内部顺带锁定行距）；返回【文档全文长度】，供 SetRange 把光标落到末尾。
@@ -7771,15 +7821,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 快照可能落后一拍（TOM 路径不保证触发 TextChanged）⇒ 弹出前重读一次，可用性判断才不会用到旧串。
         _canvasEditText = GetCanvasEditText();
         // 文案每次弹出时取（语言可在运行期变化；弹出不是高频路径，字典查找无感）。
-        CanvasEditMenuCutText.Text = GlanceRX.Services.LocalizationService.Get("CanvasCut");
-        CanvasEditMenuCopyText.Text = GlanceRX.Services.LocalizationService.Get("CanvasCopy");
-        CanvasEditMenuPasteText.Text = GlanceRX.Services.LocalizationService.Get("CanvasPaste");
+        // 注：剪贴板三项已改成纯图标（无文字），故不再取 CanvasCut/Copy/Paste 文案。
         CanvasEditMenuSelectAllText.Text = GlanceRX.Services.LocalizationService.Get("CanvasSelectAll");
         CanvasEditMenuBoldText.Text = GlanceRX.Services.LocalizationService.Get("CanvasBold");
         CanvasEditMenuItalicText.Text = GlanceRX.Services.LocalizationService.Get("CanvasItalic");
         CanvasEditMenuStrikeText.Text = GlanceRX.Services.LocalizationService.Get("CanvasStrike");
         CanvasEditMenuCodeText.Text = GlanceRX.Services.LocalizationService.Get("CanvasInlineCode");
         CanvasEditMenuHighlightText.Text = GlanceRX.Services.LocalizationService.Get("CanvasHighlight");
+        CanvasEditMenuClearFormatText.Text = GlanceRX.Services.LocalizationService.Get("CanvasClearFormatting");
         // 高亮色块：直接取渲染用的同一个常量，且**不透明**。半透明色块会跟菜单底色混合（浅色菜单偏白、
         // 深色菜单偏土黄），与卡片里看到的高亮永远对不上；而卡片恒为白底（CanvasCardFill=#FFFFFFFF），
         // 故这里用"已合到白底上的实色"才是所见即所得。
@@ -7796,12 +7845,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         SetCanvasEditMenuItemEnabled(CanvasEditMenuStrike, hasText);
         SetCanvasEditMenuItemEnabled(CanvasEditMenuCode, hasText);
         SetCanvasEditMenuItemEnabled(CanvasEditMenuHighlight, hasText);
+        // 清除格式是"对一段范围剥标记"的操作 ⇒ 没有选区时不可用（零宽光标无从下手）。
+        SetCanvasEditMenuItemEnabled(CanvasEditMenuClearFormat, CanvasEditHasSelection());
         CanvasEditContextMenu.Visibility = Visibility.Visible;
         // 先量出实际尺寸再钳制落点：菜单贴右/贴下会溢出视口。UpdateLayout 是同步的，
         // 这里只在"用户右键"这一下发生，不在绘制/滚动路径上。
         CanvasEditContextMenu.UpdateLayout();
         double w = CanvasEditContextMenu.ActualWidth > 0 ? CanvasEditContextMenu.ActualWidth : 192;
-        double h = CanvasEditContextMenu.ActualHeight > 0 ? CanvasEditContextMenu.ActualHeight : 316;
+        double h = CanvasEditContextMenu.ActualHeight > 0 ? CanvasEditContextMenu.ActualHeight : 284;
         // 同样走安全区：菜单若被钳到顶栏宿主底下，里面的行也一样点不动。
         CanvasEditContextMenu.Margin = new Thickness(ClampOverlayX(pos.X, w), ClampOverlayY(pos.Y, h), 0, 0);
         _canvasEditMenuOpen = true;
@@ -7822,6 +7873,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         SetCanvasEditMenuRowHover(CanvasEditMenuStrike, false);
         SetCanvasEditMenuRowHover(CanvasEditMenuCode, false);
         SetCanvasEditMenuRowHover(CanvasEditMenuHighlight, false);
+        SetCanvasEditMenuRowHover(CanvasEditMenuClearFormat, false);
         SetCanvasEditMenuRowHover(CanvasEditMenuSelectAll, false);
     }
 
@@ -7914,6 +7966,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 case "strike": ToggleCanvasMarkdownWrap("~~"); break;
                 case "code": ToggleCanvasMarkdownWrap("`"); break;
                 case "highlight": ToggleCanvasMarkdownWrap("=="); break;
+                case "clearformat": ClearCanvasMarkdownFormatting(); break;
                 case "selectall":
                 {
                     int len = GetCanvasEditText().Length;
@@ -8003,6 +8056,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         FinishCanvasMarkdownToggle(start + ml, wrapEnd + ml);
     }
 
+    /// <summary>快捷键入口：菜单开着就先收起（与"按任意键即收起菜单"一致），再做同一次包/拆。</summary>
+    private void ApplyCanvasMarkdownShortcut(string marker)
+    {
+        if (_canvasEditMenuOpen) HideCanvasEditContextMenu();
+        ToggleCanvasMarkdownWrap(marker);
+        ResetCaretBlink();
+        ScreenCanvas.Invalidate();
+    }
+
     /// <summary>用 TOM 区段把 [start,end) 换成 text（start==end 即纯插入）。失败静默：格式只是锦上添花，
     /// 不能因一次 TOM 调用失败把整个编辑会话打断。</summary>
     private void CanvasDocReplace(int start, int end, string text)
@@ -8031,6 +8093,94 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         catch { }
         _canvasSelLastStart = _canvasSelLastEnd = _canvasSelLastActive = -1;
+    }
+
+    /// <summary>清除格式：把选区里的行内标记一律剥掉（粗/斜/斜粗/删/高亮/行内代码/转义反斜杠）。
+    /// 三步，缺一不可：
+    /// ① **扩到整段样式**：选区只框住带格式文字的一部分时，先扩到该 span 的完整源串范围 ——
+    ///    否则会留下"半对标记"（比如只清掉后半段的 closer，前半段的 opener 变成字面量）。
+    /// ② **对称吃掉紧邻外侧的成对标记**：拖选往往只框住正文、标记在选区外侧（<c>**正文**</c>），
+    ///    不扩就只删得掉里面的、外面那对仍在 ⇒ 看起来"点了没反应"。
+    /// ③ **只删"标记字符"**：以整篇 <see cref="CanvasMarkdown.Parse"/> 的显示→源映射为准（凡是没出现在
+    ///    显示串里的源位置就是标记）。这样 <c>\*</c> 这类转义里被转义的那个字不会被误删。
+    /// ⚠ 仍然逐段走 TOM（从后往前删，前面的下标不受影响），不整篇重写文档。</summary>
+    private void ClearCanvasMarkdownFormatting()
+    {
+        if (_canvasEditNodeId == null || CanvasEditBox?.Document == null) return;
+        string text = GetCanvasEditText();
+        if (text.Length == 0) return;
+        int start, end;
+        try
+        {
+            var sel = CanvasEditBox.Document.Selection;
+            start = Math.Min(sel.StartPosition, sel.EndPosition);
+            end = Math.Max(sel.StartPosition, sel.EndPosition);
+        }
+        catch { return; }
+        start = Math.Clamp(start, 0, text.Length);
+        end = Math.Clamp(end, start, text.Length);
+        if (end <= start) return;   // 零宽选区无事可做（菜单项此时也是灰的）
+
+        var parsed = CanvasMarkdown.Parse(text);
+        var map = parsed.SourceIndexMap;
+        if (map == null || map.Count != parsed.DisplayText.Length + 1) return;   // 无标记可清
+
+        // ① 扩到整段样式。span 的内容在源串里是 [map[Start], map[末显示下标] + 1)
+        foreach (var span in parsed.Spans)
+        {
+            int last = span.Start + span.Length - 1;
+            if (span.Length <= 0 || last < 0 || last >= map.Count) continue;
+            int ds = map[Math.Clamp(span.Start, 0, map.Count - 1)];
+            int de = map[last] + 1;
+            if (de <= start || ds >= end) continue;   // 与选区不相交
+            start = Math.Min(start, ds);
+            end = Math.Max(end, de);
+        }
+
+        // ② 对称吃掉紧贴选区外侧的成对标记（len 从长到短试：*** → ** → *）
+        while (true)
+        {
+            bool expanded = false;
+            for (int len = 3; len >= 1; len--)
+            {
+                if (start < len || end + len > text.Length) continue;
+                string left = text.Substring(start - len, len);
+                if (!string.Equals(left, text.Substring(end, len), StringComparison.Ordinal)) continue;
+                if (!IsCanvasMarkdownDelimiterRun(left)) continue;
+                start -= len;
+                end += len;
+                expanded = true;
+                break;
+            }
+            if (!expanded) break;
+        }
+
+        // ③ 范围内凡是"标记字符"就删掉（从后往前，前面的下标不受影响）
+        var isMarkup = new bool[text.Length];
+        Array.Fill(isMarkup, true);
+        for (int i = 0; i < parsed.DisplayText.Length; i++)
+        {
+            int src = map[i];
+            if (src >= 0 && src < text.Length) isMarkup[src] = false;
+        }
+        int removed = 0;
+        for (int i = end - 1; i >= start; i--)
+        {
+            if (!isMarkup[i]) continue;
+            CanvasDocReplace(i, i + 1, "");
+            removed++;
+        }
+        if (removed == 0) return;   // 选区里本来就没有标记 ⇒ 不刷新、不产生历史记录
+        FinishCanvasMarkdownToggle(start, end - removed);
+    }
+
+    /// <summary>这串字符是不是纯 Markdown 定界符（用于"外侧成对标记"识别，避免把普通字符当成标记）。</summary>
+    private static bool IsCanvasMarkdownDelimiterRun(string s)
+    {
+        if (s.Length == 0) return false;
+        foreach (char c in s)
+            if (c is not ('*' or '~' or '=' or '`')) return false;
+        return true;
     }
 
     private bool CanvasEditHasSelection()
