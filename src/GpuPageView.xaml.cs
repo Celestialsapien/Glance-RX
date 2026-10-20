@@ -4042,7 +4042,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         var strokeColor = customColor ? cardColor : (emphasized ? _canvasAccentColor : CanvasCardStroke);
         float strokeWidth = emphasized ? CanvasCardSelectedStrokeWidth : CanvasCardStrokeWidth;
-        ds.DrawRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius, strokeColor, strokeWidth);
+        // ⚠ 边框【不在这里画】：卡片上下内边距为 0（CanvasCardPadY），内容溢出被滚动时首/末行会顶到边线上；
+        //   边框若先画，文字的墨迹就会压住边框内半边（用户报告："文字会超到边框上"）。
+        //   正解是让【边框永远在内容之上】（见方法末尾）：内容从框下滑出去，边框始终是干净的一条。
+        //   曾是"各自内缩半个描边"的方案，但未选中卡片只有 1pt 描边，内缩 1.25 反而会在文字与边框间留白缝。
 
         bool editing = node.Id == _canvasEditNodeId;
         // 编辑态用【实时文本】(_canvasEditText)：打字后到提交前的渲染不再滞后；其余态用节点文本。
@@ -4053,7 +4056,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasTextLayout? layout = !string.IsNullOrEmpty(drawText)
             ? (editing ? GetCanvasEditTextLayout(tw, th) : GetCanvasTextLayout(node, tw, th))
             : null;
-        if (layout == null && !editing) return;   // 非编辑态空卡：既不画文字也不画光标
+        if (layout == null && !editing)
+        {
+            DrawCanvasCardFrame(ds, rect, strokeColor, strokeWidth);   // 空卡：只画边框
+            return;
+        }
 
         double topPad, scrollY;
         if (editing)
@@ -4095,6 +4102,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
             if (editing) DrawCanvasEditCaret(ds, layout, textRect, topPad, scrollY, z);    // 光标（空文本时画在原点）
         }
+
+        // 边框最后画 ⇒ 内容（含溢出滚动时的首/末行、底纹、选区、光标）一律从边框【下面】滑出去，
+        // 边框永远干净、且文字与底纹不会出现"一个到边、一个退到内侧"的错位。
+        DrawCanvasCardFrame(ds, rect, strokeColor, strokeWidth);
+    }
+
+    /// <summary>卡片边框（圆角描边）。单独成方法是因为它必须在【内容绘制之后】调用：
+    /// 圆角矩形描边以卡片边线为中心，半边落在卡片内侧；若先画边框，溢出滚动的文字会压住它。</summary>
+    private static void DrawCanvasCardFrame(CanvasDrawingSession ds, Rect rect,
+        Windows.UI.Color strokeColor, float strokeWidth)
+    {
+        ds.DrawRoundedRectangle(rect, CanvasCardRadius, CanvasCardRadius, strokeColor, strokeWidth);
     }
 
     /// <summary>编辑态选区高亮：遍历 layout 的每一行，取与选区 [s,e) 的交集段，用 Win2D 画半透明矩形。
@@ -4718,12 +4737,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         double ox = textRect.X;
         double oy = textRect.Y + topPad - scrollY;
-        // 卡片上下内边距为 0（CanvasCardPadY）⇒ 文字区域与卡片边线重合，而描边【以边线为中心】、
-        // 内半边落在卡片内侧（选中态 2pt ⇒ 内伸 1pt）。底纹再内缩这么多，才不会压到边框本身
-        // （用户报告："首行文字的底色盖到卡片边框上"）。
-        const float borderInner = CanvasCardSelectedStrokeWidth * 0.5f + 0.25f;
-        float minTop = (float)textRect.Y + borderInner;
-        float maxBottom = (float)(textRect.Y + textRect.Height) - borderInner;
+        // ⚠ 底纹【不做】"内缩半个描边"的夹边：卡片边框现在画在内容之上（见 DrawCanvasCard），
+        //   内容一律从框下滑出去。若这里单独内缩，就会出现"文字到边、底色却退到内侧"的错位
+        //   （用户报告）。底纹与文字必须共用同一个裁剪区（外层 layer = textRect）同一口径。
         foreach (var (bounds, kind) in backdrops)
         {
             double rx = bounds.X + ox;
@@ -4744,12 +4760,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 ry = bounds.Y + oy;
                 rh = bounds.Height;
             }
-
-            // 夹进卡片内侧（滚动时首/末行底纹本就会被裁到卡边，这里一并挡住压在边框上的那一条）。
-            double top = Math.Max(ry, minTop);
-            double bottom = Math.Min(ry + rh, maxBottom);
-            if (bottom - top <= 0.01) continue;
-            var rect = new Rect(rx, top, rw, bottom - top);
+            var rect = new Rect(rx, ry, rw, rh);
 
             if (kind == CanvasMarkdownSpanKind.Code)
                 ds.FillRoundedRectangle(rect, 2f, 2f, CanvasMarkdownCodeBackdrop);
@@ -7220,6 +7231,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
+    /// <summary>编辑期间必须【就地终结】的光标导航键。RichEditBox 移动完光标后**不**把事件标为 Handled，
+    /// 于是它继续冒泡到全局 KeyboardAccelerator（MainPage.Nav_Invoked：方向键滚视口、空格下翻、
+    /// PageUp/PageDown 翻页、Home/End 跳首末页）——"光标已到极限按不动"时，整块 PDF 页面就被滚走了
+    /// （用户报告）。光标移动已由控件本体完成，这里只需把信号截断。
+    /// ⚠ 不要改成 PreviewKeyDown 里提前 Handled：那会让 RichEditBox 收不到按键、连光标都不动。</summary>
+    private static bool IsCanvasEditCaretKey(VirtualKey key) =>
+        key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down
+            or VirtualKey.Home or VirtualKey.End or VirtualKey.PageUp or VirtualKey.PageDown;
+
     private void CanvasEditBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         // 文本菜单开着时：Esc 只收起菜单（不退出编辑）；按其他任何键都视为继续输入/移动光标，菜单一并收起。
@@ -7240,6 +7260,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             EndCanvasEdit(commit: true);
             return;
         }
+        // 光标导航键：光标已由 RichEditBox 处理完 ⇒ 把事件终结在本控件内，不让它冒泡成视口导航
+        // （见 IsCanvasEditCaretKey：光标到极限时控件不标 Handled，信号会漏到 PDF 页面）。
+        if (IsCanvasEditCaretKey(e.Key)) e.Handled = true;
         // 方向键/Home/End/PageUp/PageDown 移动光标 ⇒ Win2D 自绘光标需当帧刷新。
         ResetCaretBlink();
         ScreenCanvas.Invalidate();

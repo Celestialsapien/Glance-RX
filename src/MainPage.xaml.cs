@@ -6271,8 +6271,12 @@ public sealed partial class MainPage : Page
     {
         // 焦点在文本输入 / 按钮 / 列表等原生可交互控件上时，交还原生行为
         // （页码框光标移动、工具栏按钮空格激活、缩略图列表选择等），不抢按键。
+        // ⚠ 必须含 RichEditBox：白板卡片的编辑宿主就是 RichEditBox，光标被它吃掉时加速器不会触发，
+        //   但"光标到极限按不动"时它【不标 Handled】⇒ 加速器照常触发 ⇒ 整个 PDF 页面被滚走/翻页
+        //   （用户报告：方向键、PgUp/PgDn、Home/End 会漏到视口）。
         var focused = FocusManager.GetFocusedElement(XamlRoot);
-        if (focused is TextBox or PasswordBox or ButtonBase or ComboBox or ListViewBase or HyperlinkButton)
+        if (focused is TextBox or PasswordBox or RichEditBox or ButtonBase or ComboBox
+            or ListViewBase or HyperlinkButton)
             return;
 
         if (GpuViewer == null || _totalPages <= 0) return;
