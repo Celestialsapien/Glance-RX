@@ -3643,6 +3643,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // 行内代码用极浅灰垫底 + 等宽字体；高亮用柔和黄底。都是"先画底纹、再画文字"。
     private static readonly Windows.UI.Color CanvasMarkdownCodeBackdrop = Windows.UI.Color.FromArgb(255, 236, 236, 241);
     private static readonly Windows.UI.Color CanvasMarkdownHighlightBackdrop = Windows.UI.Color.FromArgb(255, 255, 236, 140);
+    // 底纹竖向边界（相对【基线】，按字号的比例）。中文字面大致在 -0.88em..+0.12em，拉丁升部/降部约
+    // -0.75em..+0.21em ⇒ 0.92 / 0.25 刚好包住字面、又不含字体自身的上下留白。
+    // ⚠ 不能直接用 GetCharacterRegions 的整行框（约 1.33em）：中文会在色块里上下各浮约 2pt（用户报告）。
+    private const float CanvasMarkdownBackdropAscent = 0.92f;
+    private const float CanvasMarkdownBackdropDescent = 0.25f;
     private const string CanvasMarkdownCodeFontFamily = "Consolas";
     private static readonly Windows.UI.Text.FontWeight CanvasMarkdownBoldWeight = new() { Weight = 700 };
 
@@ -4612,15 +4617,49 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// <summary>预先算好行内代码/高亮的底纹矩形（layout 坐标，绘制时再平移到文本原点）。
-    /// 用 GetCharacterRegions 拿每行上的实际字框：代码跨行时自然分成多个矩形。</summary>
+    /// 横向用 GetCharacterRegions 给的实际字框（代码跨行时自然分成多个矩形）；
+    /// 竖向**不用**它给的整行高，改为按该行基线收到贴合字面 —— 理由见
+    /// <see cref="CanvasMarkdownBackdropAscent"/>。</summary>
     private static void BuildCanvasMarkdownBackdrops(CachedCanvasText cache)
     {
-        cache.Backdrops.Clear();
-        var layout = cache.Layout;
-        if (layout == null || cache.Spans.Count == 0) return;
+        BuildCanvasMarkdownBackdrops(cache.Layout, cache.DisplayText.Length, cache.Spans, cache.Backdrops);
+    }
 
-        int textLength = cache.DisplayText.Length;
-        foreach (var span in cache.Spans)
+    /// <summary>
+    /// 底纹矩形计算的唯一实现（阅读态 / 编辑态共用，两态绝不会各算一套）。
+    /// <para>
+    /// 为什么竖向要自己算：<c>GetCharacterRegions</c> 的 <c>LayoutBounds</c> 是【整行框】——字号 12 的
+    /// 自然行高约 16pt，而中文字面只占其中约 12pt，上下各约 2pt 的字体留白也被涂满 ⇒ 看起来"字浮在色块里"
+    /// （用户报告）。这里改用【该行基线】± 固定 em 比例，收到刚好包住字面。
+    /// </para>
+    /// 拿不到基线（LineMetrics 为空/异常）时退回整行框，保证不出现零高底纹。
+    /// </summary>
+    private static void BuildCanvasMarkdownBackdrops(CanvasTextLayout? layout, int textLength,
+        IReadOnlyList<CanvasMarkdownSpan> spans, List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> into)
+    {
+        into.Clear();
+        if (layout == null || spans.Count == 0) return;
+
+        // 每行的行顶与基线（CanvasLineMetrics.Baseline = 从【本行行顶】到基线，故基线要加行顶）。
+        // ⚠ LineMetrics 是【数组】（CanvasLineMetrics[]），取长度用 Length —— 写成 Count 会被解析成 LINQ 的
+        //   Count() 方法组而编译不过（本轮踩过）。
+        var lms = layout.LineMetrics;
+        float[]? lineTops = null;
+        float[]? lineBaselines = null;
+        if (lms != null && lms.Length > 0)
+        {
+            lineTops = new float[lms.Length];
+            lineBaselines = new float[lms.Length];
+            float top = 0;
+            for (int i = 0; i < lms.Length; i++)
+            {
+                lineTops[i] = top;
+                lineBaselines[i] = lms[i].Baseline;
+                top += lms[i].Height > 0 ? lms[i].Height : CanvasLineHeight;
+            }
+        }
+
+        foreach (var span in spans)
         {
             if (span.Kind != CanvasMarkdownSpanKind.Code && span.Kind != CanvasMarkdownSpanKind.Highlight) continue;
             int start = Math.Clamp(span.Start, 0, textLength);
@@ -4630,7 +4669,30 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             {
                 var bounds = region.LayoutBounds;
                 if (bounds.Width <= 0 || bounds.Height <= 0) continue;
-                cache.Backdrops.Add((bounds, span.Kind));
+
+                double y = bounds.Y;
+                double h = bounds.Height;
+                if (lineTops != null && lineBaselines != null)
+                {
+                    // 判定 region 落在哪一行：拿它的【竖直中点】去比行区间 —— 不依赖 region 顶边是否
+                    // 恰好等于行顶（region 框是整行框还是字面框、有没有上下伸部，中点都仍落在本行内）。
+                    float mid = (float)(bounds.Y + bounds.Height * 0.5);
+                    int line = -1;
+                    for (int i = 0; i < lineTops.Length; i++)
+                    {
+                        float lineBottom = i + 1 < lineTops.Length ? lineTops[i + 1] : float.MaxValue;
+                        if (mid >= lineTops[i] && mid < lineBottom) { line = i; break; }
+                    }
+                    if (line < 0) line = lineTops.Length - 1;   // 越界（负坐标等）兜底到最后一行
+
+                    float baseline = lineTops[line] + lineBaselines[line];
+                    if (baseline > lineTops[line])
+                    {
+                        y = baseline - CanvasMarkdownBackdropAscent * CanvasCardFontSize;
+                        h = (CanvasMarkdownBackdropAscent + CanvasMarkdownBackdropDescent) * CanvasCardFontSize;
+                    }
+                }
+                into.Add((new Rect(bounds.X, y, bounds.Width, h), span.Kind));
             }
         }
     }
@@ -4656,20 +4718,43 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         double ox = textRect.X;
         double oy = textRect.Y + topPad - scrollY;
+        // 卡片上下内边距为 0（CanvasCardPadY）⇒ 文字区域与卡片边线重合，而描边【以边线为中心】、
+        // 内半边落在卡片内侧（选中态 2pt ⇒ 内伸 1pt）。底纹再内缩这么多，才不会压到边框本身
+        // （用户报告："首行文字的底色盖到卡片边框上"）。
+        const float borderInner = CanvasCardSelectedStrokeWidth * 0.5f + 0.25f;
+        float minTop = (float)textRect.Y + borderInner;
+        float maxBottom = (float)(textRect.Y + textRect.Height) - borderInner;
         foreach (var (bounds, kind) in backdrops)
         {
+            double rx = bounds.X + ox;
+            double rw = bounds.Width;
+            double ry, rh;
             if (kind == CanvasMarkdownSpanKind.Code)
             {
-                ds.FillRoundedRectangle(
-                    new Rect(bounds.X + ox - 1.2, bounds.Y + oy - 1.0, bounds.Width + 2.4, bounds.Height + 2.0),
-                    2f, 2f, CanvasMarkdownCodeBackdrop);
+                // 行内代码保留一点点内边距，读起来像"胶囊"；竖向只加 0.5，不再用整行高。
+                rx -= 1.2;
+                rw += 2.4;
+                ry = bounds.Y + oy - 0.5;
+                rh = bounds.Height + 1.0;
             }
             else
             {
-                ds.FillRectangle(
-                    new Rect(bounds.X + ox - 0.6, bounds.Y + oy - 1.0, bounds.Width + 1.2, bounds.Height + 2.0),
-                    CanvasMarkdownHighlightBackdrop);
+                rx -= 0.6;
+                rw += 1.2;
+                ry = bounds.Y + oy;
+                rh = bounds.Height;
             }
+
+            // 夹进卡片内侧（滚动时首/末行底纹本就会被裁到卡边，这里一并挡住压在边框上的那一条）。
+            double top = Math.Max(ry, minTop);
+            double bottom = Math.Min(ry + rh, maxBottom);
+            if (bottom - top <= 0.01) continue;
+            var rect = new Rect(rx, top, rw, bottom - top);
+
+            if (kind == CanvasMarkdownSpanKind.Code)
+                ds.FillRoundedRectangle(rect, 2f, 2f, CanvasMarkdownCodeBackdrop);
+            else
+                ds.FillRectangle(rect, CanvasMarkdownHighlightBackdrop);
         }
     }
 
@@ -4776,25 +4861,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// <summary>编辑态版本：底纹矩形按【编辑 layout】预算（文本与文档 1:1，不含剔除）。
-    /// 与阅读态那份分开缓存 —— 两态的字符串很可能不同（标记在编辑态是显示的）。</summary>
+    /// 与阅读态那份分开缓存 —— 两态的字符串很可能不同（标记在编辑态是显示的）。
+    /// 算法与阅读态共用同一个实现 ⇒ 进/出编辑底纹不会跳变。</summary>
     private void BuildCanvasEditBackdrops(CanvasTextLayout layout, int textLength,
         IReadOnlyList<CanvasMarkdownSpan> spans)
     {
-        _canvasEditBackdrops.Clear();
-        if (spans.Count == 0) return;
-        foreach (var span in spans)
-        {
-            if (span.Kind != CanvasMarkdownSpanKind.Code && span.Kind != CanvasMarkdownSpanKind.Highlight) continue;
-            int start = Math.Clamp(span.Start, 0, textLength);
-            int count = Math.Clamp(span.Length, 0, textLength - start);
-            if (count <= 0) continue;
-            foreach (var region in layout.GetCharacterRegions(start, count))
-            {
-                var bounds = region.LayoutBounds;
-                if (bounds.Width <= 0 || bounds.Height <= 0) continue;
-                _canvasEditBackdrops.Add((bounds, span.Kind));
-            }
-        }
+        BuildCanvasMarkdownBackdrops(layout, textLength, spans, _canvasEditBackdrops);
     }
 
     /// <summary>编辑态实时文本的【真实行数】（走编辑专用缓存；空文本按 1 行）。</summary>
