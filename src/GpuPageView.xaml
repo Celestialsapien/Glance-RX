@@ -48,24 +48,8 @@
              卡片本体与选中框仍由 Win2D 自绘，避免逐帧布局开销；本层无 Background，
              空白处不拦截命中，只有子元素（按钮/编辑框）可见时才吃指针。 -->
         <Grid x:Name="CanvasOverlay" Visibility="Collapsed">
-            <Grid.Resources>
-                <!-- 卡片悬浮控件显隐：与缩放胶囊同源的淡入淡出（0.15s）。Opacity=0 时仍 IsHitTestVisible，
-                     故隐藏动画结束再 Collapsed（见 GpuPageView.xaml.cs 的 HideCanvasCardToolbar），避免透明态拦截点击。 -->
-                <Storyboard x:Name="CanvasCardToolbarShowAnim">
-                    <DoubleAnimation Storyboard.TargetName="CanvasCardToolbar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/>
-                </Storyboard>
-                <Storyboard x:Name="CanvasCardToolbarHideAnim">
-                    <DoubleAnimation Storyboard.TargetName="CanvasCardToolbar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
-                </Storyboard>
-                <!-- 连线胶囊：与卡片胶囊同一套淡入淡出（0.15s）。淡出结束时才 Collapsed（放掉命中，
-                     避免透明态仍拦截点击）—— 由 CanvasEdgeToolbarHideAnim.Completed 收尾。 -->
-                <Storyboard x:Name="CanvasEdgeToolbarShowAnim">
-                    <DoubleAnimation Storyboard.TargetName="CanvasEdgeToolbar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/>
-                </Storyboard>
-                <Storyboard x:Name="CanvasEdgeToolbarHideAnim">
-                    <DoubleAnimation Storyboard.TargetName="CanvasEdgeToolbar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
-                </Storyboard>
-            </Grid.Resources>
+            <!-- 卡片/连线的悬浮胶囊【不做显隐动画】：高频点卡片时淡入淡出太喧宾夺主，直接 Visible↔Collapsed
+                 （见 GpuPageView.xaml.cs 的 Show/HideCanvas*Toolbar）。缩放胶囊的动画不在此列。 -->
 
             <!-- 卡片悬浮控件：改为与画笔颜色胶囊同源的胶囊外观（亚克力底 + 大圆角 + 投影）。
                  圆角 / 投影 / 描边画刷均与 PenOptionsCapsule 对齐；固定高度使 CornerRadius=高/2 ⇒ 真胶囊。
@@ -73,7 +57,7 @@
             <!-- ⚠ Z 序：本胶囊用 Canvas.ZIndex 提到【不可见输入宿主】CanvasEditBox 之上 —— 它在 XAML 里声明得更晚
                  （更晚 = 更靠上），一旦胶囊因钳制压到卡片矩形上，点击就会被那个 Opacity=0 的编辑框吃掉
                  ⇒ "看得见点不动"。浮层 chrome 必须永远在输入宿主之上。 -->
-            <Border x:Name="CanvasCardToolbar" Visibility="Collapsed" Opacity="0"
+            <Border x:Name="CanvasCardToolbar" Visibility="Collapsed"
                     Canvas.ZIndex="10"
                     HorizontalAlignment="Left" VerticalAlignment="Top"
                     Background="{ThemeResource FlyoutPresenterBackground}"
@@ -190,7 +174,7 @@
                     箭头面板：左侧 = 外层 Spacing(4) + 分隔线(1 + 右距 4) + 内层 Spacing(4) = 13 ⇒ 右缘补 Margin.Right=9（+外层 4 = 13）；
                     颜色面板：左侧 = 外层 Spacing(4) + 分隔线(1 + 右距 4) + 内层 Spacing(8) = 17 ⇒ 右缘补 Margin.Right=13（+外层 4 = 17）。 -->
             <!-- 同卡片胶囊：Canvas.ZIndex 提到不可见输入宿主之上（理由见上）。 -->
-            <Border x:Name="CanvasEdgeToolbar" Visibility="Collapsed" Opacity="0"
+            <Border x:Name="CanvasEdgeToolbar" Visibility="Collapsed"
                     Canvas.ZIndex="10"
                     HorizontalAlignment="Left" VerticalAlignment="Top"
                     Background="{ThemeResource FlyoutPresenterBackground}"

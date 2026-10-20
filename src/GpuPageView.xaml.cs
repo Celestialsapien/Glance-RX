@@ -2722,22 +2722,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CanvasCardToolbar.PointerMoved += CanvasCardToolbar_PointerMoved;
         CanvasCardToolbar.AddHandler(UIElement.PointerPressedEvent,
             new PointerEventHandler(CanvasCardToolbar_PointerPressed), true);
-        if (CanvasCardToolbarHideAnim != null)
-            CanvasCardToolbarHideAnim.Completed += (s, e) =>
-            {
-                if (!_cardToolbarShown && CanvasCardToolbar != null)
-                    CanvasCardToolbar.Visibility = Visibility.Collapsed;
-            };
-        // 连线胶囊：同一套"记最后指针位置"（展开/收起后按实时指针补判 hover）+ 淡出结束才 Collapsed。
+        // 连线胶囊：同一套"记最后指针位置"（展开/收起后按实时指针补判 hover）。
         CanvasEdgeToolbar.PointerMoved += CanvasCardToolbar_PointerMoved;
         CanvasEdgeToolbar.AddHandler(UIElement.PointerPressedEvent,
             new PointerEventHandler(CanvasCardToolbar_PointerPressed), true);
-        if (CanvasEdgeToolbarHideAnim != null)
-            CanvasEdgeToolbarHideAnim.Completed += (s, e) =>
-            {
-                if (!_edgeToolbarShown && CanvasEdgeToolbar != null)
-                    CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
-            };
         // 滚轮：逻辑处理器挂在 Viewer(ScrollViewer 自身) 上、且用 HandledEventsToo 订阅，
         // 保证必定接管（ScrollViewer 原生处理时会把路由事件标 Handled，普通订阅会被整段吞掉——
         // “横向下滚不动”正是这个根因）。纵/横滚轮现在都走统一弹簧引擎，不再交还原生滚动。
@@ -3851,9 +3839,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _canvasLastCommittedText = t;
             StopCanvasEditCommitTimer();
         }
-        if (CanvasOverlay != null && _selectedCanvasNodeId == null && _canvasEditNodeId == null &&
-            _selectedCanvasEdgeId == null)
-            CanvasOverlay.Visibility = Visibility.Collapsed;
+        // 撤销/重做可能正好取消了选中 ⇒ 浮层按"空闲才收"的口径处理。
+        CollapseCanvasOverlayIfIdle();
 
         InvalidateOverlay();
         RequestCanvasOverlaySync();
@@ -4107,12 +4094,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var textRect = new Rect(node.X + CanvasCardPadX, node.Y + CanvasCardPadY, tw, th);
         using (ds.CreateLayer(1f, textRect))
         {
-            if (editing) DrawCanvasEditSelection(ds, layout, textRect, topPad, scrollY);   // 选区高亮（layout 空时内部返回）
             if (layout != null)
             {
                 // 行内代码/高亮底纹先铺，文字压在上面。两态各有各的排版串（编辑态标记是显示的），故各自取缓存。
                 if (editing) DrawCanvasEditMarkdownBackdrops(ds, textRect, topPad, scrollY);
                 else DrawCanvasMarkdownBackdrops(ds, node, textRect, topPad, scrollY);
+                // 选区【必须在底纹之后】：底纹不透明，先画选区会被高亮/行内代码整块盖住（拖选看不出来）。
+                // 与底纹重叠的水平段由 DrawCanvasEditSelection 换成合成色，故这里是"选区压底纹、文字压选区"。
+                if (editing) DrawCanvasEditSelection(ds, layout, textRect, topPad, scrollY);   // layout 空时内部返回
                 ds.DrawTextLayout(layout,
                     new Vector2((float)textRect.X, (float)(textRect.Y + topPad - scrollY)), CanvasCardText);
             }
@@ -4142,18 +4131,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         try
         {
             var selColor = GetCanvasSelectionColor();   // 循环外取一次（主题字典查找，不必每行重取）
+            // 拖选色（0.35 alpha）覆盖到不透明底纹上的两个"新色"：高亮拖选 / 行内代码拖选各一。
+            // 先算好：每帧至多两行文字段会用到，比在循环里反复合成便宜，也保证同一帧颜色恒定。
+            var selOnHighlight = BlendCanvasSelectionOver(selColor, CanvasMarkdownHighlightBackdrop);
+            var selOnCode = BlendCanvasSelectionOver(selColor, CanvasMarkdownCodeBackdrop);
+            if (!TryGetCanvasEditSelectionDisplay(out int a, out int b)) return;
             var live = _canvasEditLive;
             string display = live?.DisplayText ?? _canvasEditText;
-            int len = display.Length;
-            var sel = CanvasEditBox.Document.Selection;
-            // 选区是【源串】下标，排版是【显示串】⇒ 先映射（隐藏的标记会让两边差若干个字符）。
-            int a = live != null ? live.ToDisplay(Math.Clamp(Math.Min(sel.StartPosition, sel.EndPosition), 0, _canvasEditText.Length))
-                                 : Math.Clamp(Math.Min(sel.StartPosition, sel.EndPosition), 0, len);
-            int b = live != null ? live.ToDisplay(Math.Clamp(Math.Max(sel.StartPosition, sel.EndPosition), 0, _canvasEditText.Length))
-                                 : Math.Clamp(Math.Max(sel.StartPosition, sel.EndPosition), 0, len);
-            a = Math.Clamp(a, 0, len);
-            b = Math.Clamp(b, 0, len);
-            if (b <= a) return;
             var lms = layout.LineMetrics;
             if (lms == null) return;
             float dTop = (float)(textRect.Y + topPad - scrollY);
@@ -4190,12 +4174,89 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 // 零宽段（选区恰好只含换行符等）不画：Math.Max(1f,…) 会把它强画成 1px 的选色竖条残留（用户报告）。
                 float segW = pR.X - pL.X;
                 if (segW > 0.05f)
-                    ds.FillRectangle(new Rect(textRect.X + pL.X, dTop + rowTop, segW, hgt), selColor);
+                {
+                    var segRect = new Rect(textRect.X + pL.X, dTop + rowTop, segW, hgt);
+                    ds.FillRectangle(segRect, selColor);
+                    DrawCanvasSelectionBlendOverBackdrops(ds, segRect, textRect.X, rowTop, hgt,
+                        selOnHighlight, selOnCode);
+                }
                 lineStart = lineEnd;
                 rowTop += hgt;
             }
         }
         catch { }
+    }
+
+    /// <summary>取当前选区在【显示串】里的 <c>[a,b)</c>（已排序、夹紧）。无选区返回 false。
+    /// 选区是【源串】下标、排版是【显示串】⇒ 隐藏的标记会让两边差若干个字符，必须先映射。
+    /// 抽出成方法是为了让"画选区"只有一个下标口径（源串混进排版会整段错位）。</summary>
+    private bool TryGetCanvasEditSelectionDisplay(out int a, out int b)
+    {
+        a = b = 0;
+        if (_canvasEditNodeId == null || CanvasEditBox == null) return false;
+        try
+        {
+            var live = _canvasEditLive;
+            string display = live?.DisplayText ?? _canvasEditText;
+            int len = display.Length;
+            var sel = CanvasEditBox.Document.Selection;
+            int s = Math.Min(sel.StartPosition, sel.EndPosition);
+            int e = Math.Max(sel.StartPosition, sel.EndPosition);
+            a = live != null ? live.ToDisplay(Math.Clamp(s, 0, _canvasEditText.Length)) : Math.Clamp(s, 0, len);
+            b = live != null ? live.ToDisplay(Math.Clamp(e, 0, _canvasEditText.Length)) : Math.Clamp(e, 0, len);
+            a = Math.Clamp(a, 0, len);
+            b = Math.Clamp(b, 0, len);
+            return b > a;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>把本行选区块里【与底纹重叠】的水平段改画合成色（底纹不透明，已把下面的普通选区盖住）。
+    /// <para>
+    /// 竖向必须先判行：底纹矩形是"逐行"生成的，但<b>别的行</b>很可能在同一 X 区间也有高亮 ⇒
+    /// 只比 X 会把别行的高亮误套到本行，出现"没高亮的行被涂成高亮拖选色"。
+    /// </para>
+    /// <para>
+    /// 水平取<b>字面框</b>与选区的交集：底纹宽度已与字面框一致（见 <see cref="CanvasBackdropRect"/>），
+    /// 选区边界又是字边界 = 光标位置 ⇒ 三方天然同边界，既不会露出底纹细边，也不会越过光标。
+    /// </para>
+    /// </summary>
+    /// <param name="segRect">本行选区块（画布坐标）。</param>
+    /// <param name="originX">文字原点 X（<c>textRect.X</c>）：底纹矩形是 layout 坐标，需加它才能与 segRect 比。</param>
+    /// <param name="rowTop">本行顶（layout 坐标，与底纹同空间）。</param>
+    private void DrawCanvasSelectionBlendOverBackdrops(CanvasDrawingSession ds, Rect segRect,
+        double originX, double rowTop, double rowHeight,
+        Windows.UI.Color selOnHighlight, Windows.UI.Color selOnCode)
+    {
+        if (_canvasEditBackdrops.Count == 0) return;
+        foreach (var (bounds, kind) in _canvasEditBackdrops)
+        {
+            var local = CanvasBackdropRect(bounds, kind);
+            // 竖向：与本行选区块零交叠 ⇒ 不是本行的底纹
+            if (local.Y + local.Height <= rowTop || local.Y >= rowTop + rowHeight) continue;
+            // 水平只取字面框：选区边界 = 字边界 = 光标位置，合成色越出去就是"拖选色超出光标"（用户报告）。
+            // 底纹自己的外扩已在绘制时按选区收边，这里不必也不该再补。
+            double gx0 = originX + bounds.X;
+            double gx1 = gx0 + bounds.Width;
+            double ix0 = Math.Max(segRect.X, gx0);
+            double ix1 = Math.Min(segRect.X + segRect.Width, gx1);
+            if (ix1 <= ix0) continue;
+            // 合成色不透明 ⇒ 直接覆盖刚画的普通选区，边界不叠色、不半透明累积
+            ds.FillRectangle(new Rect(ix0, segRect.Y, ix1 - ix0, rowHeight),
+                kind == CanvasMarkdownSpanKind.Code ? selOnCode : selOnHighlight);
+        }
+    }
+
+    /// <summary>拖选色按自身 alpha 合成到【不透明】底纹色之上，返回不透明结果色。
+    /// 用途：高亮/行内代码底纹在选区之下的场景 —— 重叠处画这个色，于是"高亮被拖选"（偏暖）与
+    /// "无高亮拖选"（偏紫）一眼可分。公式与 GPU 的 alpha 混合同式（sRGB 直混，不做线性化），
+    /// 故观感与"半透明覆盖"一致，但结果固定、可复现，也不受绘制顺序影响。</summary>
+    private static Windows.UI.Color BlendCanvasSelectionOver(Windows.UI.Color sel, Windows.UI.Color under)
+    {
+        float a = sel.A / 255f;
+        byte Mix(byte fg, byte bg) =>
+            (byte)Math.Clamp((int)Math.Round(fg * a + bg * (1f - a)), 0, 255);
+        return Windows.UI.Color.FromArgb(255, Mix(sel.R, under.R), Mix(sel.G, under.G), Mix(sel.B, under.B));
     }
 
     /// <summary>编辑态光标：用 Win2D 自身的 layout（与文字同源）取光标矩形，保证不偏移。1 屏幕像素宽换算成页局部宽度。
@@ -4748,8 +4809,26 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         DrawCanvasMarkdownBackdropRects(ds, _canvasEditBackdrops, textRect, topPad, scrollY);
     }
 
+    /// <summary>底纹矩形的唯一口径（<b>layout 坐标</b>，未加文字原点）。
+    /// <para>
+    /// ⚠ <b>水平绝不外扩</b>：底纹左右必须与字面框同宽 —— 选区边界、光标位置都是字边界，
+    /// 底纹一旦比字宽，选中时就会在拖选区左右露一条底色细边（用户两轮报告"高亮左右突出"）。
+    /// 想"不咬字"只能靠字体自身的边距，不能加宽矩形。
+    /// </para>
+    /// <para>竖向：高亮取字面框（基线 ± em，见 <see cref="BuildCanvasMarkdownBackdrops"/>）；
+    /// 行内代码上下各留 0.5pt 保持"胶囊"观感。</para>
+    /// </summary>
+    private static Rect CanvasBackdropRect(Rect bounds, CanvasMarkdownSpanKind kind)
+    {
+        if (kind == CanvasMarkdownSpanKind.Code)
+            return new Rect(bounds.X, bounds.Y - 0.5, bounds.Width, bounds.Height + 1.0);
+        return new Rect(bounds.X, bounds.Y, bounds.Width, bounds.Height);
+    }
+
+    /// <summary>画底纹矩形（<b>必须在文字之前</b>调，才在文字下面；也必须在选区之前，否则不透明底纹会盖掉选区）。</summary>
     private static void DrawCanvasMarkdownBackdropRects(CanvasDrawingSession ds,
-        List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> backdrops, Rect textRect, double topPad, double scrollY)
+        List<(Rect Bounds, CanvasMarkdownSpanKind Kind)> backdrops, Rect textRect, double topPad,
+        double scrollY)
     {
         double ox = textRect.X;
         double oy = textRect.Y + topPad - scrollY;
@@ -4758,25 +4837,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         //   （用户报告）。底纹与文字必须共用同一个裁剪区（外层 layer = textRect）同一口径。
         foreach (var (bounds, kind) in backdrops)
         {
-            double rx = bounds.X + ox;
-            double rw = bounds.Width;
-            double ry, rh;
-            if (kind == CanvasMarkdownSpanKind.Code)
-            {
-                // 行内代码保留一点点内边距，读起来像"胶囊"；竖向只加 0.5，不再用整行高。
-                rx -= 1.2;
-                rw += 2.4;
-                ry = bounds.Y + oy - 0.5;
-                rh = bounds.Height + 1.0;
-            }
-            else
-            {
-                rx -= 0.6;
-                rw += 1.2;
-                ry = bounds.Y + oy;
-                rh = bounds.Height;
-            }
-            var rect = new Rect(rx, ry, rw, rh);
+            var local = CanvasBackdropRect(bounds, kind);
+            var rect = new Rect(local.X + ox, local.Y + oy, local.Width, local.Height);
 
             if (kind == CanvasMarkdownSpanKind.Code)
                 ds.FillRoundedRectangle(rect, 2f, 2f, CanvasMarkdownCodeBackdrop);
@@ -5670,7 +5732,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // "看得见点不到"（用户报告：钳到视口上边缘时 100% 按钮失效）⇒ 钳制必须避开它们。
     // 由 MainPage 把"四边被占掉多少 DIP"推下来（见 SetCanvasViewportInsets）。
     private double _canvasInsetL, _canvasInsetT, _canvasInsetR, _canvasInsetB;
-    // 连线胶囊的淡入淡出去重（与 _cardToolbarShown 同源）：仅 Visible↔Collapsed 跳变才起停动画。
+    // 连线胶囊的显隐去重（与 _cardToolbarShown 同源）：避免重复写 Visibility。
     private bool _edgeToolbarShown;
     // 连线胶囊内两个二级面板：默认折叠、互斥（同一时刻只开一个）；展开态真实宽度用于右缘钳制。
     private bool _canvasEdgeArrowPickerShown;
@@ -5784,8 +5846,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (string.IsNullOrEmpty(id)) return false;
         _selectedCanvasEdgeId = null;
         _hoverCanvasEdgeId = null;
-        if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
-        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
+        // 与"取消选中"同一条路径：收胶囊 → 空闲才收整层浮层。
+        HideCanvasEdgeToolbar();
+        CollapseCanvasOverlayIfIdle();
         CanvasEdgeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { EdgeId = id });
         InvalidateOverlay();
         return true;
@@ -5798,7 +5861,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (string.IsNullOrEmpty(id)) return false;
         _selectedCanvasNodeId = null;
         HideCanvasCardToolbar();
-        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
+        CollapseCanvasOverlayIfIdle();   // 两颗胶囊都收了才收整层浮层
         CanvasNodeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });
         InvalidateOverlay();
         return true;
@@ -6129,9 +6192,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
-        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
         HideCanvasCardToolbar();
-        if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasEdgeToolbar();
+        CollapseCanvasOverlayIfIdle();   // 选中/编辑都已清 ⇒ 整层浮层直接收
         if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
     }
 
@@ -6166,10 +6229,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _hoverCanvasNodeId = null;
         _hoverCanvasEdgeId = null;
         _canvasPointerValid = false;
-        if (CanvasOverlay != null) CanvasOverlay.Visibility = Visibility.Collapsed;
-        if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
         HideCanvasCardToolbar();
-        if (CanvasEdgeToolbar != null) CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+        HideCanvasEdgeToolbar();
+        CollapseCanvasOverlayIfIdle();   // 同上：两颗胶囊都收了才收整层浮层
+        if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
         InvalidateOverlay();
     }
 
@@ -8315,9 +8378,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             !TryGetCanvasNodeScreenRect(_selectedCanvasNodeId, out var rect))
         {
             if (editing) return;   // 编辑中：编辑框已摆好，别把整体藏掉
-            CanvasOverlay.Visibility = Visibility.Collapsed;
             HideCanvasCardToolbar();
             HideCanvasEdgeToolbar();
+            CollapseCanvasOverlayIfIdle();   // 两颗胶囊都收了才收整层
             return;
         }
 
@@ -8363,60 +8426,49 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
-    // 卡片悬浮控件显隐：与缩放胶囊同源的淡入淡出（Opacity 0.15s）。
-    // 显示：取消在途淡出再淡入；隐藏：淡出结束后才 Collapsed（放掉命中，避免透明态拦截点击）。
-    // _cardToolbarShown 去重：SyncCanvasOverlayNow 每次调用都走到这里，仅 Collapsed→Visible / Visible→Collapsed 的
-    // 跳变才触发动画，避免每帧重启动画导致闪烁 / 长时间停在半透明。
+    // 卡片悬浮控件显隐：**不做动画**，直接 Visible ↔ Collapsed（用户口径：高频点卡片时淡入淡出太喧宾夺主）。
+    // _cardToolbarShown 去重：SyncCanvasOverlayNow 每次指针事件都会调到这里，避免重复写 Visibility。
     private void ShowCanvasCardToolbar()
     {
         if (CanvasCardToolbar == null) return;
         if (_isCanvasConnecting) return;   // 拉线（连线）进行中：暂隐胶囊，避免遮挡连线交互
-        CanvasCardToolbarHideAnim?.Stop();
         if (_cardToolbarShown) return;
         _cardToolbarShown = true;
         CanvasCardToolbar.Visibility = Visibility.Visible;
-        CanvasCardToolbar.Opacity = 0;
-        CanvasCardToolbarShowAnim?.Begin();
     }
 
     private void HideCanvasCardToolbar()
     {
         if (CanvasCardToolbar == null) return;
         HideCanvasColorPicker();   // 卡片工具栏收起（取消选中/拉线中）→ 二级颜色胶囊一并收起
-        if (!_cardToolbarShown)
-        {
-            CanvasCardToolbar.Visibility = Visibility.Collapsed;
-            return;
-        }
         _cardToolbarShown = false;
-        CanvasCardToolbarShowAnim?.Stop();
-        CanvasCardToolbarHideAnim?.Begin();
+        CanvasCardToolbar.Visibility = Visibility.Collapsed;
     }
 
-    // 连线胶囊显隐：与卡片胶囊同源的淡入淡出（0.15s），淡出结束才 Collapsed（放掉命中）。
+    // 连线胶囊显隐：同卡片胶囊，瞬间显隐。
     private void ShowCanvasEdgeToolbar()
     {
         if (CanvasEdgeToolbar == null) return;
-        CanvasEdgeToolbarHideAnim?.Stop();
         if (_edgeToolbarShown) return;
         _edgeToolbarShown = true;
         CanvasEdgeToolbar.Visibility = Visibility.Visible;
-        CanvasEdgeToolbar.Opacity = 0;
-        CanvasEdgeToolbarShowAnim?.Begin();
     }
 
     private void HideCanvasEdgeToolbar()
     {
         if (CanvasEdgeToolbar == null) return;
         HideCanvasEdgePickers();   // 连线胶囊收起（取消选中/切卡片/退出模式）→ 两个二级面板一并收起
-        if (!_edgeToolbarShown)
-        {
-            CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
-            return;
-        }
         _edgeToolbarShown = false;
-        CanvasEdgeToolbarShowAnim?.Stop();
-        CanvasEdgeToolbarHideAnim?.Begin();
+        CanvasEdgeToolbar.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>浮层里的东西都收干净了（无选中 / 无编辑 / 两颗胶囊都收起）才把整层 <c>Collapsed</c>。</summary>
+    private void CollapseCanvasOverlayIfIdle()
+    {
+        if (CanvasOverlay == null) return;
+        if (_cardToolbarShown || _edgeToolbarShown) return;
+        if (_canvasEditNodeId != null || _selectedCanvasNodeId != null || _selectedCanvasEdgeId != null) return;
+        CanvasOverlay.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>把边工具栏摆到选中连线锚点附近（仿 Obsidian Canvas）：
@@ -8427,8 +8479,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_selectedCanvasEdgeId == null ||
             !TryGetCanvasEdgeToolbarAnchorScreen(_selectedCanvasEdgeId, out var anchor))
         {
-            CanvasOverlay.Visibility = Visibility.Collapsed;
             HideCanvasEdgeToolbar();
+            CollapseCanvasOverlayIfIdle();   // 同卡片胶囊：两颗都收了才收整层
             return;
         }
         CanvasOverlay.Visibility = Visibility.Visible;
@@ -8487,7 +8539,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (node == null || pageIdx < 0 || pageIdx >= pages.Count)
         {
             if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
-            CanvasOverlay.Visibility = Visibility.Collapsed;
+            HideCanvasCardToolbar();
+            HideCanvasEdgeToolbar();
+            CollapseCanvasOverlayIfIdle();   // 卡片已失效 ⇒ 收胶囊（顺带复位 _xxxToolbarShown），空闲才收整层
             return;
         }
 
