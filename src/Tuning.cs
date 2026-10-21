@@ -109,12 +109,6 @@ RenderWorkerCap = 16              # 默认 16 | default | 区间 [1, 1024]
 RenderWorkerHardCap = 24          # 默认 24 | default | 区间 [1, 1024]
 
 
-# ---------------- 滚动 / Scrolling ----------------
-# 判定滚动方向的死区(DIP)。有效区间 [0, 256]，非负。
-# Scroll direction deadzone (DIP). Valid [0, 256], non-negative.
-ScrollDirDeadzone = 8.0           # 默认 8.0 | default | 区间 [0, 256]
-
-
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
 # 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动下方收敛阈值。
 # ~99% settle time ≈ 6.6/ω. Want faster? Raise ω only; leave settle thresholds alone.
@@ -234,9 +228,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
         // RenderWorkerCount：见 PdfRenderService.CpuCoreInfo.PhysicalCoreCount()
         public static int RenderWorkerCap = 16;             // 自动模式上限：auto = min(逻辑核数, 本值)
         public static int RenderWorkerHardCap = 24;         // 绝对硬上限（防止极端配置让线程抢占 CPU/内存带宽）
-
-        // ---------------- 预渲染滑动窗口 / Prefetch window ----------------
-        public static double ScrollDirDeadzone = 8.0;       // 滚动方向死区(DIP) / scroll direction deadzone (DIP)
 
         // ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
         // 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动收敛阈值。
@@ -391,7 +382,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
                 case "PageGapHorizontal": PageGapHorizontal = ParseDouble(raw, PageGapHorizontal); break;
                 case "RenderWorkerCap": RenderWorkerCap = ParseInt(raw, RenderWorkerCap); break;
                 case "RenderWorkerHardCap": RenderWorkerHardCap = ParseInt(raw, RenderWorkerHardCap); break;
-                case "ScrollDirDeadzone": ScrollDirDeadzone = ParseDouble(raw, ScrollDirDeadzone); break;
                 case "ScrollSpringOmega": ScrollSpringOmega = ParseDouble(raw, ScrollSpringOmega); break;
                 case "ZoomSpringOmega": ZoomSpringOmega = ParseDouble(raw, ZoomSpringOmega); break;
                 case "RightZoomSpringOmega": RightZoomSpringOmega = ParseDouble(raw, RightZoomSpringOmega); break;
@@ -440,7 +430,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
             DocMargin = ClampD(DocMargin, 0.0, 256.0);
             PageGap = ClampD(PageGap, 0.0, 256.0);
             PageGapHorizontal = ClampD(PageGapHorizontal, 0.0, 256.0);
-            ScrollDirDeadzone = ClampD(ScrollDirDeadzone, 0.0, 256.0);
 
             // ---- 并发光栅 / Raster concurrency ----
             // 硬下限 1：PdfRenderService 里 Math.Clamp(..., 1, RenderWorkerCap) 在 Cap<1 时抛异常。

@@ -64,12 +64,6 @@ RenderWorkerCap = 16              # 默认 16 | default | 区间 [1, 1024]
 RenderWorkerHardCap = 24          # 默认 24 | default | 区间 [1, 1024]
 
 
-# ---------------- 滚动 / Scrolling ----------------
-# 判定滚动方向的死区(DIP)。有效区间 [0, 256]，非负。
-# Scroll direction deadzone (DIP). Valid [0, 256], non-negative.
-ScrollDirDeadzone = 8.0           # 默认 8.0 | default | 区间 [0, 256]
-
-
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
 # 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动下方收敛阈值。
 # ~99% settle time ≈ 6.6/ω. Want faster? Raise ω only; leave settle thresholds alone.

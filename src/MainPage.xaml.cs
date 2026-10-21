@@ -4431,10 +4431,10 @@ public sealed partial class MainPage : Page
 
     // 最近一次指针移动的时间戳（Stopwatch 口径，与 UI 更新解耦）。
     // 悬停标志的兜底依据：鼠标已离开工具栏矩形时移动事件必然发生；若工具栏矩形已不含指针、
-    // 却长时间没有 PointerMoved 事件到达，说明按钮的指针处理器把它标记了 Handled 而未冒泡到
+    // 却长时间没有 PointerMoved 事件到达，说明按钮的指针处理器把它标记了 Handled 而未冒泡到这里
+    // （此时 `_lastPointerMoveMs` 不再推进，由 `_toolbarHoverSuspect` 兜底校正一次）。
     private static readonly System.Diagnostics.Stopwatch PointerMoveClock = System.Diagnostics.Stopwatch.StartNew();
     private long _lastPointerMoveMs = PointerMoveClock.ElapsedMilliseconds;
-    private long _lastPointerOutsideMs = PointerMoveClock.ElapsedMilliseconds;
 
     // 由【根元素】冒泡上来的悬停校正标志：按钮里任何把 Handled 置真的指针处理器都能让 Root_PointerMoved
     // 完全断流（本页就有两例：GpuViewer 的画布移动处理、鼠标悬停 Thumb 时的范围自动滚动）。

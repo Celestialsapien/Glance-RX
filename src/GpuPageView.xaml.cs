@@ -179,12 +179,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private double _zoom = 1.0;
     private double _dpiScale = 1.0;
 
-    // 滚动方向（预测链/可见页请求排序沿用）
-    private double _lastDirLead = double.NaN; // 上次主轴 lead，用于判滚动方向
-    private int _scrollDir;                    // +1=向下/向右前进, -1=后退, 0=未知
-
     private bool _didInitialFit;
-    private int _docGeneration; // 换文档时 +1，丢弃旧文档的迟到渲染结果
 
     // ================= 统一运动引擎（vsync 帧泵 + 临界阻尼弹簧） =================
     //
@@ -236,16 +231,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private long _lastFrameTicks;                  // Stopwatch 时间戳，供看门狗判活
     private DispatcherTimer? _framePumpWatchdog;   // Win2D 自身停帧(窗口被遮挡/最小化)时兜底收尾
 
-    // ---------------- 连线强调动画（Obsidian 式：从中间向两边展开/收回） ----------------
-    // 每边一个进度 0..1（0=未强调原样，1=完全强调）。选中/悬浮态变化驱动目标；采用固定时长 easeOutCubic 补间，
-    // 末尾速度归零 → 展开/收回都平滑落定、无收尾跳变。各边独立 from/to/t0，可各自中途改向。
-    private readonly Dictionary<string, float> _edgeEmph = new();       // 当前进度 0..1
-    private readonly Dictionary<string, float> _edgeEmphFrom = new();  // 本段补间起点值
-    private readonly Dictionary<string, float> _edgeEmphTo = new();    // 本段补间目标值（1/0）
-    private readonly Dictionary<string, long> _edgeEmphT0 = new();     // 本段补间起始时钟(Stopwatch ticks)
-    private bool _edgeEmphAnimating;
-    private const double EdgeEmphDur = 0.12;   // 单段补间时长(秒)：展开/收回一致，较旧版(≈150ms)稍快
-
     // ---------------- 编辑态选区活动端跟踪（WinUI ITextSelection 无 ActiveEnd，需差分推断） ----------------
     // RichEditBox 只给规范化 Start/End；拖选中【锚端不动、活动端移动】—— 对比上一帧哪端变了即可定位活动端。
     // 两端都变（双击选词/新拖选）时，活动端取离上一活动端更近的一端（活动端连续移动、锚点跳变）。
@@ -267,7 +252,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private bool _isSmoothZooming;
     private double _zoomOmega = ZoomSpringOmega;   // 当前这段缩放手势用的弹簧硬度
     private bool _zoomFromRightDrag;               // 本段缩放由右键拖拽驱动（目标随鼠标持续改写）
-    private double _zoomGestureStartZoom = 1.0;    // 手势起点缩放，用于判定"这是放大还是缩小"
     private bool _zoomAnimCommitting; // ChangeView 异步落地瞬间保用提交值，避免闪回缩放前画面
     // 最近一次提交给 ScrollViewer 的目标视图。用于判定"提交是否真的落到位"——
     // 放大时 ChangeView 常分两步落地（先换 zoom、extent 下一轮布局才变大），中间那次
@@ -357,7 +341,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     /// <summary>快照时的视口尺寸（新旧比例的"旧"端）。缩放比**恒取 vpW** —— 两种布局都锁左右边线
     ///（见 <see cref="BeginHostResizeReanchor"/> 的"三条不动边线"）。</summary>
-    private double _hostResizeVpW0, _hostResizeVpH0;
+    private double _hostResizeVpW0;
 
     /// <summary>快照时视口【左缘】切到的文档 X —— 三条不动边线之「左」。</summary>
     private double _hostResizeDocLeftX;
@@ -767,22 +751,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _visTop = vOff / zoom;
             _visBottom = (vOff + vpH) / zoom;
             _zoom = zoom;
-            UpdateScrollDirLocked();
         }
-    }
-
-    /// <summary>
-    /// 按主轴 lead 的变化更新滚动方向（预渲染窗口据此把空闲坑位偏向前方）。
-    /// 带死区，避免像素级抖动来回翻转方向导致窗口反复重排。须在持有 _lock 时调用。
-    /// </summary>
-    private void UpdateScrollDirLocked()
-    {
-        double lead = IsHorizontalLayout ? _visLeft : _visTop;
-        if (double.IsNaN(_lastDirLead)) { _lastDirLead = lead; return; }
-        double d = lead - _lastDirLead;
-        if (Math.Abs(d) < ScrollDirDeadzone) return;
-        _scrollDir = d > 0 ? 1 : -1;
-        _lastDirLead = lead;
     }
 
     /// <summary>
@@ -879,7 +848,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _zoomLog.Target = Math.Log(z1);
         _zoomOmega = omega;
         _zoomFromRightDrag = fromRightDrag;
-        _zoomGestureStartZoom = z0;
         // 【必须播种画布插值态】GetViewState 在 _isSmoothZooming 期间【只】读 _zoomAnimCurrent*。
         // 原先本方法不播种，右键在缩放尽头(MaxZoom/MinZoom)按下并推动时 target==当前缩放 →
         // 弹簧当帧即判收敛 → StepZoomFrame 走 _isRightZooming 早退分支（该分支【不写】
@@ -1423,7 +1391,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// <summary>没有任何运动在跑就摘掉帧回调（不空转、不吃电）。</summary>
     private void StopFramePumpIfIdle()
     {
-        if (_isSmoothZooming || _isWheelScrolling || _edgeEmphAnimating) return;
+        if (_isSmoothZooming || _isWheelScrolling) return;
         StopFramePump();
     }
 
@@ -1444,50 +1412,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (dt <= 0) dt = 1.0 / 60.0;
         if (dt > 0.05) dt = 0.05;
         return dt;
-    }
-
-    /// <summary>逐帧推进所有连线的强调进度（与缩放/滚动同帧完成，靠帧泵维持）。
-    /// 每边按各自的 from/to/t0 做固定时长 easeOutCubic 补间：目标变化即重启一段补间（以当前进度为起点），
-    /// 末段速度归零、精确落定 —— 无旧版指数趋近的「长尾 + 硬阈值跳变」。</summary>
-    private void StepEdgeEmphFrame(double dt)
-    {
-        bool animating = false;
-        long now = Stopwatch.GetTimestamp();
-        double freq = Stopwatch.Frequency;
-        lock (_canvasLock)
-        {
-            var edges = _canvasEdges;
-            for (int i = 0; i < edges.Length; i++)
-            {
-                var e = edges[i];
-                float desired = (_selectedCanvasEdgeId == e.Id || _hoverCanvasEdgeId == e.Id) ? 1f : 0f;
-                _edgeEmphTo.TryGetValue(e.Id, out float to);
-                if (to != desired)
-                {
-                    // 目标变化：以当前进度为起点重启一段补间
-                    _edgeEmph.TryGetValue(e.Id, out float cur);
-                    _edgeEmphFrom[e.Id] = cur;
-                    _edgeEmphTo[e.Id] = desired;
-                    _edgeEmphT0[e.Id] = now;
-                    animating = true;
-                }
-                else if (_edgeEmphFrom.TryGetValue(e.Id, out float from) && _edgeEmphT0.TryGetValue(e.Id, out long t0))
-                {
-                    double t = ((now - t0) / freq) / EdgeEmphDur;
-                    if (t < 1.0)
-                    {
-                        float e2 = 1f - (float)Math.Pow(1.0 - t, 3.0);   // easeOutCubic：初快末缓，t=1 时速度为 0
-                        _edgeEmph[e.Id] = from + (desired - from) * e2;
-                        animating = true;
-                    }
-                    else
-                    {
-                        _edgeEmph[e.Id] = desired;   // 精确落定，速度 0，无跳变
-                    }
-                }
-            }
-        }
-        _edgeEmphAnimating = animating;
     }
 
     /// <summary>
@@ -1622,7 +1546,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         _hostResizeZ0 = z0;
         _hostResizeVpW0 = vpW0;
-        _hostResizeVpH0 = vpH0;
         _hostResizeDocLeftX = (h0 - cx0) / z0;
         _hostResizeDocTopY = (v0 - cy0) / z0;
         _hostResizeCaptureValid = true;
@@ -1972,12 +1895,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// <summary>关闭/换文档时调用：释放所有缓存位图与渲染队列，避免显存滞留。</summary>
     public void ResetView()
     {
-        lock (_lock)
-        {
-            _docGeneration++;
-            _lastDirLead = double.NaN;
-            _scrollDir = 0;
-        }
         // DisplayModel 析构对应物：CancelRenderingBlocking + FreeForDisplayModel + Dispose。
         ShutdownRenderCache();
         _currentPage = -1;
@@ -2575,8 +2492,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             {
                 if (a.Type != AnnotationType.Pen) continue;
                 var cache = _annoGeoCache.GetValue(a, _ => new CachedAnnoGeometry());
-                if (a.GetPointsSnapshot().Length > 0 && a.GetPointsSnapshot().Length > cache.BakingPoints)
-                { any = true; break; }
+                // ⚠ GetPointsSnapshot() 每次调用都新分配一份点数组（板书期每帧都会走到这里），
+                //   旧写法在同一条件里调了两次 ⇒ 每笔画每帧两次分配。取一次即可。
+                int n = a.GetPointsSnapshot().Length;
+                if (n > 0 && n > cache.BakingPoints) { any = true; break; }
             }
             if (!any) continue;
             ApplyPageTransform(lds, dest, z);
@@ -2877,12 +2796,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _liveH = 0; _liveV = 0; _liveZoom = 1.0; // 重置实时镜像，等待本次文档的 fit/还原写入
         _currentPage = -1;
         _lastZoomNotified = -1;
-        lock (_lock)
-        {
-            _docGeneration++;
-            _lastDirLead = double.NaN;
-            _scrollDir = 0;
-        }
         uint count = await svc.GetPageCountAsync();
         // 批量取全部页尺寸：一次 FFI 调用 + 一次引擎锁持有，替代 N 次逐页往返
         //（大 PDF 数千页时省去 N 次跨语言调用/锁竞争，冷启动更快）。
@@ -3016,13 +2929,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             _rotation = 0;
             if (_pages.Count > 0) RecomputeLayout(_pages);
-        }
-
-        lock (_lock)
-        {
-            _docGeneration++;      // 使旧引擎的在途渲染任务自废（gen 不匹配即 return）
-            _lastDirLead = double.NaN;
-            _scrollDir = 0;
         }
 
         // 仅按"当前（未变的）滚动偏移/缩放"重新评估可见窗口——已缓存页直接命中、不重光栅；
@@ -3376,7 +3282,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _visBottom = (vOff + _vpH) / z;
             _zoom = z;
             _dpiScale = dpi;
-            UpdateScrollDirLocked();
         }
     }
 
@@ -3401,9 +3306,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _visBottom = vOff / zoom + _vpH / zoom;
             _zoom = zoom;
             _dpiScale = dpi;
-            // 还原/跳页是"瞬移"，不代表滚动方向 → 重置基准，避免窗口被一次大跳变带偏。
-            _lastDirLead = IsHorizontalLayout ? _visLeft : _visTop;
-            _scrollDir = 0;
         }
     }
 
@@ -3474,11 +3376,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 设备(重)建：GPU 位图绑定特定设备 → 全部作废（CPU 瓦片缓存与 Sumatra 一致地保留，
         // 下一帧 Draw 惰性重建 GPU 副本）。复用旧 GPU 资源会抛 WrongResourceDomain → 闪退。
         _renderCache?.DropGpuResources();
-        lock (_lock)
-        {
-            _lastDirLead = double.NaN;
-            _scrollDir = 0;
-        }
         // 标注几何/累积层也绑定该设备：复用旧资源在新设备上 Draw 会抛 WrongResourceDomain → 闪退，全部作废重排。
         foreach (var kv in _annoGeoCache)
         {
@@ -3707,9 +3604,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return Windows.UI.Color.FromArgb(Alpha, 0xA8, 0x82, 0xFF);   // 兜底：深色档 Obsidian 紫
     }
     private static readonly Windows.UI.Color CanvasEdgeColor = Windows.UI.Color.FromArgb(255, 96, 102, 112);
-    // 连线命中半径（屏幕 DIP）【下限】：实际阈值 = max(此值, 悬浮态光晕半宽 2×CanvasArrowLen·z/√3)，
-    // 见 TryHitCanvasEdge —— 指针进入描边区域即命中，且缩小时仍保有最小可命中范围。
-    private const float CanvasEdgeHitThreshold = 6f;
 
     // 强调色（选中边框 / 连线选中 / 手柄）：对齐 App.xaml 的 GlanceAccent（Obsidian 紫），
     // 深浅主题各一档，由 UpdateThemeColors 按 ActualTheme 切换：深 #A882FF / 浅 #9873F7。
@@ -5023,7 +4917,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         Dictionary<string, CanvasNode> index, CanvasEdge[] edges)
     {
         string? selEdge = _selectedCanvasEdgeId;
-        string? hovEdge = _hoverCanvasEdgeId;
+        string? hovEdge = _hoverCanvasEdgeId;    // 纯指针位置决定显隐（判据见 UpdateCanvasEdgeHover）
         foreach (var edge in edges)
         {
             if (!ComputeEdgeScreenGeometry(edge, pages, destOf, index, z,
@@ -5044,10 +4938,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
             // 强调态（学 Obsidian）：线自身颜色全程不变；强调时主线变粗到箭头三角底边一半，
             // 外圈画一条同色但极低不透明度的更粗光晕（白底上呈极浅的晕），光晕同样包裹箭头；选中态 = 锁定悬浮态外观。
-            // 出现/收回动画 = 以线为中心「径向长胖/变瘦」：几何始终是整条线，宽度与不透明度随 p 插值，
-            // 不做沿线的生长收缩。进度 p(0..1) 由 _edgeEmph 逐帧推进。箭头在阅读/悬浮/选中态均实心同色绘制。
+            // 强调与否是布尔状态：指针进带即亮、出带即熄，无补间、无时钟（判据见 UpdateCanvasEdgeHover）。
+            // 箭头在阅读/悬浮/选中态均实心同色绘制。
             var edgeColor = ParseCanvasColor(edge.Color) ?? CanvasEdgeColor;   // 线自己的颜色，全程用它
-            _edgeEmph.TryGetValue(edge.Id, out float emph);                    // 0=原样, 1=完全强调
+            bool emph = selEdge == edge.Id || hovEdge == edge.Id;
             // 箭头高随缩放：页局部点 × z = 屏幕 DIP（与卡片手柄同约定），缩小时箭头变小、放大时变大。
             float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)z);
             // 线宽随缩放（沿用上方箭头/卡片手柄的 ×z 约定）：卡片边框经页变换、箭头经 arrowLen·z 都已随 z 缩放，
@@ -5101,24 +4995,24 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
 
             // 强调层（学 Obsidian）：主线变粗到箭头底边一半 + 同色极淡光晕（两倍底边）。
-            // 动画 = 以线为中心「径向长胖/变瘦」：宽与不透明度随 p 插值，不做沿线生长。
+            // 强调态瞬时切换（无补间）：几何始终是整条线，只换线宽与光晕不透明度。
             // 两层几何不同（关键，别再合并成一条）：
             //   主线止于箭头底边 p0/p3 —— 主线强调宽 = 箭头半宽，若伸到顶点，平头帽会在收尖的三角两侧露出成「柱状」尖点；
             //   光晕沿整条线 a1/a2 延伸到顶点（卡片边框）—— 光晕极淡且画在不透明箭头之下，三角内部被箭头盖住，
             //   两侧露出的部分正好「光晕包裹箭头」，平头端落在边框上与尖点齐平（即把描边延长到箭头顶点）。
-            if (emph > 0.001f)
+            if (emph)
             {
-                // 底层光晕：整条线（到卡片边框），同色极低不透明度（随 p 淡入）、宽随 p 从细线宽插值到 4×底边。
+                // 底层光晕：整条线（到卡片边框），同色极低不透明度，宽 = 两倍箭头底边。
                 using (var haloGeo = BuildBezier(a1, c1, c2, a2))
                 {
                     if (haloGeo != null)
-                        ds.DrawGeometry(haloGeo, WithAlpha(edgeColor, 0.3f * emph), Lerp(edgeW, emphHaloW, emph));
+                        ds.DrawGeometry(haloGeo, WithAlpha(edgeColor, 0.3f), emphHaloW);
                 }
-                // 主线：收缩到箭头底边再向顶点延伸 seamOv（消缝），宽随 p 从细线宽插值到箭头底边一半，仍为线自身颜色。
+                // 主线：收缩到箭头底边再向顶点延伸 seamOv（消缝），宽 = 箭头底边一半，仍为线自身颜色。
                 using (var mainGeo = BuildBezier(l0, c1, c2, l3))
                 {
                     if (mainGeo != null)
-                        ds.DrawGeometry(mainGeo, edgeColor, Lerp(edgeW, emphMainW, emph));
+                        ds.DrawGeometry(mainGeo, edgeColor, emphMainW);
                 }
             }
 
@@ -5184,9 +5078,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return uu * u * p0 + 3 * uu * t * p1 + 3 * u * tt * p2 + tt * t * p3;
     }
 
-    /// <summary>浮点线性插值。</summary>
-    private static float Lerp(float a, float b, float t) => a + (b - a) * t;
-
     /// <summary>点到线段的最短距离。</summary>
     private static float DistancePointSegment(Vector2 p, Vector2 a, Vector2 b)
     {
@@ -5212,7 +5103,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return min;
     }
 
-    /// <summary>视口坐标 → 命中的连线 id（取屏幕距离最近且在阈值内者）。</summary>
+    /// <summary>视口坐标 → 命中的连线 id（取屏幕距离最近且在命中带内者）。</summary>
     private bool TryHitCanvasEdge(Point vp, out string edgeId)
     {
         edgeId = "";
@@ -5227,11 +5118,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (z <= 0) return false;
         Rect DestOf(int idx) => ComputePageDest(idx, z, hOff, vOff);
 
+        // 命中带 = 悬浮态最粗那层（光晕）的半径，与绘制严格同源：
+        //   halfBase = arrowLen/√3、emphHaloW = 4×halfBase ⇒ 半径 = 2×arrowLen/√3。
+        // arrowLen 取与绘制相同的下限 CanvasArrowMinLen，深度缩小时跟着光晕一起收敛、不会归零。
+        float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)z);
+        float best = 2f * arrowLen / MathF.Sqrt(3f);
         var p = new Vector2((float)vp.X, (float)vp.Y);
-        // 命中阈值 = 悬浮态描边（光晕）区域的半宽：光晕满宽 4×halfBase、halfBase = CanvasArrowLen·z/√3，
-        // 即"指针进入当前描边区域即触发悬浮"，且随页面缩放一致放大/缩小。
-        // 下限保底 CanvasEdgeHitThreshold：深度缩小后光晕半宽趋近 0，不保底会几乎无法命中。
-        float best = MathF.Max(CanvasEdgeHitThreshold, 2f * CanvasArrowLen * (float)z / MathF.Sqrt(3f));
         string bestId = "";
         // 逆序：后绘制者在上层，重叠时优先命中后绘制的那条。
         for (int i = edges.Length - 1; i >= 0; i--)
@@ -5316,17 +5208,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 两重遮罩，原则都是"看得见挡着的东西优先"：
     /// ① 卡片/控件（<see cref="IsPointOnCanvasCardOrControl"/>，与光标和按下同源）；
     /// ② 浮层 chrome（<see cref="IsPointOverCanvasOverlayChrome"/>：卡片胶囊、连线工具条）。
-    /// ⇒ 鼠标呈控件态或停在浮层上时，连线绝不高亮；反过来"还亮的范围"总是可以点选连线的范围。</summary>
+    /// ⇒ 鼠标呈控件态或停在浮层上时，连线绝不高亮；反过来"还亮的范围"总是可以点选连线的范围。
+    /// 显隐只由指针位置决定，无时钟、无补间、无额外重绘节奏。</summary>
     private void UpdateCanvasEdgeHover(Point vp)
     {
-        if (IsPointOnCanvasCardOrControl(vp) || IsPointOverCanvasOverlayChrome(vp))
-        {
-            if (_hoverCanvasEdgeId == null) return;   // 已是空，避免每帧无效重绘
-            _hoverCanvasEdgeId = null;
-            InvalidateOverlayThrottled();
-            return;
-        }
-        string? hover = TryHitCanvasEdge(vp, out var id) ? id : null;
+        string? hover = (IsPointOnCanvasCardOrControl(vp) || IsPointOverCanvasOverlayChrome(vp))
+            ? null
+            : (TryHitCanvasEdge(vp, out var id) ? id : null);
+
         if (string.Equals(hover, _hoverCanvasEdgeId, StringComparison.Ordinal)) return;
         _hoverCanvasEdgeId = hover;
         InvalidateOverlayThrottled();
@@ -5685,9 +5574,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private const int IbeamScopeIntervalMs = 25;
 
     private string? _canvasEditNodeId;                     // 正在文本编辑的卡片 id
-    // 编辑态辅助：编辑卡引用（滚动条/留白复用）+ TextBox 内部 ScrollViewer（取滚动偏移）+ 本次页变换（摆 XAML 滚动条）。
+    // 编辑态辅助：编辑卡引用（滚动条/留白复用）+ TextBox 内部 ScrollViewer（取滚动偏移）。
     private CanvasNode? _canvasEditNodeRef;
-    private PageXform _canvasEditPageXf;
     private ScrollViewer? _canvasEditScrollViewer;
 
     // 每张卡片的滚动偏移（页局部 PDF 点，0 = 顶部）。**仅内存态**（与 Obsidian 一致，不写进 .canvas）。
@@ -8577,7 +8465,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (z <= 0) return;
         var xf = MakePageXform(ComputePageDest(pageIdx, z, hOff, vOff), z);
         _canvasEditNodeRef = node;      // 行距锁定复用
-        _canvasEditPageXf = xf;         // 备用（命中/绘制统一走 Win2D）
 
         double w = Math.Max(12, node.Width);
         double h = Math.Max(12, node.Height);
@@ -8810,9 +8697,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             bool animating = false;
             if (_isSmoothZooming) { StepZoomFrame(dt); animating = true; }
             if (_isWheelScrolling) { StepScrollFrame(dt); animating = true; }
-            StepEdgeEmphFrame(dt); if (_edgeEmphAnimating) animating = true;  // 无条件步进：任何强调目标变化/中途都推进，内部维护 _edgeEmphAnimating
             StopFramePumpIfIdle();                         // 全部落定 → 停看门狗/循环标志
-            if (animating) InvalidateBoth();              // 仍在进行 → 续帧（Win2D 交换链 vsync 节奏）
+            if (animating) InvalidateBoth();               // 视图在动 ⇒ 页变换变了，标注层必须整层重建 + 重绘
         }
 
         var ds = args.DrawingSession;
@@ -8914,7 +8800,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         //    它会被钉死在首次选中时的视口位置（连线走了、工具栏不动）。
         if (_selectedCanvasNodeId != null || _canvasEditNodeId != null || _selectedCanvasEdgeId != null)
             RequestCanvasOverlaySync();
-
     }
 
     /// <summary>缩放/滚动动画是否进行中。此时标注【逐帧随变换改变】，累积层无收益；
@@ -9466,7 +9351,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _panApplyTimer;
     private double _rightZoomStartY;
     private double _rightZoomStartPercent;
-    private Point _rightZoomAnchorPos;       // 按下时的鼠标位置（视口坐标），缩放期间该点屏幕位置不动
     private double _rightZoomAnchorDocX;     // 锚点的文档坐标（缩放=1 的 DIP）
     private double _rightZoomAnchorDocY;
 
@@ -9759,7 +9643,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 return;
             }
             // 连线命中（最后）：只负责"卡片之外"的空白区。
-            // 命中阈值 = max(CanvasEdgeHitThreshold, 光晕半宽)，与 UpdateCanvasEdgeHover 同一条；
+            // 命中带 = 悬浮态光晕半径，与 UpdateCanvasEdgeHover 完全是同一个函数、同一条判据；
             // 悬停侧另有按卡片矩形的遮罩 ⇒ "亮的范围 = 能点中的范围"依然成立，只是两者都排除卡内。
             if (TryHitCanvasEdge(pt.Position, out var hitEdgeId))
             {
@@ -9804,7 +9688,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double curH = _liveZoom > 0 ? _liveH : Viewer.HorizontalOffset;
             double curV = _liveZoom > 0 ? _liveV : Viewer.VerticalOffset;
             _rightZoomStartPercent = zf * 100.0;
-            _rightZoomAnchorPos = pt.Position;
             // 居中补偿：内容窄/矮于视口时 ScrollViewer 默认居中呈现，视口坐标→文档坐标必须扣除该
             // 居中偏移（详见 TryViewportToPage 同款算法）。此前漏算，导致低缩放下整页落入视口内
             // (centerX/Y>0) 时锚点被算偏右/下 → 缩放焦点不再跟鼠标、整页向一侧漂移。这是把下限放宽
@@ -9986,7 +9869,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 // 启停帧泵、并把画布切到插值态读取路径，毫无位移收益。直接吞掉该事件。
                 if (Math.Abs(target - cur) < 1e-6) { e.Handled = true; return; }
                 BeginZoomGesture(cur, target, RightZoomSpringOmega, fromRightDrag: true);
-                _zoomGestureStartZoom = _rightZoomStartPercent / 100.0; // 放大/缩小按整段手势判定
                 _isSmoothZooming = true;
                 EnsureFramePump();
             }
