@@ -5209,7 +5209,26 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// ① 卡片/控件（<see cref="IsPointOnCanvasCardOrControl"/>，与光标和按下同源）；
     /// ② 浮层 chrome（<see cref="IsPointOverCanvasOverlayChrome"/>：卡片胶囊、连线工具条）。
     /// ⇒ 鼠标呈控件态或停在浮层上时，连线绝不高亮；反过来"还亮的范围"总是可以点选连线的范围。
-    /// 显隐只由指针位置决定，无时钟、无补间、无额外重绘节奏。</summary>
+    /// 显隐只由指针位置决定，无时钟、无补间、无额外重绘节奏。
+    ///
+    /// ⚠【2026-10-22 实测定论：悬浮态"慢半拍"在本层不可优化，勿再尝试。以下为取证结论，删前请先读完】
+    /// 现象：指针移到卡片/连线上，高亮晚半拍才出现；快速掠过时像被整段跳过。
+    /// 根因：【不在本项目的代码里】。全链路分段打点实测（两轮 trace，2561 + 4609 行）：
+    ///   ① 排队延迟（Invalidate → Draw 回调）：P50 21.65ms、P90 78.67ms、MAX 92.81ms，
+    ///      呈双峰（&lt;20ms 占 68%、≥40ms 占 25%、中间 20~40ms 仅 6%），故不是"多等一两帧"；
+    ///   ② 排除 D2D 设备资源重建 —— CreateResources 全程只在进程启动出现 2 次，与悬停无关；
+    ///   ③ 排除"冷启动唤醒" —— 静止 2.4s 后的头几次移动反而最快，且所有慢帧前面 0.00~0.02ms 都有事件；
+    ///   ④ 排除"UI 线程被输入消息饿死" —— 单次悬停处理 P50 仅 0.089ms，最慢帧（92.82ms）期间
+    ///      9 次判定累计 0.978ms，只占 1.05%，其余 98.95% 在空等。
+    /// ⇒ 等待全部落在 ScreenCanvas.Invalidate() → Draw 回调之间，属 WindowsAppSDK 的 on-demand
+    ///   渲染调度（一次布尔翻转要让视口大小约 25MB 的 SurfaceImageSource 整块失效并重新采样/合成），
+    ///   本项目的代码插不进去，也不是任何"我们的热点"造成的。
+    /// ⇒ 凡"加时钟 / 改节流 / 预热烘热 / 输入驱动重绘 / 指针补采样"均已实测无效（前后六轮），
+    ///   唯一出路是把 hover 反馈从这块大 surface 上剥离（换架构），代价是重引入双画布相位脱节。
+    /// 附：所谓"快速掠过被跳过"与上者是同一件事，并非采样丢失 —— 8ms 派发间隔 × 1200px/s ≈ 9.6px
+    ///   步长，小于命中带直径（约 20px）；真实原因是高亮还没等出来，指针就已经离开。
+    ///   （另实测 GetIntermediatePoints 在桌面鼠标上基本只返回 1 个点，拿不到中间采样，
+    ///    若要真补采样只能走 Win32 GetMouseMovePointsEx —— 但按上面的算术，补了也无收益。）</summary>
     private void UpdateCanvasEdgeHover(Point vp)
     {
         string? hover = (IsPointOnCanvasCardOrControl(vp) || IsPointOverCanvasOverlayChrome(vp))
