@@ -3792,9 +3792,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         if (_canvasEditNodeId != null && !idx.ContainsKey(_canvasEditNodeId))
         {
-            _canvasEditNodeId = null;
-            ExitIbeamScope();   // 正在编辑的卡被删/撤销 ⇒ 退出编辑态：停工字作用域、恢复系统光标
-            if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
+            // 正在编辑的卡被删/撤销 ⇒ 走【完整】退出编辑流程（commit=false：卡已不存在，未提交文本作废）。
+            // ⚠ 不能只清标志 + 折叠编辑框：WinUI 里折叠的 RichEditBox 仍握着键盘焦点，会把 F/G/Ctrl+Z
+            //   这类页面级按键吞成输入。EndCanvasEdit 内含 RestoreViewerFocus()（把焦点显式移回视口）。
+            //   用户实测：白板双击新建卡 → 直接点胶囊里的删除（误创建）→ F/G 变成打字。
+            EndCanvasEdit(commit: false);
         }
         // 被删/被撤销掉的连线若正被选中或悬停 → 一并作废。
         if (_selectedCanvasEdgeId != null && !ContainsEdge(e, _selectedCanvasEdgeId))
@@ -5148,8 +5150,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double fcy = fPage.LayoutRect.Y + fn.Y + fn.Height / 2.0;
         double tcx = tPage.LayoutRect.X + tn.X + tn.Width / 2.0;
         double tcy = tPage.LayoutRect.Y + tn.Y + tn.Height / 2.0;
+        // 自动吸附的连接点（例如「拉线到空白新建卡片」场景：新建边未带 ToSide）在算出的当下写回模型，
+        // 使其自创建后固定，不再随卡片移动而每帧重算（修复：拖动新建卡会换连接点）。
+        // 手动连线显式带 ToSide（ComputeTargetSide），不受影响。
         string fSide = edge.FromSide ?? AutoSide(fcx, fcy, tcx, tcy, true);
         string tSide = edge.ToSide ?? AutoSide(fcx, fcy, tcx, tcy, false);
+        if (edge.FromSide == null) edge.FromSide = fSide;
+        if (edge.ToSide == null) edge.ToSide = tSide;
 
         var fxf = MakePageXform(destOf(fn.GlancePage), z);
         var txf = MakePageXform(destOf(tn.GlancePage), z);
@@ -5727,9 +5734,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private double _canvasEdgeToolbarLeft, _canvasEdgeToolbarTop;
     private bool _canvasEdgeToolbarPlaced;
     // ── 浮层安全区（上层遮挡带）──
-    // MainPage 的顶层浮层盖在本视图【之上】并吞掉指针：顶栏宿主（透明底、整条顶边，约一条工具栏高）、
-    // 底部缩放胶囊（右下角）、对比视图的 +/× 圆钮（上左右角）。被钳制到这些带里的悬浮胶囊会
-    // "看得见点不到"（用户报告：钳到视口上边缘时 100% 按钮失效）⇒ 钳制必须避开它们。
+    // MainPage 的顶层浮层盖在本视图【之上】并吞掉指针：顶栏宿主（透明底、整条顶边，约一条工具栏高；
+    // 收起时其 IsHitTestVisible=false，不再吃指针）、底部缩放胶囊（右下角，Opacity 淡出仍参与命中）。
+    // 被钳制到这些带里的悬浮胶囊会"看得见点不到"（用户报告：钳到视口上边缘时 100% 按钮失效）
+    // ⇒ 钳制必须避开它们。
     // 由 MainPage 把"四边被占掉多少 DIP"推下来（见 SetCanvasViewportInsets）。
     private double _canvasInsetL, _canvasInsetT, _canvasInsetR, _canvasInsetB;
     // 连线胶囊的显隐去重（与 _cardToolbarShown 同源）：避免重复写 Visibility。
@@ -6153,14 +6161,34 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         DispatcherQueue.TryEnqueue(() =>
         {
             if (_canvasEditNodeId != null) return; // 期间又进入编辑，不抢焦点
-            // ⚠ 只有焦点【还滞留在】（已折叠的）编辑框上、或已经落空时才交还视口。
-            // 用户已经点中别的控件（工具栏「设置」按钮 / 模式按钮 / 侧边栏…）时绝不抢焦点 ——
-            // 否则会把刚被点开的 Flyout 顶掉，表现为"设置按钮第一次点没反应，第二次才展开"（用户报告）。
+            // ⚠ 只有焦点【还滞留在】白板浮层内、或已经落空时才交还视口。白板浮层 = CanvasOverlay 的
+            //    整棵可视子树（编辑框 CanvasEditBox、卡片/连线胶囊及其中按钮）。这些元素都随「退出编辑」
+            //    或「删除卡片」而失效，留着焦点就会把 F/G/Ctrl+Z 这类页面级按键吞成输入。
+            //    用户已经点中浮层【外】的控件（工具栏「设置」/ 模式按钮 / 侧边栏…）时绝不抢焦点 ——
+            //    否则会把刚被点开的 Flyout 顶掉，表现为"设置按钮第一次点没反应，第二次才展开"（用户报告）。
+            //    ⚠ 只判 ReferenceEquals(CanvasEditBox) 会漏掉"焦点落在胶囊删除按钮上"这条：
+            //      用户实测：双击建卡 → 点胶囊删除（误创建）→ 焦点留在胶囊/折叠编辑框 ⇒ F/G 变打字。
             object? focused = FocusManager.GetFocusedElement(XamlRoot);
-            if (focused != null && !ReferenceEquals(focused, CanvasEditBox)) return;
+            if (focused != null &&
+                !ReferenceEquals(focused, CanvasEditBox) &&
+                !IsWithinVisual(focused as DependencyObject, CanvasOverlay))
+                return;
             if (Viewer != null && Viewer.Focus(FocusState.Programmatic)) return;
             FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
         });
+    }
+
+    /// <summary>判断 <paramref name="element"/> 是否落在 <paramref name="ancestor"/> 的可视子树内（含自身）。
+    /// 用于"焦点是否滞留在白板浮层内"的判定：折叠的元素仍在树里，GetParent 依旧可达。</summary>
+    private static bool IsWithinVisual(DependencyObject? element, DependencyObject? ancestor)
+    {
+        if (element == null || ancestor == null) return false;
+        for (var cur = element; cur != null;
+             cur = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(cur))
+        {
+            if (ReferenceEquals(cur, ancestor)) return true;
+        }
+        return false;
     }
 
     /// <summary>把键盘焦点交给视口宿主（若尚未在它身上）。页面级按键里，Delete/Backspace 走的是

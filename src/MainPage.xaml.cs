@@ -4464,6 +4464,8 @@ public sealed partial class MainPage : Page
     {
         if (TopToolbar == null) return;
         CancelToolbarHide();
+        // 宿主命中测试与工具栏显隐同开：收起时让出顶带指针（卡片可点），展开时整条顶带重新吃指针。
+        if (TopToolbarHost != null) TopToolbarHost.IsHitTestVisible = true;
         if (TopToolbar.IsHitTestVisible) return;
 
         TopToolbar.IsHitTestVisible = true;
@@ -4514,6 +4516,8 @@ public sealed partial class MainPage : Page
         if (_toolbarAlwaysVisible) return;   // 常驻显示：忽略一切收起请求
         CancelToolbarHide();
         TopToolbar.IsHitTestVisible = false;
+        // 收起后顶带立即让出指针：透明宿主若继续吃指针，落在顶带的卡片（矮卡尤其）会点不动、拖不出来。
+        if (TopToolbarHost != null) TopToolbarHost.IsHitTestVisible = false;
         _pointerInTopToolbar = false;
         _pointerInPenCapsule = false;
         if (PenOptionsPopup != null)
@@ -5386,7 +5390,8 @@ public sealed partial class MainPage : Page
     /// 会"看得见点不动"（用户报告：钳到视口上边缘时 100% 按钮失效）。
     /// <para>⚠ 根因（与 <see cref="UpdateSidebarTopInset"/> 同一条）：顶部工具栏宿主是
     /// <c>Canvas.ZIndex="50"</c> 的<b>透明底</b> Grid，SidebarSplitView（含 GpuPageView）是 ZIndex=0，
-    /// 恒在其下 ⇒ 整条顶边都被它吃掉指针；底部缩放胶囊与对比视图 +/- 圆钮同理（ZIndex 40/50）。</para>
+    /// 恒在其下 ⇒ 展开时整条顶边都被它吃掉指针（收起时靠 IsHitTestVisible=false 让出）；
+    /// 底部缩放胶囊同理（ZIndex 40）。</para>
     /// 口径同样取自【实测】矩形，不硬编码；只统计<b>贴边</b>的浮层，居中遮罩不该吃掉整条边。
     /// </summary>
     private void UpdateCanvasViewportInsets()
@@ -5396,10 +5401,13 @@ public sealed partial class MainPage : Page
         if (vw <= 0 || vh <= 0) return;
 
         // 只避让【顶 / 底】两条带：左右两侧只有角上的圆钮占位，为它们整条内缩会把中间的可用宽度也吃掉，
-        // 不划算；角上的圆钮本就贴在顶带下方，直接并入顶带（见下）即可。
+        // 不划算。
+        // ⚠ 顶部安全区【仅取工具栏宿主高度本身】，不再把左上「+」/右上「×」圆钮的整条高度并入：
+        // 圆钮贴在工具栏【下方】、且位于最左/最右角，而卡片悬浮胶囊是居中贴在卡片顶边上方，
+        // 二者仅在「卡片贴死左上/右上角」这一极窄情形才会竖/横重叠；为这一种情形把【所有】顶边钳制
+        // 统一下压一圈（≈圆钮全高 ≈50px），会让每张顶部卡片的胶囊都凭空低一截（用户报告：钳制位置比工具栏度高、偏下）。
+        // 故顶边安全区以工具栏高度为准，胶囊不再被圆钮拖低。
         double top = BottomOf(TopToolbarHost);          // 透明底宿主：整条顶边都吃指针
-        top = Math.Max(top, BottomOf(SecondaryOpenPillBorder));    // 左上角「+」（单文档时常驻可见）
-        top = Math.Max(top, BottomOf(SecondaryClosePillBorder));   // 右上角「×」（对比视图展开时常驻）
         // 缩放胶囊（BottomZoomPillBorder）靠 Opacity 淡入淡出隐藏，但 Opacity=0 的元素【仍参与命中测试、
         // 仍拦截指针】，与「可见性」无关。故无论其当前是否淡出，都必须预留整行高度；否则悬浮胶囊钳到视口
         // 底部时会正好压在缩放胶囊矩形内而「看得见点不动」。提起一行 = 胶囊自身高度 + 其底边外边距，

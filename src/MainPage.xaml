@@ -562,7 +562,13 @@
 
              PointerExited even though the pointer never left the toolbar row. -->
 
+        <!-- IsHitTestVisible 与工具栏显隐联动（ShowTopToolbar 置 true / HideTopToolbar 置 false）：
+             工具栏收起时宿主不再吃掉整条顶带的指针，否则落在该带的卡片（尤其高度小于工具栏的矮卡）
+             会被透明宿主挡住、点不动也拖不出来。工具栏的唤起靠标题栏悬停（SetTitleBarHover），
+             不依赖宿主自身的指针事件，故收起时关闭命中测试不影响唤出。默认收起 ⇒ 默认 false。 -->
         <Grid x:Name="TopToolbarHost" VerticalAlignment="Top" Canvas.ZIndex="50"
+
+              IsHitTestVisible="False"
 
               Background="Transparent"
 
