@@ -4455,7 +4455,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             return;
         }
 
-        if (!_canvasPointerValid) return;
+        // 指针接近度显形只在"没有手势在跑"时成立：手势期间 _canvasPointerPos 是冻结值（拖动起点后不再更新），
+        // 拿冻结点探测会让卡片扫过它时凭空显出控件 —— 各手势自己的控件由上方分支负责画。
+        if (!_canvasPointerValid || AnyCanvasGestureActive) return;
         if (!CanvasViewportToLockedPage(node.GlancePage, _canvasPointerPos, out double ppx, out double ppy))
             return;
 
@@ -8314,6 +8316,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                         _canvasDragStartPy = dPy;
                         _canvasDragOrigX = sbNode.X;
                         _canvasDragOrigY = sbNode.Y;
+                        // 指针位置就此冻结（拖动期间不再更新）⇒ 必须标记为"不可信"，
+                        // 否则这个按下点会被当成活指针去探测手柄：卡片扫过它时凭空显出边缘控件（同 BeginCanvasScrollDrag）。
+                        _canvasPointerValid = false;
                     }
                 }
                 else
@@ -8373,6 +8378,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 _canvasDragStartPy = hitPy;
                 _canvasDragOrigX = hitNode.X;
                 _canvasDragOrigY = hitNode.Y;
+                // 同上：位置冻结在按下点 ⇒ 置为不可信，禁止拿它探测手柄（否则卡片移动经过按下点会显出控件）。
+                _canvasPointerValid = false;
                 this.CapturePointer(e.Pointer);
                 e.Handled = true;
                 return;
