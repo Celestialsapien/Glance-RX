@@ -24,10 +24,7 @@ using System.Threading.Tasks;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// Persistent store for user-defined bookmarks (per PDF document).
-/// Data is stored as JSON in the app's GlanceData subfolder (portable, no AppData/System/C drive).
-/// </summary>
+/// <summary>Persistent store for user-defined bookmarks (per PDF document). Data is stored as JSON in the app's GlanceData subfolder (portable, no AppDa…</summary>
 public sealed class BookmarkStore
 {
     private readonly string _filePath;
@@ -37,7 +34,6 @@ public sealed class BookmarkStore
 
     public BookmarkStore()
     {
-        // 数据落在程序本体目录的 GlanceData 子目录（便携版硬约束：不写 C 盘 AppData / 系统 Temp）。
         _filePath = AppPaths.BookmarksFilePath;
     }
 
@@ -64,7 +60,6 @@ public sealed class BookmarkStore
         }
     }
 
-    /// <summary>Save bookmarks for the given PDF path.</summary>
     public async Task SaveAsync(string pdfPath, List<PdfBookmark> bookmarks)
     {
         if (string.IsNullOrEmpty(pdfPath)) return;
@@ -115,7 +110,6 @@ public sealed class BookmarkStore
 
     private static string MakeKey(string pdfPath)
     {
-        // Use full path as key. Path changes across PCs are expected; the file is local metadata.
         return pdfPath;
     }
 }

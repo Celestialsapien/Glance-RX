@@ -21,13 +21,9 @@ using System.Text.Json;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// Service for persisting app settings (theme) to a JSON file
-/// in the app's own directory (portable/green mode).
-/// </summary>
+/// <summary>Service for persisting app settings (theme) to a JSON file in the app's own directory (portable/green mode).</summary>
 public class SettingsService
 {
-    // 数据落在程序本体目录的 GlanceData 子目录（便携版硬约束：不写 C 盘 AppData / 系统 Temp）。
     private static readonly string SettingsFilePath = AppPaths.SettingsFilePath;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -56,7 +52,6 @@ public class SettingsService
         }
     }
 
-    /// <summary>顶部工具栏是否「常驻显示」。false（默认）= 鼠标移开便收起（原有行为）。</summary>
     public bool ToolbarAlwaysVisible
     {
         get => _data.ToolbarAlwaysVisible;
@@ -99,7 +94,6 @@ public class SettingsService
     {
         public string AppTheme { get; set; } = "Default";
 
-        /// <summary>顶部工具栏常驻显示（false = 鼠标移开便收起）。</summary>
         public bool ToolbarAlwaysVisible { get; set; }
     }
 }

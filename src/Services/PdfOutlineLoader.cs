@@ -24,10 +24,7 @@ using PdfSharp.Pdf.IO;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// Loads the PDF document outline (table of contents / bookmarks) using PdfSharp.
-/// This is read-only and does not contend with the MuPDF rendering engine.
-/// </summary>
+/// <summary>Loads the PDF document outline (table of contents / bookmarks) using PdfSharp.</summary>
 public sealed class OutlineNode
 {
     public string Title { get; set; } = "";

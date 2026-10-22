@@ -22,27 +22,11 @@ using System.IO;
 
 namespace GlanceRX
 {
-    /// <summary>
-    /// 设计手感调参中心 / Design-feel tuning hub.
-    ///
-    /// 原本这些值是散落在 GpuPageView / MainPage 里的编译期 const。
-    /// 现已集中到这里，并在程序启动时从同目录（或 统计 / Stats 子目录）下的
-    /// config.txt 读取覆盖 —— 改完重启 Glance 即可生效，无需重新编译。
-    ///
-    /// These used to be compile-time consts scattered across GpuPageView / MainPage.
-    /// They now live here and are overridden at startup from config.txt (same dir, or a
-    /// 统计 / Stats subfolder). Edit the file and restart Glance to apply — no recompile.
-    ///
-    /// 每个字段的「默认值」即下方初始化值，与改造前逐字一致，方便回退。
-    /// Each field's initializer IS the default value, byte-for-byte identical to before, for easy revert.
-    /// </summary>
+    /// 设计手感调参中心 / Design-feel tuning hub. 原本这些值是散落在 GpuPageView / MainPage 里的编译期 const。
     public static class Tuning
     {
 
         // 一份【全默认值】的 config.txt 文本，用于"删文件=恢复出厂"时自动重新生成。
-        // A full-default config.txt text, used to auto-regenerate when the file is deleted.
-        // 此文本与 src/config.txt 保持一致（由工具从 config.txt 生成）。
-        // Kept identical to src/config.txt (generated from it by tooling).
         private const string DefaultConfigText = @"# ============================================================================
 # Glance 设计手感调参文件 / Glance Design-Feel Tuning
 # ----------------------------------------------------------------------------
@@ -69,7 +53,6 @@ namespace GlanceRX
 #   full-default config.txt in this (or the default) location — i.e. a factory reset.
 # ============================================================================
 
-
 # ---------------- 缩放范围 / Zoom range ----------------
 # 最小缩放比例。有效区间 (0, MaxZoom)，建议 0.02 ~ 5.0。
 # Min zoom ratio. Valid (0, MaxZoom); recommended 0.02 ~ 5.0.
@@ -80,7 +63,6 @@ MinZoom = 0.1                     # 默认 0.1 | default | 区间 (0, MaxZoom)
 # 最大缩放比例。有效区间 (MinZoom, 16]，建议 0.05 ~ 16.0。
 # Max zoom ratio. Valid (MinZoom, 16]; recommended 0.05 ~ 16.0.
 MaxZoom = 4.0                     # 默认 4.0 | default | 区间 (MinZoom, 16]
-
 
 # ---------------- 布局留白 / Layout margins (DIP) ----------------
 # 文档四周留白（DIP）。有效区间 [0, 256]，非负（负值会把内容拉出屏幕）。
@@ -95,7 +77,6 @@ PageGap = 16.0                    # 默认 16.0 | default | 区间 [0, 256]
 # Horizontal page gap (DIP). Valid [0, 256], non-negative.
 PageGapHorizontal = 6.0           # 默认 6.0 | default | 区间 [0, 256]
 
-
 # ---------------- 光栅并发 / Raster concurrency ----------------
 # 自动模式并发上限：auto = min(物理核-1, 本值)。有效区间 [1, 1024]，且必须 <= RenderWorkerHardCap。
 # Auto ceiling: auto = min(physical cores - 1, this). Valid [1, 1024]; must be <= HardCap.
@@ -107,7 +88,6 @@ RenderWorkerCap = 16              # 默认 16 | default | 区间 [1, 1024]
 # Absolute hard ceiling. Valid [1, 1024]; must be >= Cap (else auto-raised to Cap).
 # 低于 1 会被钳为 1，否则 Math.Clamp 抛异常。/ Below 1 clamps to 1, else throws.
 RenderWorkerHardCap = 24          # 默认 24 | default | 区间 [1, 1024]
-
 
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
 # 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动下方收敛阈值。
@@ -129,7 +109,6 @@ ZoomSpringOmega = 18.0            # 默认 18.0 | default | 区间 (0, 200]
 # Right-drag zoom spring: ~165ms, follows hand, only filters jitter.
 RightZoomSpringOmega = 40.0       # 默认 40.0 | default | 区间 (0, 200]
 
-
 # ---------------- 滚轮与缩放步进 / Wheel & zoom step ----------------
 # 滚轮一格位移系数。有效区间 [-50, 50]；负值=前推往回看（符号有意保留，只限幅）。
 # Wheel notch factor. Valid [-50, 50]; negative = push forward = scroll back (sign kept, magnitude clamped).
@@ -142,7 +121,6 @@ CtrlWheelZoomStrength = 0.25      # 默认 0.25 | default | 区间 [0, 5]
 # 缩放按钮(+/-)每按一次步进（百分比点：100%→110%）。有效区间 [0.5, 100]，> 0。
 # Zoom button step per click (%pts). Valid [0.5, 100], > 0.
 ZoomButtonStep = 10.0             # 默认 10.0 | default | 区间 [0.5, 100]
-
 
 # ---------------- 收敛阈值（按""屏幕看得见""判定） / Settle thresholds ----------------
 # 残差 ≤ 约 1~2 屏幕像素即落定，消除""看着停了其实还在跑""的拖尾。
@@ -166,7 +144,6 @@ ZoomSettleLog = 0.002             # 默认 0.002 | default | 区间 (0, 0.5]
 # Zoom settle velocity. Valid (0, 5].
 ZoomSettleVel = 0.08              # 默认 0.08 | default | 区间 (0, 5]
 
-
 # ---------------- 提交落地（ChangeView 异步窗口） / Commit window ----------------
 # 缩放/偏移经 ScrollViewer.ChangeView 异步落地，下面是容差与兜底。
 # Zoom/offset land asynchronously via ChangeView; tolerances & safety net below.
@@ -187,7 +164,6 @@ MaxCommitNudges = 4               # 默认 4 | default | 区间 [0, 64]
 # Commit wait deadline (ms). Valid (0, 10000], > 0.
 CommitWaitDeadlineMs = 250.0      # 默认 250.0 | default | 区间 (0, 10000]
 
-
 # ---------------- 锚点 / 双击 / Anchor & double-tap ----------------
 # 落定后仍复用锚点的宽限(ms)。有效区间 [0, 5000]，非负。
 # Anchor reuse grace after settle (ms). Valid [0, 5000], non-negative.
@@ -196,7 +172,6 @@ ZoomReuseAnchorGraceMs = 200.0    # 默认 200.0 | default | 区间 [0, 5000]
 # 双击去重窗口(ms)，吃掉手势识别器的重复派发。有效区间 [0, 2000]，非负。
 # Double-tap dedupe window (ms). Valid [0, 2000], non-negative.
 DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default | 区间 [0, 2000]
-
 
 # ---------------- UI / 工具栏 / UI & toolbar ----------------
 # 工具栏滑入滑出时长(ms)。有效区间 [0, 2000]，非负。
@@ -208,70 +183,51 @@ UiTransitionMs = 150              # 默认 150 | default | 区间 [0, 2000]
 ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
 ";
         // ⚠ 上面末尾那个换行是【刻意】的，别删：让本字面量与 src/config.txt 逐字一致（含末尾换行）。
-        //   删掉它 => 本字面量会比 src/config.txt 少一个换行，"删文件=恢复出厂"生成的那份就与仓库那份不同。
-        // The trailing newline above is deliberate: keeps this literal byte-identical to src/config.txt.
 
         // ---------------- 缩放范围 / Zoom range ----------------
-        public static double MinZoom = 0.1;                 // 最小缩放比例 / min zoom ratio (10%)
-        public static double MaxZoom = 4.0;                 // 最大缩放比例 / max zoom ratio (400%)
+        public static double MinZoom = 0.1;
+        public static double MaxZoom = 4.0;
         public static double MinZoomPercent => MinZoom * 100.0;
         public static double MaxZoomPercent => MaxZoom * 100.0;
 
         // ---------------- 布局留白 / Layout margins (DIP) ----------------
         public static double DocMargin = 16.0;              // 文档四周留白 / doc margin around content
-        public static double PageGap = 16.0;                // 纵向连续布局页间距 / vertical page gap
+        public static double PageGap = 16.0;
         public static double PageGapHorizontal = 6.0;       // 横向连续布局页间距 / horizontal page gap (cross-page feel)
 
         // ---------------- 缓存与光栅 / Cache & raster ----------------
-        // 并发光栅线程数【不再可配置】：始终由 PdfRenderService 按物理核自适应选择
-        //（物理核 - 1 留档给 UI/Win2D，受 RenderWorkerCap 封顶）。——
-        // RenderWorkerCount：见 PdfRenderService.CpuCoreInfo.PhysicalCoreCount()
         public static int RenderWorkerCap = 16;             // 自动模式上限：auto = min(逻辑核数, 本值)
         public static int RenderWorkerHardCap = 24;         // 绝对硬上限（防止极端配置让线程抢占 CPU/内存带宽）
 
         // ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
-        // 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动收敛阈值。
-        // ~99% settle time ≈ 6.6/ω. Want faster? Only raise ω; leave settle thresholds alone.
         public static double ScrollSpringOmega = 21.0;     // 滚轮滚动 ≈315ms / wheel scroll (~315ms)
         public static double ZoomSpringOmega = 18.0;       // 双击/按钮/Ctrl+滚轮 ≈370ms / dblclick/button/ctrl-wheel (~370ms)
         public static double RightZoomSpringOmega = 40.0;  // 右键拖拽缩放 ≈165ms / right-drag zoom (~165ms)
 
-        // ---------------- 滚轮与缩放步进 / Wheel & zoom step ----------------
         public static double WheelScrollFactor = -3.0;     // 滚轮一格位移系数(≈360px/档；2.0≈240px偏稳,4.0≈480px更奔放)
                                                             // wheel notch factor (~360px/notch; 2.0≈240px steady, 4.0≈480px snappy)
         public static double CtrlWheelZoomStrength = 0.25; // Ctrl+滚轮缩放强度(每档120delta约3%) / ctrl+wheel zoom strength (~3%/notch)
         public static double ZoomButtonStep = 10.0;        // 缩放按钮(+/-)每按一次步进(百分比点) / zoom button step per click (%pts)
 
-        // ---------------- 收敛阈值（按"屏幕看得见"判定） / Settle thresholds (visible-on-screen) ----------------
         public static double ScrollSettlePx = 1.5;         // 滚动收敛残差(px) / scroll settle residual (px)
         public static double ScrollSettleVel = 40.0;       // 滚动收敛速度(px/帧) / scroll settle velocity
         public static double ZoomSettleLog = 2e-3;        // 缩放收敛残差(log) / zoom settle residual (log)
-        public static double ZoomSettleVel = 8e-2;         // 缩放收敛速度 / zoom settle velocity
+        public static double ZoomSettleVel = 8e-2;
 
-        // ---------------- 提交落地（ChangeView 异步窗口） / Commit window ----------------
-        public static double CommitZoomEps = 1e-3;         // 缩放提交容差 / commit zoom epsilon
+        public static double CommitZoomEps = 1e-3;
         public static double CommitOffsetEps = 1.5;        // 偏移提交容差(px) / commit offset epsilon (px)
-        public static int MaxCommitNudges = 4;            // 最大补发偏移次数 / max commit nudges
+        public static int MaxCommitNudges = 4;
         public static double CommitWaitDeadlineMs = 250.0; // 落地超时(墙钟兜底, ms) / commit wait deadline (ms)
 
-        // ---------------- 锚点 / 双击 / Anchor & double-tap ----------------
         public static double ZoomReuseAnchorGraceMs = 200.0; // 落定后仍复用锚点宽限(ms) / anchor reuse grace (ms)
         public static double DoubleTapIgnoreMs = 150.0;     // 双击去重窗口(ms) / double-tap dedupe window (ms)
 
-        // ---------------- UI / 工具栏 / UI & toolbar ----------------
         public static double UiTransitionMs = 150;         // 工具栏滑入滑出时长(ms) / toolbar slide duration (ms)
         public static double ToolbarHideDelayMs = 180;     // 鼠标离开后自动隐藏延迟(ms) / toolbar auto-hide delay (ms)
 
-        // ============================ 加载 / Loading ============================
-
-        /// <summary>启动时自动加载一次（首次访问 Tuning 字段时触发）。</summary>
         static Tuning() { Load(); }
 
-        /// <summary>
-        /// 从 config.txt 读取覆盖。只覆盖文件里出现且能解析的键；缺失键保留默认值。
-        /// Loads overrides from config.txt. Only keys present & parseable are applied; missing keys keep defaults.
-        /// 搜索顺序 / Search order: 程序目录/config.txt → 程序目录/统计/config.txt → 程序目录/Stats/config.txt → 当前目录/config.txt。
-        /// </summary>
+        /// <summary>从 config.txt 读取覆盖。只覆盖文件里出现且能解析的键；缺失键保留默认值。 Loads overrides from config.txt. Only keys present & parseable are applied;</summary>
         public static void Load()
         {
             string? dir = null;
@@ -300,7 +256,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
                     var line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#") || line.StartsWith("//")) continue;
 
-                    // 允许尾注：Key = Value   # 注释
                     var hash = line.IndexOf('#');
                     if (hash >= 0) line = line.Substring(0, hash).Trim();
                     if (line.Length == 0) continue;
@@ -323,20 +278,11 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
 
             // 解析无论成功与否，最后都把所有值钳进安全区间并修好跨字段不变量，
             // 保证后续 Math.Clamp / 弹簧 / 收敛判定不会因配置异常而崩溃或空转。
-            // Coerce every value into a safe range & fix cross-field invariants so a bad
-            // config can never crash (Math.Clamp throws on min>max) or spin forever.
             Validate();
         }
 
-        /// <summary>
-        /// config.txt 不存在（被删除）时调用。默认值已由字段初始化就位，
-        /// 这里把一份【全默认值】的 config.txt 重新写回，实现"删文件=恢复出厂"。
-        /// Called when config.txt is missing. Defaults are already active (field initializers);
-        /// we (re)write a full-default config.txt to realize "delete file = factory reset".
-        /// 写入位置优先级 / Write target priority:
-        ///   已存在的 统计/ 或 Stats/ 子目录 -> 其下 config.txt；否则 -> 程序目录/config.txt。
-        ///   existing 统计/Stats subfolder -> its config.txt; else -> program-dir/config.txt.
-        /// </summary>
+        /// config.txt 不存在（被删除）时调用。
+        /// 已存在的 统计/ 或 Stats/ 子目录 -> 其下 config.txt；否则 -> 程序目录/config.txt。
         private static void RegenerateConfigFile()
         {
             try
@@ -350,7 +296,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
             catch
             {
                 // 写入失败（如程序目录只读）不影响运行：默认值仍生效，只是本次未生成文件。
-                // Write failure (e.g. read-only program dir) is non-fatal; defaults still apply.
             }
         }
 
@@ -372,7 +317,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
         private static void TrySet(string key, string raw)
         {
             // 容错布尔/数值解析；解析失败则忽略该键（保留默认）。
-            // Tolerant parse; on failure the key is ignored (default kept).
             switch (key)
             {
                 case "MinZoom": MinZoom = ParseDouble(raw, MinZoom); break;
@@ -400,16 +344,12 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
                 case "DoubleTapIgnoreMs": DoubleTapIgnoreMs = ParseDouble(raw, DoubleTapIgnoreMs); break;
                 case "UiTransitionMs": UiTransitionMs = ParseDouble(raw, UiTransitionMs); break;
                 case "ToolbarHideDelayMs": ToolbarHideDelayMs = ParseDouble(raw, ToolbarHideDelayMs); break;
-                default: break; // 未知键忽略 / unknown key ignored
+                default: break;
             }
         }
 
         // ============================ 校验 / 钳制 / Validation ============================
         // 配置是给"手调手感"的人用的，任何离谱值都不该让程序崩。
-        // 这里把每个字段钳进合理区间，并修正跨字段不变量（MinZoom<MaxZoom、HardCap>=Cap），
-        // 使得无论 config.txt 里写了什么，加载完都一定是【有效且自洽】的设置。
-        // The config is hand-edited for feel; no value should ever crash the app.
-        // We clamp every field and fix cross-field invariants so the result is always valid.
 
         private static double ClampD(double v, double lo, double hi)
             => double.IsFinite(v) ? Math.Max(lo, Math.Min(v, hi)) : lo;
@@ -421,7 +361,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
         {
             // ---- 缩放范围 / Zoom range ----
             // 硬性不变量 MinZoom < MaxZoom：否则 GpuPageView 里十几处 Math.Clamp(zoom, MinZoom, MaxZoom)
-            // 直接抛 ArgumentException。下界保证缩放比 > 0（避免除零 / 零尺寸）。
             MinZoom = ClampD(MinZoom, 0.02, 5.0);
             MaxZoom = ClampD(MaxZoom, 0.05, 16.0);
             if (MinZoom >= MaxZoom) MinZoom = Math.Max(0.02, MaxZoom * 0.5);
@@ -432,7 +371,6 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
             PageGapHorizontal = ClampD(PageGapHorizontal, 0.0, 256.0);
 
             // ---- 并发光栅 / Raster concurrency ----
-            // 硬下限 1：PdfRenderService 里 Math.Clamp(..., 1, RenderWorkerCap) 在 Cap<1 时抛异常。
             // HardCap 必须是绝对上限 => 不低于 Cap，否则 Cap 才是真正上限、注释语义失效。
             RenderWorkerCap = ClampI(RenderWorkerCap, 1, 1024);
             RenderWorkerHardCap = ClampI(RenderWorkerHardCap, 1, 1024);
@@ -444,25 +382,21 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
             RightZoomSpringOmega = ClampD(RightZoomSpringOmega, 1.0, 200.0);
 
             // ---- 滚轮与缩放步进 / Wheel & zoom step ----
-            // 符号保留（负值=前推往回看），仅限幅；缩放强度 / 按钮步进非负。
             WheelScrollFactor = ClampD(WheelScrollFactor, -50.0, 50.0);
             CtrlWheelZoomStrength = ClampD(CtrlWheelZoomStrength, 0.0, 5.0);
             ZoomButtonStep = ClampD(ZoomButtonStep, 0.5, 100.0);
 
             // ---- 收敛阈值 / Settle thresholds ----  必须 > 0：=0 时 IsSettled 要求精确相等，
-            // 动画永远到不了 => 帧泵空转（永不 idle / 吃电池）。
             ScrollSettlePx = ClampD(ScrollSettlePx, 0.1, 50.0);
             ScrollSettleVel = ClampD(ScrollSettleVel, 0.1, 1000.0);
             ZoomSettleLog = ClampD(ZoomSettleLog, 1e-4, 0.5);
             ZoomSettleVel = ClampD(ZoomSettleVel, 1e-3, 5.0);
 
-            // ---- 提交落地 / Commit window ----
             CommitZoomEps = ClampD(CommitZoomEps, 1e-5, 0.1);
             CommitOffsetEps = ClampD(CommitOffsetEps, 0.1, 50.0);
             MaxCommitNudges = ClampI(MaxCommitNudges, 0, 64);
             CommitWaitDeadlineMs = ClampD(CommitWaitDeadlineMs, 1.0, 10000.0);
 
-            // ---- 锚点 / 双击 / UI ----
             ZoomReuseAnchorGraceMs = ClampD(ZoomReuseAnchorGraceMs, 0.0, 5000.0);
             DoubleTapIgnoreMs = ClampD(DoubleTapIgnoreMs, 0.0, 2000.0);
             UiTransitionMs = ClampD(UiTransitionMs, 0.0, 2000.0);

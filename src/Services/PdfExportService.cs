@@ -29,15 +29,10 @@ using GlanceRX;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// 把批注写成 PDF 原生的 /Ink 注解对象（非破坏性、可移除、可显隐），而非把笔迹烘焙进
-/// 页面内容流变成像素。文件即唯一真相源：每次保存先移除旧的 GlanceAnno 标记注解再重加，
-/// 保证幂等、绝不堆叠重复笔迹。批注是独立对象，原始页面内容永不被改动。
-/// </summary>
+/// <summary>把批注写成 PDF 原生的 /Ink 注解对象（非破坏性、可移除、可显隐），而非把笔迹烘焙进 页面内容流变成像素。文件即唯一真相源：每次保存先移除旧的 GlanceAnno 标记注解再重加， 保证幂等、绝不堆叠重复笔迹。批注是独立对象，原始页面内容永不被改动。</summary>
 public class PdfExportService
 {
     // PdfGenericAnnotation 是 internal 类，但其 (PdfDictionary) 构造为 public，可跨程序集反射创建。
-    // 用 /Subtype /Ink 把它变成真实墨迹注解对象。
     private static readonly Type? GenericAnnotType =
         typeof(PdfAnnotation).Assembly.GetType("PdfSharp.Pdf.Annotations.PdfGenericAnnotation");
     private static readonly ConstructorInfo? GenericAnnotCtor =
@@ -58,7 +53,6 @@ public class PdfExportService
 
         await Task.Run(() =>
         {
-            // 旧版 PDF 解析可能用到代码页编码提供器
             try
             {
                 System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
@@ -69,7 +63,6 @@ public class PdfExportService
                 ? PdfReader.Open(inputPdfPath, PdfDocumentOpenMode.Modify)
                 : PdfReader.Open(inputPdfPath, password, PdfDocumentOpenMode.Modify))
             {
-                // 1) 用户旋转烘焙进 /Rotate（整页旋转，含批注；与旧方案视觉一致）
                 for (int i = 0; i < document.Pages.Count; i++)
                 {
                     PdfPage p = document.Pages[i];
@@ -91,7 +84,6 @@ public class PdfExportService
                     }
                 }
 
-                // 3) 把当前批注写成真实 /Ink 对象（按页分组）
                 var byPage = annotations
                     .Where(a => a != null && a.Type == AnnotationType.Pen && a.Points != null && a.Points.Count > 1)
                     .GroupBy(a => a.PageIndex)
@@ -106,10 +98,6 @@ public class PdfExportService
                     int rot = page.Rotate;
 
                     // ⚠ 关键：注释坐标必须在 MediaBox（未旋转）坐标系下计算。
-                    //    PdfSharp 的 page.Width/Height.Point 在刚设置 Rotate 后（Modify 模式）
-                    //    返回【旋转后显示尺寸】（如 Rotate=90 时 Width=MediaBox.Height），
-                    //    而读回（Import 模式）返回 MediaBox 未旋转尺寸 → 写读参数不一致，
-                    //    坐标全部错位（视觉 180° 旋转）。CropBox 维度始终未旋转，安全。
                     double cropX = 0, cropY = 0, Wc, Hc;
                     if (page.Elements.ContainsKey("/CropBox") && page.CropBox != null)
                     {
@@ -128,7 +116,6 @@ public class PdfExportService
                     foreach (var anno in kv.Value)
                     {
                         // 单条笔迹失败绝不能拖垮整页（否则会连累同页其它正常笔迹一起丢失）。
-                        // 只有 NaN/Infinity 这类非法点才过滤，避免生成非法 PDF 使整份文档保存失败。
                         try
                         {
                             double minX = double.MaxValue, minY = double.MaxValue;
@@ -147,7 +134,7 @@ public class PdfExportService
                             if (phys.Count < 2) continue;
 
                             double thick = (anno.Thickness > 0 && double.IsFinite(anno.Thickness)) ? anno.Thickness : 3.5;
-                            double margin = thick / 2.0 + 1.0; // /Rect 须包住整条笔迹（含半粗）
+                            double margin = thick / 2.0 + 1.0;
                             minX -= margin; minY -= margin; maxX += margin; maxY += margin;
 
                             var dict = new PdfDictionary(document);
@@ -156,7 +143,6 @@ public class PdfExportService
                             annot.Elements.SetRectangle("/Rect",
                                 new PdfRectangle(new XPoint(minX, minY), new XPoint(maxX, maxY)));
 
-                            // /InkList：一条笔画 = 一个坐标数组（x,y 交替）
                             var inkList = new PdfArray();
                             var stroke = new PdfArray();
                             foreach (var ph in phys)
@@ -167,7 +153,6 @@ public class PdfExportService
                             inkList.Elements.Add(stroke);
                             annot.Elements["/InkList"] = inkList;
 
-                            // /C：笔迹颜色（0..1）
                             var col = new PdfArray();
                             (double r, double g, double b) = ParseColorRgb(anno.ColorHex);
                             col.Elements.Add(new PdfReal(r));
@@ -175,13 +160,11 @@ public class PdfExportService
                             col.Elements.Add(new PdfReal(b));
                             annot.Elements["/C"] = col;
 
-                            // /BS：边框样式（线宽 = 笔粗）
                             var bs = new PdfDictionary();
                             bs.Elements.SetName("/S", "/S");
                             bs.Elements.SetReal("/W", thick);
                             annot.Elements["/BS"] = bs;
 
-                            // GlanceAnno 幂等标记（保留）+ GlanceAnnoV2（新版坐标系 = MediaBox，区分遗留）
                             annot.Elements.SetString("/GlanceAnno", "1");
                             annot.Elements.SetString("/GlanceAnnoV2", "1");
                             page.Annotations.Add(annot);
@@ -195,27 +178,16 @@ public class PdfExportService
         });
     }
 
-    /// <summary>
-    /// 快速预检：文件里是否含 Glance 批注标记 "/GlanceAnno"（旧版 /GlanceAnno 与新版
-    /// /GlanceAnnoV2 是子串关系，一次命中全覆盖）。Glance 保存的注解字典是 PdfSharp 落盘的
-    /// 直写对象（非流压缩），键名必然以明文出现在文件字节中 → 未命中即可确定本文件没有任何
-    /// Glance 批注，从而跳过整份 PdfSharp 解析。
-    ///
+    /// 快速预检：文件里是否含 Glance 批注标记 "/GlanceAnno"（旧版 /GlanceAnno 与新版 /GlanceAnnoV2 是子串关系，一次命中全覆盖）。
     /// 为什么必须跳过：PdfReader.Open(Import) 会把整份 PDF（全部对象 + 解压后的流）载入托管堆，
-    /// 一本杂志 PDF 可达数百 MB —— 这正是"首开不操作冲到 1.2GB、约 5s 回落"的主因。普通打开
-    /// 无批注文档时先做一次 1MB 分块滑动扫描（.NET SIMD IndexOf，一本杂志 &lt;1s、额外内存 ~1MB），
-    /// 未命中直接返回空列表，首开尖峰彻底消除。
-    ///
-    /// 加密文档无法预检（内容已加密、键名不可见）→ 保守走完整解析（加密文档通常即用户批注过的文件）。
-    /// </summary>
     private static bool FileContainsGlanceMarker(string pdfPath, string? password)
     {
-        if (!string.IsNullOrEmpty(password)) return true; // 加密：内容不可见，保守走完整解析
+        if (!string.IsNullOrEmpty(password)) return true;
         try
         {
             byte[] needle = System.Text.Encoding.ASCII.GetBytes("/GlanceAnno");
             int chunk = 1 << 20;              // 1MB/块
-            int overlap = needle.Length - 1;  // 跨块重叠长度，防标记被切成两半漏检
+            int overlap = needle.Length - 1;
             byte[] buf = new byte[chunk + overlap];
             using var fs = new FileStream(pdfPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             int carry = 0;
@@ -233,11 +205,7 @@ public class PdfExportService
         catch { return true; } // 读失败：保守走完整解析，不吞批注
     }
 
-    /// <summary>
-    /// 从 PDF 文件读回 Glance 写入的真实 /Ink 注解对象（带 /GlanceAnno 标记），
-    /// 还原为 SavedAnnotation 列表（坐标经 MapPointFromPhysical 逆变换回叠加层逻辑页坐标，
-    /// 与写入严格互逆 → 显示的笔迹逐点一致）。文件即唯一真相源，无需任何 JSON/副本。
-    /// </summary>
+    /// <summary>从 PDF 文件读回 Glance 写入的真实 /Ink 注解对象（带 /GlanceAnno 标记）， 还原为 SavedAnnotation 列表（坐标经 MapPointFromPhysical 逆变换回叠加层逻辑页坐标， 与写入严格互逆 → 显示的笔迹逐点一致）。</summary>
     public static List<SavedAnnotation> ReadGlanceInkAnnotations(string pdfPath, string? password)
     {
         var result = new List<SavedAnnotation>();
@@ -279,15 +247,12 @@ public class PdfExportService
                         try
                         {
                             bool isLegacy = a.Elements.ContainsKey("/GlanceAnno") && !a.Elements.ContainsKey("/GlanceAnnoV2");
-                            // V2（新写入，坐标基于 MediaBox 计算） 或 /GlanceAnno（兼容旧）
                             if (!isLegacy && !a.Elements.ContainsKey("/GlanceAnnoV2")) continue;
                             if (a.Elements.GetName("/Subtype") != "/Ink") continue;
                             if (a.Elements["/InkList"] is not PdfArray inkList || inkList.Elements.Count == 0) continue;
                             if (inkList.Elements[0] is not PdfArray stroke || stroke.Elements.Count < 2) continue;
 
                             // 遗留笔迹迁移：pre-fix 版本写入时 page.Width/Height.Point 返回【MediaBox 未旋转尺寸】
-                            // (mbW, mbH)，与读回时不一致 → 坐标错位。遗留逆变换：用 MediaBox 原尺寸
-                            // (mbW, mbH) 直接还原（不交换），与旧写时 ToPhys 的参数严格互逆。
                             double useWc = Wc, useHc = Hc;
                             if (isLegacy)
                             {
@@ -358,10 +323,7 @@ public class PdfExportService
         return 3.5;
     }
 
-    /// <summary>
-    /// PdfSharp 读回数值时：整数形态为 PdfInteger(Value:Int32)、小数形态为 PdfReal(Value:double)。
-    /// 统一取 double；元素缺失/非法返回 NaN 由调用方过滤。
-    /// </summary>
+    /// <summary>PdfSharp 读回数值时：整数形态为 PdfInteger(Value:Int32)、小数形态为 PdfReal(Value:double)。 统一取 double；元素缺失/非法返回 NaN 由调用方过滤。</summary>
     private static double AsDouble(PdfItem? item)
     {
         switch (item)
@@ -372,10 +334,7 @@ public class PdfExportService
         }
     }
 
-    /// <summary>
-    /// 把覆盖层"逻辑页坐标"(未旋转显示帧)映射到 PDF 物理页坐标(未旋转原生空间)。
-    /// 与旧 XGraphics 烘焙方案完全一致，保证新旧保存的笔迹在页面上的位置逐点相同。
-    /// </summary>
+    /// <summary>把覆盖层"逻辑页坐标"(未旋转显示帧)映射到 PDF 物理页坐标(未旋转原生空间)。 与旧 XGraphics 烘焙方案完全一致，保证新旧保存的笔迹在页面上的位置逐点相同。</summary>
     private static (double x, double y) MapPointToPhysical(
         double x_pt_ui, double y_pt_ui,
         int rotation,
@@ -383,9 +342,7 @@ public class PdfExportService
         double cropXOffset, double cropYOffset)
     {
         // ⚠ PDF 物理坐标：原点 = 页左下角，Y 轴向上；
-        //   UI 逻辑坐标：原点 = 显示帧左上角，Y 轴向下。
         //   除了旋转映射，必须额外做一次 Y 轴翻转。以下每个分支均已合并翻转，
-        //   推导参考 dev-docs。
         double x_cropped, y_cropped;
         switch (rotation)
         {
@@ -401,7 +358,7 @@ public class PdfExportService
                 x_cropped = Wc - y_pt_ui;
                 y_cropped = Hc - x_pt_ui;
                 break;
-            default: // 0
+            default:
                 x_cropped = x_pt_ui;
                 y_cropped = Hc - y_pt_ui;
                 break;
@@ -409,7 +366,6 @@ public class PdfExportService
         return (x_cropped + cropXOffset, y_cropped + cropYOffset);
     }
 
-    /// <summary>MapPointToPhysical 的逆变换：物理页坐标 → 覆盖层逻辑页坐标。</summary>
     private static (double x, double y) MapPointFromPhysical(
         double px, double py,
         int rotation,
@@ -433,7 +389,7 @@ public class PdfExportService
                 x = Hc - y_c;
                 y = Wc - x_c;
                 break;
-            default: // 0
+            default:
                 x = x_c;
                 y = Hc - y_c;
                 break;
@@ -441,14 +397,13 @@ public class PdfExportService
         return (x, y);
     }
 
-    /// <summary>把 #RRGGBB / #AARRGGBB 解析为 0..1 的 (r,g,b)。</summary>
     private static (double r, double g, double b) ParseColorRgb(string hex)
     {
         if (string.IsNullOrEmpty(hex)) return (1.0, 1.0, 0.0);
         try
         {
             string h = hex.Replace("#", "");
-            if (h.Length == 8) h = h.Substring(2); // 丢弃 alpha
+            if (h.Length == 8) h = h.Substring(2);
             if (h.Length == 6)
             {
                 byte r = Convert.ToByte(h.Substring(0, 2), 16);
@@ -458,6 +413,6 @@ public class PdfExportService
             }
         }
         catch { }
-        return (1.0, 1.0, 0.0); // 默认黄
+        return (1.0, 1.0, 0.0);
     }
 }

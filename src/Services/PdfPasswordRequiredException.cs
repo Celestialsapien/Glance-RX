@@ -19,11 +19,7 @@ using System;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// Thrown by <see cref="PdfRenderService.InitializeAsync"/> when the target PDF
-/// is encrypted and no (correct) password was supplied. Callers should prompt
-/// the user for a password and retry the call.
-/// </summary>
+/// <summary>Thrown by when the target PDF is encrypted and no (correct) password was supplied.</summary>
 public class PdfPasswordRequiredException : Exception
 {
     public PdfPasswordRequiredException()

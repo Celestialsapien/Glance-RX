@@ -24,17 +24,10 @@ using System.Text.Json.Serialization;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// 白板节点。字段名对齐 jsoncanvas 1.0（camelCase），坐标是【页局部未旋转 PDF 点】，
-/// 即与画笔标注同一坐标空间。所属页由扩展字段 <see cref="GlancePage"/> 标记。
-/// </summary>
+/// <summary>白板节点。字段名对齐 jsoncanvas 1.0（camelCase），坐标是【页局部未旋转 PDF 点】， 即与画笔标注同一坐标空间。所属页由扩展字段 标记。</summary>
 public sealed class CanvasNode
 {
-    /// <summary>新建卡片的默认尺寸（页局部 PDF 点）：高约「2 行文字」，对齐 Obsidian 新建卡片的观感
-    /// （行高见 GpuPageView.CanvasLineHeight = 字号 × 1.35 ≈ 16.2，故 2 行标称 ≈ 32.4）。
-    /// ⚠ 不能取 32：32 &lt; 32.4，两行恰好临界，输入到第二行的当帧内容高会越过可视高、滚动条闪一帧，
-    /// 落定后才又塞回去（用户报告）。这里留出约 3.6 的余量取 36，使两行有真实富余、不再临界。
-    /// 视图侧（双击落点按中心对齐）与模型侧（建节点）共用同一常量，避免两处硬编码漂移。</summary>
+    /// <summary>新建卡片的默认尺寸（页局部 PDF 点）：高约「2 行文字」，对齐 Obsidian 新建卡片的观感 （行高见 GpuPageView.CanvasLineHeight = 字号 × 1.35 ≈ 16.2，故 2 行标称 ≈ 32.4）。</summary>
     public const double DefaultWidth = 180;
     public const double DefaultHeight = 36;
 
@@ -66,17 +59,13 @@ public sealed class CanvasEdge
     [JsonPropertyName("label")] public string? Label { get; set; }
 }
 
-/// <summary>一份白板文档（对应单个 &lt;pdf&gt;.canvas 文件）。</summary>
 public sealed class CanvasDoc
 {
     [JsonPropertyName("nodes")] public List<CanvasNode> Nodes { get; set; } = new();
     [JsonPropertyName("edges")] public List<CanvasEdge> Edges { get; set; } = new();
 }
 
-/// <summary>
-/// 白板数据的磁盘存取。主路径与 PDF 同目录（&lt;pdf&gt;.canvas，便于与 Obsidian 互操作），
-/// 目录只读/无权限时回退到 GlanceData/Canvases 下（便携版约束：绝不写 C 盘 AppData）。
-/// </summary>
+/// <summary>白板数据的磁盘存取。主路径与 PDF 同目录（&lt;pdf&gt;.canvas，便于与 Obsidian 互操作）， 目录只读/无权限时回退到 GlanceData/Canvases 下（便携版约束：绝不写 C 盘 AppData）。</summary>
 public static class CanvasStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -86,7 +75,6 @@ public static class CanvasStore
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    /// <summary>主路径：与 PDF 同目录、同名的 .canvas。</summary>
     public static string GetPrimaryPath(string pdfPath) => Path.ChangeExtension(pdfPath, ".canvas");
 
     /// <summary>回退路径：GlanceData/Canvases 下按完整路径散列命名，避免同名 PDF 相撞。</summary>

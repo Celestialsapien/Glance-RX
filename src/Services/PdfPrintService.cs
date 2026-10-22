@@ -37,43 +37,9 @@ using Microsoft.Graphics.Canvas.Geometry;
 
 namespace GlanceRX.Services;
 
-/// <summary>
 /// WPS-style printing for GlanceRX.
-///
-/// Shows the system print dialog (printer / copies / orientation / duplex / paper /
-/// color) via the WinUI3 PrintManager, then prints the requested PDF pages at high
-/// resolution. Freehand (Pen) annotations are baked into each page using the exact
-/// same transform the on-screen GPU viewer uses (Scale(DPI/72) · Rotation(page
-/// rotation, center)), so the printed ink matches what the user sees.
-///
-/// WinUI3 printing model notes (different from UWP):
-///  - PrintDocument lives in Microsoft.UI.Xaml.Printing.
-///  - The AddPages event fires ONCE; inside it we loop over the pages we want
-///    and call printDocument.AddPage(visual) for each, then AddPagesComplete().
-///
-/// Glance-specific print options (composed by the app, not by the system):
-///  - "GlancePages" (Pages): All / Current page / Custom range. The system "Current
-///    page" option resolves to page 1 because the framework does not know which page
-///    the user is viewing inside Glance, so we track it ourselves and expose our own
-///    selector. The custom range is a free-text "1-3, 5" box.
-///  - "GlanceNUp" (Pages per sheet): 1 / 2 / 4 / 6 / 9 / 16 logical pages laid out on
-///    a single physical sheet. The system NUp option cannot be read back by the app
-///    (it is not exposed in PrintTaskOptionDetails and does not raise OptionChanged),
-///    so we provide our own list option and composite the physical sheet ourselves —
-///    this also makes the preview reflect the layout live.
-///  - "GlancePrintScale" (Print scaling): fit / fill / 100% / 50/75/125/150/200% /
-///    custom %, controlling how each logical page is sized on the sheet.
-///  - Duplex and Color mode are presented by the system print panel; we read Color
-///    mode back and apply it to the preview (and to the printed bitmap) so the
-///    preview matches the output. Duplex is applied by the driver automatically.
-///
-/// Concurrency: the print events run on the UI thread. The native page render is
-/// kicked off inside Task.Run (no UI SynchronizationContext) and awaited with
+/// a single physical sheet. The system NUp option cannot be read back by the app
 /// GetResult() — this avoids the await-on-UI-thread deadlock, because the
-/// native FFI call is offloaded to the thread pool via Task.Run.
-/// The bitmap is written into a WriteableBitmap.PixelBuffer (synchronous), so no
-/// async SetBitmapAsync is needed either.
-/// </summary>
 public sealed class PdfPrintService : IDisposable
 {
     private readonly IntPtr _hwnd;
@@ -89,14 +55,12 @@ public sealed class PdfPrintService : IDisposable
     private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcherQueue;
 
     // Resolved list of 0-based document page indices to print, cached from the
-    // page-range selection so the preview and the final print stay in sync.
     private List<uint>? _pagesToPrint;
 
-    // Glance-self-composed print options.
     private int _nUp = 1;
     private string _printScaleMode = "fit"; // "fit" | "fill" | "50".."200" | "custom"
     private int _customScalePercent = 100;
-    private string _pageRangeMode = "all";   // "all" | "current" | "custom"
+    private string _pageRangeMode = "all";
     private string _customPageRange = "1";
     private string _colorMode = "color";      // "color" | "grayscale" | "monochrome"
     private PrintPageDescription? _pageDescription;
@@ -106,7 +70,6 @@ public sealed class PdfPrintService : IDisposable
     private const int MaxLongEdge = 4000;
 
     // A4 @ 96 DPI, used as the preview's physical page size when the print
-    // subsystem has not yet reported a page description.
     private const double DefaultPageWidthDip = 793.7;
     private const double DefaultPageHeightDip = 1122.5;
 
@@ -126,11 +89,7 @@ public sealed class PdfPrintService : IDisposable
         _currentPage = currentPage;
     }
 
-    /// <summary>
-    /// Show the system print dialog and print. Returns false only when the print
-    /// UI could not be shown (e.g. no printer installed); a user cancel is treated
-    /// as success.
-    /// </summary>
+    /// <summary>Show the system print dialog and print. Returns false only when the print UI could not be shown (e.g. no printer installed);</summary>
     public async Task<bool> ShowPrintDialogAsync()
     {
         if (!PrintManager.IsSupported())
@@ -138,8 +97,6 @@ public sealed class PdfPrintService : IDisposable
 
         // 根因修复（打印崩溃）：PrintManager.IsSupported() 仅表示系统支持打印 API，不表示已安装打印机。
         // 无打印机时点打印仍会触发 PrintTaskRequested，并在 deferral.Complete() 抛 COMException 使进程崩溃。
-        // 故在打开打印 UI 前主动检测已安装打印机；一台都没有则直接返回 false，由 Print_Click 弹出
-        // 「未找到打印机」提示（NoPrinterTitle/NoPrinterContent），根本不进入会崩的路径。
         if (!HasAnyPrinter())
             return false;
 
@@ -151,9 +108,6 @@ public sealed class PdfPrintService : IDisposable
         _printTaskRequested = false;
 
         // Create the PrintDocument on the UI thread up front. The PrintTaskSourceRequested
-        // callback may run off the UI thread, and WinUI3's PrintDocument / its DocumentSource
-        // must be created and accessed on the UI thread — otherwise the source never gets
-        // set and the print subsystem abandons the job (the dialog hangs on "loading preview").
         try
         {
             EnsurePrintDocument();
@@ -168,7 +122,6 @@ public sealed class PdfPrintService : IDisposable
             await PrintManagerInterop.ShowPrintUIForWindowAsync(_hwnd);
 
             // If the user closed the dialog without printing, PrintTaskRequested
-            // never fires — treat as a benign cancel.
             if (!_printTaskRequested)
                 return true;
 
@@ -186,18 +139,9 @@ public sealed class PdfPrintService : IDisposable
         }
     }
 
-    /// <summary>
+    /// 根因修复（打印崩溃）：PrintManager.IsSupported() 不表示已安装打印机。
     /// 根因修复（打印崩溃）：PrintManager.IsSupported() 不表示已安装打印机。此方法读取后台打印程序的
-    /// 打印机注册表项（HKLM\SYSTEM\CurrentControlSet\Control\Print\Printers），统计已安装打印机数量
-    /// （含虚拟打印机如 Microsoft Print to PDF / OneNote / WPS PDF）。一台都没有则返回 false，使调用方
     /// 走「未找到打印机」提示分支，避免进入 PrintTaskRequested 后在 deferral.Complete() 抛 COMException 崩溃。
-    ///
-    /// 不用 Windows.Devices.Enumeration.DeviceInformation 枚举：FindAllAsync 默认只返回「当前在位(present)」
-    /// 的设备，而打印机是后台打印程序注册的软件设备，不在 PnP 在位集合里，按安装类 GUID 查询会得到 0
-    /// （曾因此在有打印机的机器上误报「未找到打印机」）。注册表项才是"已安装打印机"的权威来源。
-    ///
-    /// 读取失败（如权限受限）时失败开放，返回 true 仍尝试打开打印 UI，避免误伤正常机器。
-    /// </summary>
     private static bool HasAnyPrinter()
     {
         try
@@ -212,10 +156,7 @@ public sealed class PdfPrintService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Create the PrintDocument and wire its events on the UI thread. Must be
-    /// called before the print subsystem requests the source.
-    /// </summary>
+    /// <summary>Create the PrintDocument and wire its events on the UI thread. Must be called before the print subsystem requests the source.</summary>
     private void EnsurePrintDocument()
     {
         if (_printDocument == null)
@@ -241,11 +182,9 @@ public sealed class PdfPrintService : IDisposable
             task.Completed += OnPrintTaskCompleted;
 
             // Initial color mode (read from the system Color option so the first
-            // preview already matches the selected mode).
             try { _colorMode = NormalizeColorMode(task.Options.ColorMode.ToString()); }
             catch { _colorMode = "color"; }
 
-            // Initialize the composed-option state.
             _nUp = 1;
             _printScaleMode = "fit";
             _customScalePercent = 100;
@@ -253,12 +192,9 @@ public sealed class PdfPrintService : IDisposable
             _customPageRange = "1";
 
             // Add Glance's own composed options to the print panel. These drive the
-            // live preview (N-Up layout + scaling + page range) and are read back in
-            // OptionChanged.
             var details = PrintTaskOptionDetails.GetFromPrintTaskOptions(task.Options);
             details.OptionChanged += OnPrintOptionChanged;
 
-            // Pages: All / Current page / Custom range.
             var pages = details.CreateItemListOption("GlancePages", LocalizationService.Get("PrintPages"));
             pages.AddItem("all", LocalizationService.Get("PrintPagesAll"));
             pages.AddItem("current", LocalizationService.Get("PrintPagesCurrent"));
@@ -267,12 +203,10 @@ public sealed class PdfPrintService : IDisposable
             details.DisplayedOptions.Add("GlancePages");
 
             // Custom page range — not shown initially. It is dynamically inserted right
-            // after "GlancePages" only when the user selects "custom" range.
             var range = details.CreateTextOption("GlancePageRange", LocalizationService.Get("PrintPageRange"));
             range.TrySetValue("1");
             range.State = PrintOptionStates.Enabled;
 
-            // Pages-per-sheet (N-Up).
             var nup = details.CreateItemListOption("GlanceNUp", LocalizationService.Get("PrintNUp"));
             nup.AddItem("1", "1");
             nup.AddItem("2", "2");
@@ -283,7 +217,6 @@ public sealed class PdfPrintService : IDisposable
             nup.State = PrintOptionStates.Enabled;
             details.DisplayedOptions.Add("GlanceNUp");
 
-            // Print scaling.
             var scale = details.CreateItemListOption("GlancePrintScale", LocalizationService.Get("PrintScale"));
             scale.AddItem("fit", LocalizationService.Get("PrintScaleFit"));
             scale.AddItem("fill", LocalizationService.Get("PrintScaleFill"));
@@ -295,32 +228,27 @@ public sealed class PdfPrintService : IDisposable
             scale.AddItem("200", "200%");
             scale.AddItem("custom", LocalizationService.Get("PrintScaleCustom"));
             // Keep the panel's selected value in sync with our internal default so the
-            // preview matches what the dropdown shows ("fit" → scaled to the paper).
             scale.TrySetValue("fit");
             scale.State = PrintOptionStates.Enabled;
             details.DisplayedOptions.Add("GlancePrintScale");
 
             // Custom scale percentage — not shown initially. It is dynamically inserted
-            // right after "GlancePrintScale" only when the user selects "custom" scale.
             var custom = details.CreateTextOption("GlanceCustomScale", LocalizationService.Get("PrintScaleCustomLabel"));
             custom.TrySetValue("100");
             custom.State = PrintOptionStates.Enabled;
 
             // Duplex (single/double-sided) — driven by the system option, applied by
-            // the driver automatically; we only surface it in the panel.
             details.DisplayedOptions.Add(StandardPrintTaskOptions.Duplex);
         }
         catch
         {
             // 仅当任务未创建成功时才把结果置 false（任务已创建则交由 OnPrintTaskCompleted 判定成败，
-            // 避免配置阶段的偶发异常误报失败）。同时也避免调用方 await _tcs.Task 永久挂起。
             if (!taskCreated)
                 _tcs?.TrySetResult(false);
         }
         finally
         {
             // 根因修复（打印崩溃）：仅当 PrintTask 创建成功才完成 deferral。无打印机 / 创建失败时
-            // CreatePrintTask 会抛异常（被上方 catch 吞掉），此时不存在可完成的任务；若仍调用
             // Complete() 会抛 COMException 使进程崩溃。任务已创建则正常完成（即使后续配置抛错也不影响）。
             if (taskCreated)
                 deferral.Complete();
@@ -436,7 +364,6 @@ public sealed class PdfPrintService : IDisposable
         }
 
         // The callback may run on a non-UI thread, but DocumentSource must be accessed
-        // on the UI thread. Keep the deferral open until we have posted back and set it.
         if (_dispatcherQueue == null || _dispatcherQueue.HasThreadAccess)
             SetSource();
         else
@@ -452,7 +379,6 @@ public sealed class PdfPrintService : IDisposable
             try { _pageDescription = options.GetPageDescription(1); }
             catch { _pageDescription = null; }
 
-            // Physical sheet count = logical pages / N-Up, rounded up.
             int logical = _pagesToPrint.Count;
             int physical = (_nUp > 1) ? (int)Math.Ceiling((double)logical / _nUp) : logical;
             if (physical < 1) physical = 1;
@@ -504,15 +430,10 @@ public sealed class PdfPrintService : IDisposable
 
     private void OnPrintTaskCompleted(PrintTask sender, PrintTaskCompletedEventArgs e)
     {
-        // Failed = real error; Succeeded / Canceled = not an error for our purposes.
         _tcs?.TrySetResult(e.Completion != PrintTaskCompletion.Failed);
     }
 
-    /// <summary>
-    /// Resolve the Glance page-range selection into 0-based document page indices,
-    /// clamped to the document. "All" → every page; "Current" → the page currently
-    /// shown in the viewer; "Custom" → parsed from free text ("1-3, 5").
-    /// </summary>
+    /// <summary>Resolve the Glance page-range selection into 0-based document page indices, clamped to the document. "All" → every page;</summary>
     private List<uint> GetPagesToPrint()
     {
         var result = new List<uint>();
@@ -572,11 +493,7 @@ public sealed class PdfPrintService : IDisposable
         return result;
     }
 
-    /// <summary>
-    /// Compose one physical sheet. With N-Up &lt;= 1 the sheet holds a single logical
-    /// page; otherwise logical pages are tiled into a cols×rows grid that fills the
-    /// physical paper. Preview uses 96 DPI, the final print uses 300 DPI.
-    /// </summary>
+    /// <summary>Compose one physical sheet. With N-Up &lt;= 1 the sheet holds a single logical page;</summary>
     private UIElement CreateSheetVisual(int sheetIndex, double dpi)
     {
         double paperW, paperH;
@@ -636,12 +553,7 @@ public sealed class PdfPrintService : IDisposable
         return sheet;
     }
 
-    /// <summary>
-    /// Render one logical page into a cell-sized element, honoring the active
-    /// scaling mode (fit / fill / percentage / custom %). The page is rendered at
-    /// exactly its displayed DIP size and shown 1:1 (centered), so "fit"/percentage
-    /// leave white borders and "fill"/enlarged pages overflow (clipped by the cell).
-    /// </summary>
+    /// Render one logical page into a cell-sized element, honoring the active scaling mode (fit / fill / pe…
     private UIElement MakePageImage(uint pageIndex, double cellW, double cellH, double dpi)
     {
         var page = _pages[(int)pageIndex];
@@ -657,13 +569,11 @@ public sealed class PdfPrintService : IDisposable
         double pageAspect = pageDipW / pageDipH;
         if (fill)
         {
-            // Cover the cell, preserving aspect, overflow clipped by the host.
             if (pageAspect > cellAspect) { dispH = cellH; dispW = cellH * pageAspect; }
             else { dispW = cellW; dispH = cellW / pageAspect; }
         }
         else if (_printScaleMode == "fit")
         {
-            // Fit inside the cell, preserving aspect, white borders around.
             if (pageAspect > cellAspect) { dispW = cellW; dispH = cellW / pageAspect; }
             else { dispH = cellH; dispW = cellH * pageAspect; }
         }
@@ -678,7 +588,6 @@ public sealed class PdfPrintService : IDisposable
         }
 
         // Render at exactly the displayed DIP size (capped) so the Image can show it
-        // 1:1 — no second stretch, so borders and overflow are truthful.
         double scale = dpi / 96.0;
         uint pw = (uint)Math.Max(1, Math.Round(dispW * scale));
         uint ph = (uint)Math.Max(1, Math.Round(dispH * scale));
@@ -711,11 +620,7 @@ public sealed class PdfPrintService : IDisposable
         return host;
     }
 
-    /// <summary>
-    /// Render a single page (with annotations baked in) to a WriteableBitmap at the
-    /// requested pixel size, applying the active color mode (grayscale / monochrome).
-    /// Runs the native render on a pool thread to avoid a UI-thread deadlock.
-    /// </summary>
+    /// <summary>Render a single page (with annotations baked in) to a WriteableBitmap at the requested pixel size, applying the active color mode (grayscale…</summary>
     private WriteableBitmap RenderPageBitmap(uint pageIndex, uint pw, uint ph)
     {
         var (pixels, w, h) = Task.Run(
@@ -723,7 +628,6 @@ public sealed class PdfPrintService : IDisposable
             .GetAwaiter().GetResult();
 
         // Bake freehand annotations onto the rendered page (same transform as the
-        // on-screen viewer). Falls back to the base page if Win2D baking fails.
         var page = _pages[(int)pageIndex];
         if (page.Annotations != null && page.Annotations.Count > 0)
         {
@@ -734,7 +638,6 @@ public sealed class PdfPrintService : IDisposable
             catch { }
         }
 
-        // Apply grayscale / monochrome so the preview matches the printed output.
         ApplyColorMode(pixels, _colorMode);
 
         var wb = new WriteableBitmap(w, h);
@@ -746,9 +649,7 @@ public sealed class PdfPrintService : IDisposable
         return wb;
     }
 
-    /// <summary>
-    /// Desaturate the BGRA page buffer in place for grayscale / monochrome printing.
-    /// </summary>
+    /// <summary>Desaturate the BGRA page buffer in place for grayscale / monochrome printing.</summary>
     private static void ApplyColorMode(byte[] pixels, string mode)
     {
         if (mode != "grayscale" && mode != "monochrome") return;
@@ -767,19 +668,13 @@ public sealed class PdfPrintService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Composite the base BGRA page with the page's Pen annotations on an offscreen
-    /// Win2D canvas, returning a fresh BGRA buffer. The transform mirrors
-    /// GpuPageView.DrawAnnotations exactly (page-point space → pixels).
-    /// </summary>
+    /// <summary>Composite the base BGRA page with the page's Pen annotations on an offscreen Win2D canvas, returning a fresh BGRA buffer.</summary>
     private static byte[] BakeAnnotations(byte[] pixels, int w, int h, PdfPageViewModel page)
     {
         var device = CanvasDevice.GetSharedDevice();
         float dpi = (float)(w / Math.Max(page.PageWidth, 1.0) * 72.0);
         using var target = new CanvasRenderTarget(device, w, h, dpi);
         // Load the rendered BGRA base page directly (CanvasRenderTarget defaults
-        // to B8G8R8A8UIntNormalized, matching our buffer). This avoids the
-        // CreateFromBytes overload pitfalls.
         target.SetPixelBytes(pixels);
         using (var ds = target.CreateDrawingSession())
         {
@@ -835,10 +730,7 @@ public sealed class PdfPrintService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Normalize a PrintColorMode value (enum name or string) to our internal tag:
-    /// "monochrome" / "grayscale" / "color". Tolerant of naming variations.
-    /// </summary>
+    /// <summary>Normalize a PrintColorMode value (enum name or string) to our internal tag: "monochrome" / "grayscale" / "color".</summary>
     private static string NormalizeColorMode(string raw)
     {
         if (string.IsNullOrEmpty(raw)) return "color";
@@ -848,11 +740,7 @@ public sealed class PdfPrintService : IDisposable
         return "color";
     }
 
-    /// <summary>
-    /// Insert a custom option into the print panel immediately after a parent option.
-    /// Used to show dependent text boxes (custom page range / custom scale) only when
-    /// the parent ItemList is set to "custom".
-    /// </summary>
+    /// <summary>Insert a custom option into the print panel immediately after a parent option.</summary>
     private static void ShowOptionAfter(PrintTaskOptionDetails details, string childId, string parentId)
     {
         if (details.DisplayedOptions.Contains(childId))

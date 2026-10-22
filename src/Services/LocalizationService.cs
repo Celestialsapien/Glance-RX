@@ -28,7 +28,6 @@ namespace GlanceRX.Services
         {
             try
             {
-                // Try to get language from Windows user profile preferences first
                 var languages = Windows.System.UserProfile.GlobalizationPreferences.Languages;
                 if (languages != null && languages.Count > 0)
                 {
@@ -49,7 +48,6 @@ namespace GlanceRX.Services
 
             try
             {
-                // Fallback to CultureInfo
                 var cultureName = System.Globalization.CultureInfo.CurrentUICulture.Name;
                 if (cultureName.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
                 {
@@ -66,7 +64,6 @@ namespace GlanceRX.Services
         public static bool IsSpanish => CurrentLanguage == "es";
         public static bool IsChinese => CurrentLanguage == "zh";
 
-        // Dictionary of translations
         private static readonly Dictionary<string, Dictionary<string, string>> Translations = new()
         {
             ["es"] = new()
@@ -465,7 +462,6 @@ namespace GlanceRX.Services
             {
                 return val;
             }
-            // Fallback to English if key not found
             if (Translations["en"].TryGetValue(key, out string? fallbackVal) && fallbackVal != null)
             {
                 return fallbackVal;

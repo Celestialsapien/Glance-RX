@@ -25,54 +25,39 @@ using Windows.System;
 
 namespace GlanceRX;
 
-/// <summary>
 /// 自绘单行文本域（见 SelfDrawnTextBox.xaml 顶部的设计说明）。
-///
-/// 对外契约：
-///   · <see cref="Text"/>：双向绑定文本（程序写入即刷新可见层并把光标置末）。
-///   · <see cref="Submitted"/>：回车提交。 <see cref="Cancelled"/>：Esc 取消。
-///   · <see cref="CommitRequested"/>：宿主失焦（点域外）时请求提交。
-/// </summary>
 public sealed partial class SelfDrawnTextBox : UserControl
 {
-    /// <summary>回车提交。</summary>
     public event RoutedEventHandler? Submitted;
 
-    /// <summary>Esc 取消。</summary>
     public event RoutedEventHandler? Cancelled;
 
     /// <summary>宿主失焦（点到域外）时请求提交；调用方通常按"仍在编辑态"守卫后再提交。</summary>
     public event RoutedEventHandler? CommitRequested;
 
-    /// <summary>宿主获得焦点（进入编辑）。</summary>
     public event EventHandler? EditorGotFocus;
 
-    /// <summary>宿主失去焦点（离开编辑）。</summary>
     public event EventHandler? EditorLostFocus;
 
-    /// <summary>宿主当前是否持有键盘焦点（取代原生 TextBox 的 FocusState —— 焦点其实落在本控件的隐藏宿主上）。</summary>
     public bool HasEditorFocus => Host.FocusState != FocusState.Unfocused;
 
-    /// <summary>本次焦点请求是否由本控件自身发起。调用方在 GettingFocus 里可据此区分
-    /// "用户点进输入框"与"框架擅自把焦点重定位到输入框"（后者需拦截）。</summary>
+    /// <summary>本次焦点请求是否由本控件自身发起。调用方在 GettingFocus 里可据此区分 "用户点进输入框"与"框架擅自把焦点重定位到输入框"（后者需拦截）。</summary>
     public bool IsRequestingFocus { get; private set; }
 
-    /// <summary>给定元素是否就是本控件的隐藏输入宿主（供调用方在 GettingFocus 里识别）。</summary>
     public bool OwnsFocusedElement(object? element) => ReferenceEquals(element, Host);
 
-    // 逐前缀宽度表：_adv[i] = 文本前 i 个 UTF-16 码元的渲染宽度（_adv[0]=0）。光标/选区 x 全由它求值。
     private double[] _adv = new double[1];
     private double _lineHeight = 16;   // 单行行高（由度量块实测，随字号/文本缩放自适应）
     private double _scrollX;           // 横向"滚动"偏移（保证光标可见，单行不自带滚动条故自行平移）
     private double _anchorX;           // 文本块左端偏移：居中模式下"文本比视口窄"时居中；溢出时为 0
-    private bool _dragging;            // 拖选进行中
-    private int _dragAnchor;           // 拖选锚点码元索引
+    private bool _dragging;
+    private int _dragAnchor;
     private int _caretIndex;           // 插入光标的"活跃端"码元索引：拖选时跟随鼠标（支持反向拖选），其余时刻=选区末端
-    private bool _ibeamInstalled;      // 系统光标资源是否已被替换为工字
+    private bool _ibeamInstalled;
     private bool _pointerInside;       // 指针据实是否仍在控件范围内（几何判定，不唯事件 —— 以防被"假 PointerExited"骗）
-    private DispatcherTimer? _blink;   // 插入光标闪烁
+    private DispatcherTimer? _blink;
     private long _lastPressMs;         // 上一次按下时刻（自行判双击，避开 PointerPressed Handled 后 Tapped 不触发）
-    private int _lastPressIndex = -1;  // 上一次按下的落点索引
+    private int _lastPressIndex = -1;
 
     public SelfDrawnTextBox()
     {
@@ -84,12 +69,10 @@ public sealed partial class SelfDrawnTextBox : UserControl
             RebuildAdvances();
             UpdateCaretAndSelection();
             // 受 AutoFocusOnShow 门控：否则开机时工具栏项（AutoFocusOnShow=False）会在 Loaded 里无条件抢焦点，
-            // 造成"从打开软件起焦点就一直困在输入框里、只有点工具栏空白处才放得掉"。
             if (AutoFocusOnShow && Visibility == Visibility.Visible) FocusEditor();
         };
         Unloaded += (_, _) => { RestoreCursor(); StopBlink(); };
         // 可见性翻转 ⇒ 进入编辑落焦点（延迟一拍等布局落定）；折叠时立即收尾（否则指针还停在原地、
-        // PointerExited 不会来，系统光标会残留为工字，全域被污染）
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
             if (Visibility == Visibility.Visible)
@@ -102,7 +85,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         // 字号可能由使用方（模板）在构造之后才设定，同步刷新行高
         RegisterPropertyChangedCallback(FontSizeProperty, (_, _) => { UpdateMetrics(); UpdateCaretAndSelection(); });
         // 「禁用→启用」剥夺焦点结束后重新启用：禁用期间控件脱离命中测试，框架会抛【假】PointerExited；
-        // 若指针其实仍在域内，此处确保系统替换（工字）在位，避免鼠标从工字闪回默认箭头。
         RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) =>
         {
             if (IsEnabled && _pointerInside) InstallIbeam();
@@ -111,12 +93,9 @@ public sealed partial class SelfDrawnTextBox : UserControl
         RebuildAdvances();
     }
 
-    // ============================== 双向绑定 ==============================
-
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(
         nameof(Text), typeof(string), typeof(SelfDrawnTextBox), new PropertyMetadata("", OnTextPropertyChanged));
 
-    /// <summary>文本（双向绑定；程序写入即刷新可见层并把光标置末）。</summary>
     public string Text
     {
         get => (string)(GetValue(TextProperty) ?? "");
@@ -132,7 +111,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         nameof(ContentAlignment), typeof(TextAlignment), typeof(SelfDrawnTextBox),
         new PropertyMetadata(TextAlignment.Left, OnLayoutPropertyChanged));
 
-    /// <summary>文本水平对齐：Left=左对齐（贴光标滚动）；Center=整块居中（文本宽于视口后自动转为左对齐滚动）。</summary>
     public TextAlignment ContentAlignment
     {
         get => (TextAlignment)(GetValue(ContentAlignmentProperty) ?? TextAlignment.Left);
@@ -153,7 +131,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
     public static readonly DependencyProperty AutoFocusOnShowProperty = DependencyProperty.Register(
         nameof(AutoFocusOnShow), typeof(bool), typeof(SelfDrawnTextBox), new PropertyMetadata(true));
 
-    /// <summary>控件由折叠变可见时是否自动聚焦（书签编辑框=是；工具栏项因收纳会反复显隐，须设为否）。</summary>
     public bool AutoFocusOnShow
     {
         get => (bool)(GetValue(AutoFocusOnShowProperty) ?? true);
@@ -163,7 +140,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
     public static readonly DependencyProperty DigitsOnlyProperty = DependencyProperty.Register(
         nameof(DigitsOnly), typeof(bool), typeof(SelfDrawnTextBox), new PropertyMetadata(false, OnDigitsOnlyChanged));
 
-    /// <summary>仅允许数字 0-9（拦截拼音 / 中文 / 字母，含粘贴），供页码跳转框使用。</summary>
     public bool DigitsOnly
     {
         get => (bool)(GetValue(DigitsOnlyProperty) ?? false);
@@ -174,7 +150,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
     {
         if (d is SelfDrawnTextBox t && t.DigitsOnly)
         {
-            t.EnforceDigitsOnly();   // 开关打开时也要把既有非法内容清掉
+            t.EnforceDigitsOnly();
             t.RebuildAdvances();
             t.UpdateCaretAndSelection();
         }
@@ -197,9 +173,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         UpdateCaretAndSelection();
     }
 
-    // ============================== 度量 / 位置 ==============================
-
-    /// <summary>量出单行行高，并同步光标高度。用与可见字形同字体的度量块（含文本缩放）。</summary>
     private void UpdateMetrics()
     {
         MeasureTb.Text = "A";
@@ -208,11 +181,9 @@ public sealed partial class SelfDrawnTextBox : UserControl
         _lineHeight = h > 0 ? h : 16;
         Caret.Height = _lineHeight;
         // Canvas 的期望尺寸恒为 0 ⇒ 不会像 Grid 那样"按内容定高"，盒子高度会被隐藏宿主 TextBox 单方面撑高/压扁，
-        // 于是 Clip 高度与字形高度脱钩（字形下移被裁）。这里显式给出内容驱动的高度，恢复与 Grid 时代一致的盒子几何。
         TextArea.Height = _lineHeight;
     }
 
-    /// <summary>重建逐前缀宽度表并刷新可见层。</summary>
     private void RebuildAdvances()
     {
         string s = Host.Text ?? "";
@@ -228,7 +199,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         VisibleText.Text = s;
     }
 
-    /// <summary>索引 → x（域内坐标，未计横向偏移）。</summary>
     private double IndexToX(int idx)
     {
         if (idx <= 0) return 0;
@@ -236,7 +206,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         return _adv[idx];
     }
 
-    /// <summary>x（域内坐标）→ 最近码元边界索引。</summary>
     private int XToIndex(double x)
     {
         double target = x + _scrollX - _anchorX;
@@ -251,7 +220,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         return best;
     }
 
-    /// <summary>按宿主选区刷新：可见字形、插入光标位置、选区高亮、横向偏移（保证光标可见）。</summary>
     private void UpdateCaretAndSelection()
     {
         string s = Host.Text ?? "";
@@ -263,7 +231,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         // 右边界预留 1px 给光标自身（否则贴右时光标恰落在裁剪边上被裁掉）
         double view = Math.Max(1, TextArea.ActualWidth - 1);
 
-        // 保证光标可见：贴右越界则右移，贴左越界则左移，最后整体夹到 [0, 文本宽-视口宽]
         if (cx - _scrollX > view) _scrollX = cx - view;
         else if (cx - _scrollX < 0) _scrollX = cx;
         _scrollX = Math.Clamp(_scrollX, 0, Math.Max(0, total - view));
@@ -277,7 +244,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         Canvas.SetTop(VisibleText, top);
         Canvas.SetLeft(Caret, _anchorX + cx - _scrollX);
         Canvas.SetTop(Caret, top);
-        // 光标可见性每拍自愈（不依赖具体事件都到齐）：仅在"控件可见且宿主已聚焦"时显示
         Caret.Visibility = (Visibility == Visibility.Visible && Host.FocusState != FocusState.Unfocused)
             ? Visibility.Visible : Visibility.Collapsed;
 
@@ -315,12 +281,10 @@ public sealed partial class SelfDrawnTextBox : UserControl
         TextArea.Margin = new Thickness(4, 6, show ? 26 : 4, 6);
     }
 
-    // ============================== 宿主事件 ==============================
-
     private void Host_TextChanged(object sender, TextChangedEventArgs e)
     {
-        EnforceDigitsOnly();                       // 纯数字模式下剔除非法字符（含粘贴 / IME 上屏）
-        if (Text != Host.Text) Text = Host.Text;   // 同步回 DP（DP 回调见值相同即返回，无回环）
+        EnforceDigitsOnly();
+        if (Text != Host.Text) Text = Host.Text;
         RebuildAdvances();
         UpdateCaretAndSelection();
         UpdateClearButton();
@@ -332,7 +296,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
         if (!DigitsOnly) return;
         string raw = Host.Text ?? "";
         string filtered = FilterDigits(raw);
-        if (filtered.Length == raw.Length) return;   // 无非法字符
+        if (filtered.Length == raw.Length) return;
         int caret = Math.Clamp(Host.SelectionStart, 0, raw.Length);
         int kept = 0;
         for (int i = 0; i < caret; i++) if (IsDigit(raw[i])) kept++;
@@ -358,7 +322,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
 
     private void Host_SelectionChanged(object sender, RoutedEventArgs e)
     {
-        // 非拖选（键盘/程序改动）时活跃端取选区末端；拖选期间由 Root_PointerMoved 直接指派，切勿覆盖
         if (!_dragging) _caretIndex = Host.SelectionStart + Host.SelectionLength;
         UpdateCaretAndSelection();
     }
@@ -389,7 +352,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
     {
         if (e.Key == VirtualKey.Enter)
         {
-            if (Text != Host.Text) Text = Host.Text;   // 提交前把最新文本同步回 DP
+            if (Text != Host.Text) Text = Host.Text;
             Submitted?.Invoke(this, new RoutedEventArgs());
             e.Handled = true;
         }
@@ -399,8 +362,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
             e.Handled = true;
         }
     }
-
-    // ============================== 鼠标（全由本控件接管） ==============================
 
     private void Root_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
@@ -437,7 +398,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
     {
         var p = e.GetCurrentPoint(Root).Position;
         _pointerInside = IsWithin(p);         // 据实刷新"指针在域内"，供假 PointerExited 判定复用
-        UpdateCursorScope(p);                 // 域内为工字；落到「清空 ×」上还原箭头
+        UpdateCursorScope(p);
 
         if (!_dragging) return;
         int idx = XToIndex(p.X - TextAreaOffsetX());
@@ -470,10 +431,8 @@ public sealed partial class SelfDrawnTextBox : UserControl
     {
         if (_dragging) return;
         // ① 禁用窗口内的假退出：控件被「临时禁用再启用」（剥夺焦点）时脱离命中测试，框架抛 PointerExited，
-        //    但指针其实仍在域内 ⇒ 不还原（此时也不覆盖 _pointerInside），待重新启用由 IsEnabledProperty 回调确保工字在位。
         if (!IsEnabled) return;
         // ② 事件若在重新启用后才到：以"报点是否仍在域内"为准，仍在域内即视为假退出，维持工字；
-        //    确已离开域外才还原系统光标。（书签框按 Esc 会折叠控件，走 Visibility 分支还原箭头，不受此处影响。）
         _pointerInside = IsWithin(e.GetCurrentPoint(Root).Position);
         if (_pointerInside) return;
         RestoreCursor();
@@ -495,7 +454,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         UpdateClearButton();
     }
 
-    /// <summary>x 坐标基准：文本区相对本控件左上角的偏移（含边框与内边距）。</summary>
     private double TextAreaOffsetX() => TextArea.TransformToVisual(Root).TransformPoint(new Point(0, 0)).X;
 
     private void SelectWordAt(int idx)
@@ -513,33 +471,26 @@ public sealed partial class SelfDrawnTextBox : UserControl
 
     private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
-    // ============================== 焦点 / 光标 blink ==============================
-
-    /// <summary>把焦点交给宿主（本控件唯一的聚焦入口）。聚焦前立"自发起"标记，供调用方在
-    /// GettingFocus 里放行——否则调用方"只允许鼠标进框"的拦截会连本控件的编程聚焦一起挡掉。</summary>
+    /// <summary>把焦点交给宿主（本控件唯一的聚焦入口）。聚焦前立"自发起"标记，供调用方在 GettingFocus 里放行——否则调用方"只允许鼠标进框"的拦截会连本控件的编程聚焦一起挡掉。</summary>
     private void FocusHost()
     {
         IsRequestingFocus = true;
         if (!Host.Focus(FocusState.Programmatic)) IsRequestingFocus = false;
     }
 
-    /// <summary>把焦点交给宿主并把插入光标置末（进入编辑时的默认落点）。</summary>
     private void FocusEditor()
     {
         if (Visibility != Visibility.Visible) return;
         FocusHost();
-        // ⚠ 光标必须在这里【无条件】起表，不能只靠 Host_GotFocus：
+        // ⚠ 光标必须在这里【无条件】起表，不能只靠 Host_GotFocus。
         // 焦点若【已经在】宿主上（例如点 √/× 结束编辑时，按钮被调用方的 GettingFocus 拦截挡下、
-        // 焦点自始至终没离开宿主），Host.Focus() 是空操作 ⇒ GotFocus 不会来 ⇒ 光标常亮不闪
         // （10-17 实测）。反之"点别处失焦退出"时焦点真丢了，GotFocus 会来，所以那条路一直正常 ——
-        // 同一段代码两条表现，正是"把状态迁移挂在会漏的事件上"的典型症状。
-        // 无条件起表是安全的：OnBlinkTick 自带自愈（控件不可见 / 宿主未聚焦 ⇒ 下一拍停表并收起光标）。
         StartBlink();
         int len = Host.Text?.Length ?? 0;
         Host.SelectionStart = len;
         Host.SelectionLength = 0;
         _caretIndex = len;
-        _scrollX = double.MaxValue;   // 触发一次"贴右"钳制，保证末尾光标可见
+        _scrollX = double.MaxValue;
         UpdateCaretAndSelection();
     }
 
@@ -556,8 +507,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
         Caret.Opacity = 1;   // 收尾恒复位为"亮"：避免停表时恰好停在暗相位，下次显示"有概率不见"
     }
 
-    /// <summary>输入/移动光标时把光标复位为"亮"，并重启 530ms 倒计时（与白板 ResetCaretBlink 同语义：
-    /// 编辑后先亮满一拍再闪，消除"闪相位漂移"导致的时闪时不闪）。</summary>
+    /// <summary>输入/移动光标时把光标复位为"亮"，并重启 530ms 倒计时（与白板 ResetCaretBlink 同语义： 编辑后先亮满一拍再闪，消除"闪相位漂移"导致的时闪时不闪）。</summary>
     private void ResetBlink()
     {
         if (_blink?.IsEnabled != true) return;
@@ -573,8 +523,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
         return t;
     }
 
-    /// <summary>闪烁节拍：每拍先自愈校验（控件可见且宿主聚焦），条件不成立即停表并收起光标；
-    /// 成立才翻转。这样即便某条焦点事件缺失，下一拍也会自动补齐，不再出现"时闪时不闪/不见"。</summary>
+    /// <summary>闪烁节拍：每拍先自愈校验（控件可见且宿主聚焦），条件不成立即停表并收起光标； 成立才翻转。这样即便某条焦点事件缺失，下一拍也会自动补齐，不再出现"时闪时不闪/不见"。</summary>
     private void OnBlinkTick()
     {
         if (Host.FocusState == FocusState.Unfocused || Visibility != Visibility.Visible)
@@ -586,8 +535,6 @@ public sealed partial class SelfDrawnTextBox : UserControl
         Caret.Visibility = Visibility.Visible;
         Caret.Opacity = Caret.Opacity > 0.5 ? 0 : 1;
     }
-
-    // ============================== 光标作用域（系统资源替换，同画笔圆环/白板手势方案） ==============================
 
     private void InstallIbeam()
     {

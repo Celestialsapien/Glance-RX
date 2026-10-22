@@ -28,54 +28,14 @@ namespace GlanceRX.Rendering;
 
 // ============================================================================
 // TileRenderCache — 1:1 port of sumatrapdf-master/src/RenderCache.{h,cpp}
-// (the rendering + memory-management engine behind SumatraPDF's DisplayModel).
-//
-// 抄的是 Sumatra 的【真身】，不是简化件：
-//   * 瓦片：页面按 2^res × 2^res 划分；GetTileRes 由 zoomReal ÷ maxTileSize
-//     (屏幕尺寸) 的几何均值定层级 → 放大自动升 res 重渲染，缩小自动降。
-//   * 按视口渲染：Paint 从 (0,0,0) 瓦片 BFS，只画与视口相交的瓦片；
-//     renderMissing 只对目标层级瓦片发请求（viewport-driven）。
-//   * 按视口控内存：gConserveMemory → 每次 Paint 后 FreePage(其他分辨率瓦片)
-//     + FreeNotVisible()（不可见页/不可见瓦片即释放）；maxTileSize=屏幕尺寸
-//     保证单张瓦片位图永不超约一屏；缓存条目 ≤ kMaxBitmapsCached=128。
-//   * 渲染队列 kMaxPageRequests=8（LIFO，同参重排队到队尾优先）；
-//     渲染线程惰性生成，上限 min(gMaxRenderThreads=8, cores)，硬顶 32。
-//   * 预测链：kMaxPredictiveRequests=4，一次一页 chained（不淹没队列），
-//     锚点页滚出视口即停。
-//
-// 对 C++ 源的必要对应（其余逐行对应，见各方法注释）：
-//   * DisplayModel* dm → ITileRenderHost（视图自身实现）。
-//   * RecursiveMutex → lock + "Locked" 后缀内部方法（C# lock 不可重入）。
-//   * HDC/BlitPixmap → ITileRenderHost.DrawTileBitmap（Win2D DrawImage，
-//     GPU 位图惰性挂在 entry.Gpu —— Sumatra 是 GDI 直 blit CPU pixmap，
-//     Win2D 必须经 CanvasBitmap；CPU 位图仍是唯一缓存真身，与 Sumatra 一致）。
-//   * AbortCookie：MuPDF 局部渲染是同步 FFI，无法中途打断 → 保留 req.abort
-//     标志，渲染完成后丢弃结果（Sumatra 的 darkModeEpoch 过期丢弃同理）。
-//   * 坐标：与 Sumatra 【完全同单位】——整个引擎（tile 矩形 / pageOnScreen /
-//     viewPort / maxTileSize / source 索引）一律物理像素，zoomReal = 每 PDF 点
-//     物理像素数。不得在本文件内出现 DIP。DIP 只存在于外壳的两个边界：
-//     ITileRenderHost 的实现（取出时 ×DpiScale）与 DrawTileBitmap（target 传
-//     画布前 ÷DpiScale；source 保持位图像素）。
-//   * 旋转：Sumatra 把 rotation 烘进出图（RenderPage 用 viewctm(pageNo,zoom,rotation)），
-//     故其 tile 矩形/pageOnScreen/pageRect 全在旋转后帧，且缓存按 rotation 分键。
-//     Glance 的原生出图接口只接受【未旋转】device 空间 → 引擎内部统一用未旋转页帧，
-//     旋转由外壳在 DrawingSession 上补一次（与标注层 ApplyPageTransform 同约定），
-//     缓存恒按 rotation=0 分键。代价 = 所有 tile 几何都要把视口换算回页帧
-//     （PageFrameViewPort）；收益 = 转屏不需要重渲染。
-//     ⚠ 历史坑（本文件曾因此出现"右侧缺失 + 发糊 + 瓦片错位"三个症状）：
-//       把 tileOnScreen 做成 DIP、却把 DIP 偏移直接当位图源索引，且缺整数对齐
-//       → factor 恒为 0.9998 之类，走 Linear 重采样；源索引又少了 DpiScale 倍。
-//       修复方式 = 回到 Sumatra 的单位体系，不做任何"就地换算"。
-// ============================================================================
+//     ⚠ 历史坑（本文件曾因此出现"右侧缺失 + 发糊 + 瓦片错位"三个症状）。
 
-/// <summary>kRenderDelayUndefined / kRenderDelayFailed（RenderCache.h）。</summary>
 internal static class TileRenderDelay
 {
     public const int Undefined = int.MaxValue - 1;
     public const int Failed = int.MaxValue - 2;
 }
 
-/// <summary>RenderCache.h TilePosition：res/row/col 标识一颗瓦片。</summary>
 internal readonly struct TilePosition : IEquatable<TilePosition>
 {
     public const ushort InvalidRes = ushort.MaxValue;
@@ -88,8 +48,7 @@ internal readonly struct TilePosition : IEquatable<TilePosition>
     public override int GetHashCode() => (Res << 16) ^ (Row << 8) ^ Col;
 }
 
-/// <summary>RenderCache.h BitmapCacheEntry：一块已渲染瓦片（CPU 位图为真身；
-/// Gpu 是 Glance 外壳的 Win2D 必需物，惰性创建、随条目释放）。</summary>
+/// <summary>RenderCache.h BitmapCacheEntry：一块已渲染瓦片（CPU 位图为真身； Gpu 是 Glance 外壳的 Win2D 必需物，惰性创建、随条目释放）。</summary>
 internal sealed class BitmapCacheEntry
 {
     public object Dm = null!;
@@ -100,24 +59,19 @@ internal sealed class BitmapCacheEntry
 
     // ---- Pixmap* 对应物：native BGRA 缓冲（stride=W*4）----
     // ⚠ 与 Sumatra 1:1 的关键：Sumatra 的瓦片像素是 MuPDF 分配的 native Pixmap，
-    //   由 FreePixmap() 确定性释放，GC 完全不参与。Glance 原先用托管 byte[]（MB 级 LOH）：
-    //   每块瓦片一次 LOH 分配 → LOH 不可压缩 → GC 提交段只涨不落（实测 13MB 棘轮到 676MB）。
-    //   现在同样持有 native 缓冲：分配在 native 堆（游离即被 malloc 复用），释放走 memory_free。
     public IntPtr Pixels;
     public int PixelsLen;                          // memory_free 所需长度（= BitmapW*BitmapH*4）
     public int BitmapW, BitmapH;
-    public Microsoft.Graphics.Canvas.CanvasBitmap? Gpu;   // 外壳扩展：惰性 GPU 副本（Win2D 必需）
+    public Microsoft.Graphics.Canvas.CanvasBitmap? Gpu;
     public int GpuBytes;                                  // 该 GPU 副本的字节数（诊断记账用；UMA 上即系统内存占用）
     public bool OutOfDate;
     public int Refs = 1;
     public int CacheIdx = -1;
 
-    /// <summary>条目是否还有可画的像素（native 缓冲 或 GPU 副本）。
-    /// GPU 副本建好后会释放 native 侧（见 ReleaseCpuBitmap），故不能只看 Pixels。</summary>
+    /// <summary>条目是否还有可画的像素（native 缓冲 或 GPU 副本）。 GPU 副本建好后会释放 native 侧（见 ReleaseCpuBitmap），故不能只看 Pixels。</summary>
     public bool HasBitmap => Pixels != IntPtr.Zero || Gpu != null;
 
-    /// <summary>FreePixmap 对应物：释放 native 瓦片缓冲。幂等（置零后重复调用无害）。
-    /// ⚠ 必须把 PixelsLen 一并置零 —— 否则「已释放」的瓦片会被误判为仍持有 native 缓冲。</summary>
+    /// <summary>FreePixmap 对应物：释放 native 瓦片缓冲。幂等（置零后重复调用无害）。 ⚠ 必须把 PixelsLen 一并置零 —— 否则「已释放」的瓦片会被误判为仍持有 native 缓冲。</summary>
     public void FreeCpuPixels(ITileRenderHost host)
     {
         var p = Pixels;
@@ -128,18 +82,13 @@ internal sealed class BitmapCacheEntry
         host.FreeTilePixels(p, len);
     }
 
-    /// <summary>【外壳扩展】GPU 副本就位后丢弃 native 瓦片缓冲。
-    /// Sumatra 是 GDI 直 blit CPU pixmap，所以它必须留着 Pixmap；Glance 走 Win2D，
-    /// 画到屏上的是 CanvasBitmap，native 那份从此没有任何读取点 —— 留着就是整整一倍冗余。
-    /// 释放后条目有效性以 Gpu 为准（HasBitmap）；若 Gpu 之后被设备重建作废（DropGpuResources），
-    /// 该条目已无像素可画 → 由 DropGpuResources 直接淘汰，绝不留下"空条目卡住瓦片"。</summary>
+    /// <summary>【外壳扩展】GPU 副本就位后丢弃 native 瓦片缓冲。 Sumatra 是 GDI 直 blit CPU pixmap，所以它必须留着 Pixmap；</summary>
     public void ReleaseCpuBitmap(ITileRenderHost host)
     {
         if (Gpu != null) FreeCpuPixels(host);
     }
 }
 
-/// <summary>RenderCache.h PageRenderRequest：渲染队列条目（复用结构）。</summary>
 internal sealed class PageRenderRequest
 {
     public object Dm = null!;
@@ -148,20 +97,15 @@ internal sealed class PageRenderRequest
     public float Zoom;
     public TilePosition Tile;
 
-    // GetTileRectDevice 对应物：瓦片在整页设备空间里的像素矩形（x0,y0,x1,y1）。
     public int DevW, DevH, X0, Y0, X1, Y1;
 
     public bool Abort;
     public ulong Timestamp;
-    public int ErrorCode;   // 0 = success
+    public int ErrorCode;
 
-    /// <summary>FitzAbortCookie 对应物（GlanceRXCookie 24B 共享块）。入队时 Zero（= Sumatra
-    /// newRequest-&gt;abortCookie = nullptr）；worker 开渲前分配并存入 _curReqs[threadIdx]
-    /// 同一对象 → AbortCurrentRequestLocked 可见并跨线程写 abort=1；渲染返回且
-    /// _curReqs 置空后由 worker 持 _requestAccess 释放（与 aborter 互斥，无 UAF）。</summary>
+    /// <summary>FitzAbortCookie 对应物（GlanceRXCookie 24B 共享块）。入队时 Zero（= Sumatra newRequest-&gt;abortCookie = nullptr）；</summary>
     public IntPtr Cookie;
 
-    // 预测链（kMaxPredictiveRequests）
     public int PredictiveOriginPageNo;
     public int NPredictiveRequests;
     public int[] PredictiveRequests = new int[TileRenderCache.KMaxPredictiveRequests];
@@ -169,11 +113,7 @@ internal sealed class PageRenderRequest
     public Action<PageRenderRequest>? FinishedCb;
 }
 
-/// <summary>DisplayModel 的渲染侧对应物（GpuPageView 实现）。
-/// ⚠ 单位铁律：本接口的矩形/尺寸一律【物理像素】，与 Sumatra 的 RenderCache 完全同单位
-/// （Sumatra 的 pageOnScreen / viewPort / tile 矩形全是物理像素，没有 DIP 层）。
-/// DIP↔像素 的换算只允许发生在外壳的两个边界上：本接口的实现里（取出时 ×DpiScale），
-/// 以及 DrawTileBitmap 里（画布 target 传入前 ÷DpiScale）。缓存内部【不得】再做任何换算。</summary>
+/// <summary>DisplayModel 的渲染侧对应物（GpuPageView 实现）。 ⚠ 单位铁律：本接口的矩形/尺寸一律【物理像素】，与 Sumatra 的 RenderCache 完全同单位 （Sumatra 的 pageOnScreen / viewPort / tile 矩形全是物…</summary>
 internal interface ITileRenderHost
 {
     int PageCount { get; }
@@ -181,41 +121,25 @@ internal interface ITileRenderHost
     float PageHeightPt(int pageNo);
     /// <summary>dm->GetZoomReal()：每 PDF 点的物理像素数（= z×96/72×DpiScale）。</summary>
     float ZoomReal(int pageNo);
-    /// <summary>dm->GetViewPort().Size()：物理像素。</summary>
     Size ViewPortSize { get; }
-    /// <summary>pageInfo->pageOnScreen：视口坐标，物理像素。</summary>
     Rect PageOnScreen(int pageNo);
     bool PageVisible(int pageNo);
     bool PageVisibleNearby(int pageNo);
-    /// <summary>外壳呈现层旋转角（0/90/180/270）。出图与全部 tile 几何恒在【未旋转页帧】，
-    /// 外壳负责把这份几何绕页中心转 rot 度画到屏幕上；本引擎只用它换算视口外接矩形
-    /// （PageFrameViewPort）与 GetTileRes 的 fit 朝向。因为位图与旋转无关，
-    /// 转屏【不作废缓存】（Sumatra 的位图已烘入 rotation，必须按 rotation 分键）。</summary>
+    /// <summary>外壳呈现层旋转角（0/90/180/270）。出图与全部 tile 几何恒在【未旋转页帧】， 外壳负责把这份几何绕页中心转 rot 度画到屏幕上；</summary>
     int Rotation { get; }
     bool PauseRendering { get; }
     /// <summary>DisplayModel::RenderFinished → Repaint（已在 UI 线程）。</summary>
     void Repaint();
     void PostToUi(Action action);
-    /// <summary>render thread 的渲染入口（= Sumatra `engine->RenderPage(RenderPageArgs)`）。
-    /// 入参 devW/devH/x0..y1 均为物理像素（与 mu_render_page_region_bgra 一致）。
-    /// cookie = FitzAbortCookie 对应物（GlanceRXCookie 分配的 24B fz_cookie 兼容块），
-    /// MuPDF 在 display-list 操作间隙自查中止（EngineMupdf.cpp:6542）。
-    /// 【同步】渲染一块瓦片，返回【拥有所有权的 native BGRA 缓冲】——不拷贝、也不释放；
-    /// 调用方负责把所有权交给缓存，或在丢弃时用 <see cref="FreeTilePixels"/> 释放。
-    /// Sumatra 的 render thread 就是同步调用引擎的，这里刻意不做任何 Task/线程池包装
-    /// （包一层 Task.Run + 信号量 = 每块瓦片多一个 Task、多一次线程池跳转、多一组阻塞等待）。</summary>
+    /// render thread 的渲染入口（= Sumatra `engine->RenderPage(RenderPageArgs)`）。
     (IntPtr Data, int Length, int W, int H) RenderTile(
         IntPtr cookie, int pageNo, int devW, int devH, int x0, int y0, int x1, int y1);
 
-    /// <summary>FreePixmap 对应物：释放 RenderTile 返回的 native 缓冲。</summary>
     void FreeTilePixels(IntPtr data, int length);
 
-    /// <summary>BlitPixmapRegion 对应物（仅 UI 线程 Draw 帧内调用）。
-    /// target = 视口物理像素矩形；source = 位图内像素矩形（源索引必须用位图像素，
-    /// 不能是 DIP —— 这是 Win2D DrawImage 的源/目标异单位陷阱）。</summary>
+    /// <summary>BlitPixmapRegion 对应物（仅 UI 线程 Draw 帧内调用）。 target = 视口物理像素矩形；source = 位图内像素矩形（源索引必须用位图像素， 不能是 DIP —— 这是 Win2D DrawImage 的源/目标异单位陷阱）。</summary>
     void DrawTileBitmap(BitmapCacheEntry entry, Rect target, Rect source);
 }
-
 
 internal sealed class TileRenderCache : IDisposable
 {
@@ -225,9 +149,7 @@ internal sealed class TileRenderCache : IDisposable
     public const int KMaxPredictiveRequests = 4;
     private const int KInvalidZoom = -1;
 
-    // RenderCache.cpp：static bool gConserveMemory = true（CONSERVE_MEMORY 定义）。
     private const bool GConserveMemory = true;
-    // RenderCache.cpp：int gMaxRenderThreads = 8。
     private const int GMaxRenderThreads = 8;
 
     private readonly object _cacheAccess = new();
@@ -259,7 +181,6 @@ internal sealed class TileRenderCache : IDisposable
     {
         _host = host;
         _dispatcher = dispatcher;
-        // RenderCache 构造：maxTileSize = {SM_CXSCREEN, SM_CYSCREEN}（物理像素，原样）。
         MaxTileSize = new Size(Win32Metrics.ScreenWidth, Win32Metrics.ScreenHeight);
 
         int numCores = Environment.ProcessorCount;
@@ -267,19 +188,15 @@ internal sealed class TileRenderCache : IDisposable
         _maxRenderThreads = Math.Min(_maxRenderThreads, KMaxRenderThreads);
     }
 
-    /// <summary>GetSystemMetrics 对应物（构造期一次性）。</summary>
     private static class Win32Metrics
     {
-        public static readonly int ScreenWidth = GetSystemMetrics(0);   // SM_CXSCREEN
-        public static readonly int ScreenHeight = GetSystemMetrics(1);  // SM_CYSCREEN
+        public static readonly int ScreenWidth = GetSystemMetrics(0);
+        public static readonly int ScreenHeight = GetSystemMetrics(1);
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int nIndex);
     }
 
-    // ---------------- Find / Exists / Drop（RenderCache.cpp 161-236） ----------------
-
-    /// <summary>RenderCache::Find。zoom=KInvalidZoom → 任意 zoom；tile=null → 任意瓦片。</summary>
     private BitmapCacheEntry? FindLocked(object dm, int pageNo, int rotation, float zoom, TilePosition? tile)
     {
         rotation = NormalizeRotation(rotation);
@@ -336,8 +253,7 @@ internal sealed class TileRenderCache : IDisposable
         return DropCacheEntryLocked(entry);
     }
 
-    /// <summary>GPU 位图释放必须回 UI 线程（Draw 帧可能仍引用）。
-    /// 诊断记账放在真正 Dispose() 之后 —— 这一列的意义就是量"已 Drop、还在等 Dispose"的纹理。</summary>
+    /// <summary>GPU 位图释放必须回 UI 线程（Draw 帧可能仍引用）。 诊断记账放在真正 Dispose() 之后 —— 这一列的意义就是量"已 Drop、还在等 Dispose"的纹理。</summary>
     private void DisposeGpuLocked(BitmapCacheEntry entry)
     {
         var gpu = entry.Gpu;
@@ -351,17 +267,14 @@ internal sealed class TileRenderCache : IDisposable
             });
     }
 
-    /// <summary>条目彻底作废时释放两侧像素：GPU 副本 + native 瓦片缓冲（= FreePixmap）。
-    /// ⚠ 与 <see cref="DisposeGpuLocked"/> 的区别：它【只】释放 GPU 侧，用于设备重建
-    /// （那时 native 侧要留下当回退，不能一起丢）。</summary>
+    /// <summary>条目彻底作废时释放两侧像素：GPU 副本 + native 瓦片缓冲（= FreePixmap）。 ⚠ 与 的区别：它【只】释放 GPU 侧，用于设备重建 （那时 native 侧要留下当回退，不能一起丢）。</summary>
     private void ReleaseEntryPayload(BitmapCacheEntry entry)
     {
         DisposeGpuLocked(entry);
         entry.FreeCpuPixels(_host);
     }
 
-    /// <summary>外壳扩展：设备重建时作废全部 GPU 位图。仍持 CPU 真身的条目与 Sumatra 一致地保留；
-    /// 已被 ReleaseCpuBitmap 掏空的条目此时已无像素可画 → 淘汰（否则会留下"有键无图"的空条目）。</summary>
+    /// <summary>外壳扩展：设备重建时作废全部 GPU 位图。仍持 CPU 真身的条目与 Sumatra 一致地保留； 已被 ReleaseCpuBitmap 掏空的条目此时已无像素可画 → 淘汰（否则会留下"有键无图"的空条目）。</summary>
     public void DropGpuResources()
     {
         lock (_cacheAccess)
@@ -374,8 +287,6 @@ internal sealed class TileRenderCache : IDisposable
             }
         }
     }
-
-    // ---------------- Add / FreeIfFull（RenderCache.cpp 238-301） ----------------
 
     /// <summary>RenderCache.cpp FreeIfFull：缓存满时先淘汰同 dm 的不可见页瓦片，再淘汰其他 dm。</summary>
     private bool FreeIfFullLocked(PageRenderRequest req)
@@ -401,8 +312,7 @@ internal sealed class TileRenderCache : IDisposable
         return false;
     }
 
-    /// <summary>RenderCache::Add：先 FreePage 同瓦片（不同 zoom/rotation），再腾坑，再入缓存。
-    /// 返回 true = 缓存已接管 native 缓冲所有权；false = 腾不出坑，调用方须自行 FreeTilePixels。</summary>
+    /// <summary>RenderCache::Add：先 FreePage 同瓦片（不同 zoom/rotation），再腾坑，再入缓存。 返回 true = 缓存已接管 native 缓冲所有权；false = 腾不出坑，调用方须自行 FreeTilePixels。</summary>
     private bool AddLocked(PageRenderRequest req, IntPtr pixels, int len, int w, int h)
     {
         req.Rotation = NormalizeRotation(req.Rotation);
@@ -434,8 +344,6 @@ internal sealed class TileRenderCache : IDisposable
         return true;
     }
 
-    // ---------------- 瓦片几何（RenderCache.cpp 303-355） ----------------
-
     /// <summary>GetTileRect：mediabox(pt) 内的瓦片矩形；row 以 PDF y-up 语义（源码原样翻转）。</summary>
     private static void GetTileRectPt(double mbX, double mbY, double mbW, double mbH, TilePosition tile,
         out double x, out double y, out double w, out double h)
@@ -447,10 +355,7 @@ internal sealed class TileRenderCache : IDisposable
         y = mbY + ((div - tile.Row - 1) * h);
     }
 
-    /// <summary>GetTileRectDevice 对应物（RenderCache.cpp:314）：瓦片设备像素矩形。
-    /// zoom 已是「每 PDF 点物理像素数」，故这里就是 Sumatra 的
-    /// `engine->Transform(mediabox, pageNo, zoom, rotation=0)`（Glance 出图恒未旋转，
-    /// 与 mu_render_page_region_bgra 的 unrotated device space 对齐）。</summary>
+    /// <summary>GetTileRectDevice 对应物（RenderCache.cpp:314）：瓦片设备像素矩形。 zoom 已是「每 PDF 点物理像素数」，</summary>
     private void GetTileRectDevice(int pageNo, float zoom, TilePosition tile,
         out int devW, out int devH, out int x0, out int y0, out int x1, out int y1)
     {
@@ -474,20 +379,9 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>GetTileOnScreen（RenderCache.cpp:328）1:1：tileOnScreen = 瓦片设备矩形 + pageOnScreen。
-    /// Sumatra 两端都是【整数】Rect（GetTileRectDevice 里有 .Round()，pageOnScreen 是 int Rect），
-    /// 于是目标层瓦片的 factor 恰好 == 1.0 → BlitPixmapRegion 走 1:1 直拷。
+    /// GetTileOnScreen（RenderCache.cpp:328）1:1：tileOnScreen = 瓦片设备矩形 + pageOnScreen。
     /// ⚠ 这条整数对齐必须保住：一旦 tileOnScreen 带小数，factor 就变成 0.9998 之类，
     /// 每次上屏都会被 Linear 重采样一次 → 目标分辨率明明够了画面仍然发糊（实测症状）。
-    ///
-    /// 旋转（Sumatra 不需要这一步的原因）：Sumatra 把 rotation 烘进出图 ——
-    /// `EngineMupdf::RenderPage` 用 `viewctm(pageNo, zoom, rotation)` 光栅化，产出的位图
-    /// 【本身已旋转】，所以它的 tile 矩形 / pageOnScreen / pageRect 全在旋转后的帧里，
-    /// 本函数只需相加。Glance 出图恒未旋转（`mu_render_page_region_bgra` 只接受未旋转
-    /// device 空间），若照抄就会出现「位图内容不随旋转 + 缩放时瓦片错乱」。
-    /// → 解决办法：引擎内部统一改用【未旋转页帧】，pageOnScreen 传未旋转页矩形，
-    ///   旋转由外壳在 DrawingSession 上补一次（与标注层 ApplyPageTransform 同一约定）。
-    ///   于是本函数与 Sumatra 逐字等价（rotation 恒为 0），且旋转页【无需重渲染】。</summary>
     private Rect GetTileOnScreen(int pageNo, float zoom, TilePosition tile, Rect pageOnScreen)
     {
         GetTileRectDevice(pageNo, zoom, tile, out _, out _, out int dx0, out int dy0, out int dx1, out int dy1);
@@ -495,17 +389,9 @@ internal sealed class TileRenderCache : IDisposable
             Math.Max(0, dx1 - dx0), Math.Max(0, dy1 - dy0));
     }
 
-    /// <summary>
     /// 视口在【未旋转页帧】里的最小外接矩形（物理像素）。
-    /// Sumatra 没有对应物：它的 tile / pageOnScreen 本来就在旋转后帧，直接与
-    /// `dm->GetViewPort()` 相交即可（IsTileVisible / Paint 的 bounds 都是那么写的）。
-    /// Glance 的 tile 在未旋转页帧、视口在屏幕帧，两者差一个「绕页中心转 +rot」
-    /// → 这里把视口按 -rot 转回页帧取 AABB。
-    /// AABB ⊇ 旋转后的视口，故用它做可见性判定【只会多画、绝不漏画】；
-    /// rot==0 时即视口本身（与 Sumatra 完全一致，零行为变化）。
     /// ⚠ 它的原点不是 (0,0)，rot!=0 时可能落在页面中部 —— 只能当可见性判据，
-    ///    不能无条件当绘制裁剪区（Sumatra 的 bounds 是屏幕脏矩形，两者不是一回事）。
-    /// </summary>
+    /// 不能无条件当绘制裁剪区（Sumatra 的 bounds 是屏幕脏矩形，两者不是一回事）。
     private Rect PageFrameViewPort(Rect pageOnScreen)
     {
         int rot = _host.Rotation % 360;
@@ -513,7 +399,6 @@ internal sealed class TileRenderCache : IDisposable
         double vw = vp.Width, vh = vp.Height;
         if (rot == 0 || vw <= 0 || vh <= 0) return new Rect(0, 0, vw, vh);
 
-        // 旋转枢轴 = 页中心（与外壳 Draw 里压在 DrawingSession 上的那个枢轴同一个点）。
         double cx = pageOnScreen.X + pageOnScreen.Width / 2.0;
         double cy = pageOnScreen.Y + pageOnScreen.Height / 2.0;
         double rad = -rot * Math.PI / 180.0;
@@ -551,8 +436,6 @@ internal sealed class TileRenderCache : IDisposable
         return !tileOnScreen.IsEmpty;
     }
 
-    // ---------------- Free*（RenderCache.cpp 357-411） ----------------
-
     /// <summary>RenderCache::FreePage：释放某页全部瓦片，或按 tile 语义（row=-1 → 其他分辨率）。</summary>
     private void FreePageLocked(object dm, int pageNo, TilePosition tile)
     {
@@ -579,18 +462,13 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>RenderCache::FreeForDisplayModel（换文档/关视图）。</summary>
     public void FreeForDisplayModel(object dm)
     {
         lock (_cacheAccess) FreeForDisplayModelLocked(dm);
     }
 
-    /// <summary>
-    /// RenderCache::KeepForDisplayModel（RenderCache.cpp:415）1:1：重载文档时保留可见页的
-    /// 缓存位图以免闪烁，同时把 zoom 置 kInvalidZoom、outOfDate 置 true，保证这些页最终会
+    /// RenderCache::KeepForDisplayModel（RenderCache.cpp:415）1:1：重载文档时保留可见页的 缓存位图以免闪烁，
     /// 重新渲染。⚠ Glance 目前是「换文档即 ShutdownRenderCache + CreateRenderCache」，
-    /// 本方法暂无调用点（保留 = 1:1 完整性 + 是 OutOfDate 在 Sumatra 里的唯一写入口）。
-    /// </summary>
     public void KeepForDisplayModel(object oldDm, object newDm)
     {
         lock (_cacheAccess)
@@ -606,7 +484,6 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>RenderCache::FreeNotVisible：不可见页 + res&gt;1 且不可见（fuzz 2.0）的瓦片。</summary>
     public void FreeNotVisible()
     {
         lock (_cacheAccess)
@@ -622,20 +499,9 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    // ---------------- GetTileRes / GetMaxTileRes / ReduceTileSize（455-530） ----------------
-
-    /// <summary>
     /// RenderCache::GetTileRes 1:1：factorAvg = sqrt(fw×fh)（pixelbox/maxTileSize 几何均值），
-    /// fit-width/fit-page 或整页小于视口时减半（Glance 无 zoomVirtual 概念，fit 态被几何条件
-    /// 覆盖：fit-width 时 pixelbox.dx == viewPort.dx）；res = ceil(log2(factorAvg))，上限 30。
-    ///
     /// ⚠ 本函数【不得】依赖旋转角。Sumatra 比的是旋转后的 pixelbox 与 viewport，那是因为它的
-    /// 位图把 rotation 烘进出图（pixelbox 与 pageOnScreen 本就同帧）；Glance 的位图/瓦片恒在
     /// 未旋转页帧，必须用未旋转 pixelbox 比未旋转 viewport。一旦让 res 随角度变化，转到一个
-    /// 角度就会把整个【目标层】判废（targetRes 变 → 该角度全部瓦片 miss → 替身发糊 → 重出），
-    /// 表现为"每个角度首次进入都要重渲染一遍、且与 0° 各自独立"。
-    /// （几何均值 sqrt(fw×fh) 对 W/H 交换本来就不变，唯一在意朝向的是下面那条 fit 条件。）
-    /// </summary>
     public ushort GetTileRes(int pageNo, float? zoom = null)
     {
         double ptW = _host.PageWidthPt(pageNo), ptH = _host.PageHeightPt(pageNo);
@@ -697,8 +563,6 @@ internal sealed class TileRenderCache : IDisposable
         return true;
     }
 
-    // ---------------- RequestRendering（532-623） ----------------
-
     /// <summary>RenderCache::RequestRendering(dm,pageNo)：res≤1 才整页请求（res==1 连带第一行第二块）。</summary>
     public void RequestRendering(object dm, int pageNo)
     {
@@ -714,7 +578,6 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>RenderCache::RequestRendering(dm,pageNo,tile,clearQueueForPage) 1:1。</summary>
     public void RequestRendering(object dm, int pageNo, TilePosition tile, bool clearQueueForPage = true,
         int[]? predictivePages = null, int predictiveOriginPageNo = 0)
     {
@@ -722,7 +585,6 @@ internal sealed class TileRenderCache : IDisposable
 
         lock (_requestAccess)
         {
-            // 不可见的在途渲染 → 打断（abort 后结果被丢弃）。
             for (int i = 0; i < _nRenderThreads; i++)
             {
                 var cr = _curReqs[i];
@@ -731,8 +593,6 @@ internal sealed class TileRenderCache : IDisposable
             }
 
             // Sumatra 在这里用 dm->GetRotation()（它的位图已烘入 rotation，必须分键）。
-            // Glance 的位图来自未旋转 device 空间、与 rotation 无关 → 恒用 0 作键：
-            // 转屏既不作废缓存，也不会出现"同一瓦片两组不同旋转的图"。
             int rotation = NormalizeRotation(0);
             float zoom = _host.ZoomReal(pageNo);
 
@@ -743,8 +603,8 @@ internal sealed class TileRenderCache : IDisposable
                 if (isRenderingTile)
                 {
                     if (cr!.Zoom == zoom && cr.Rotation == rotation)
-                        return;   // 完全同参在途
-                    AbortCurrentRequestLocked(i);   // 同页不同 zoom/rotation → 打断重排
+                        return;
+                    AbortCurrentRequestLocked(i);
                 }
             }
 
@@ -758,7 +618,6 @@ internal sealed class TileRenderCache : IDisposable
                 {
                     if (req.Zoom == zoom && req.Rotation == rotation)
                     {
-                        // 同参已在队列 → 挪到队尾（LIFO 下一个渲染）。
                         var tmp = _requests[_requestCount - 1]!;
                         _requests[_requestCount - 1] = req;
                         _requests[i] = tmp;
@@ -767,11 +626,6 @@ internal sealed class TileRenderCache : IDisposable
                     {
                         // 同瓦片不同 zoom → 原位改参（Sumatra 原样）。
                         // ⚠ Sumatra 的 req 只存 zoom/rotation，设备几何在渲染线程里按 zoom
-                        //   现算，故"只改 zoom"是自洽的。Glance 把几何物化成了
-                        //   DevW/DevH/X0/Y0/X1/Y1（入队时由 GetTileRectDevice 算好），
-                        //   若此处只改 Zoom 不改几何，就会出现「req.Zoom 是新值、DevW 是旧值」
-                        //   的撕裂 —— 引擎按旧 DevW 出图，绘制侧按新 Zoom 反算期望尺寸，
-                        //   factor = 旧zoom/新zoom ≠ 1 → 该页【整页被重采样】= 整页均匀糊。
                         //   故必须与 Render() 入队路径做同一套几何重算。
                         req.Zoom = zoom;
                         req.Rotation = rotation;
@@ -786,18 +640,17 @@ internal sealed class TileRenderCache : IDisposable
 
             if (Exists(dm, pageNo, rotation, zoom, tile))
             {
-                return;   // 已按正确参数渲染过
+                return;
             }
 
             Render(dm, pageNo, rotation, zoom, tile, predictivePages, predictiveOriginPageNo);
         }
     }
 
-    /// <summary>RenderCache::RequestPredictiveRendering 1:1：找第一个需要渲染的页，其余顺延成链。</summary>
     public void RequestPredictiveRendering(object dm, int originPageNo, int[] pages, int nPages)
     {
         if (_host.PauseRendering) return;
-        if (!_host.PageVisible(originPageNo)) return;   // 锚点页已滚出 → 停链
+        if (!_host.PageVisible(originPageNo)) return;
 
         int rotation = 0;
         int i = 0;
@@ -920,8 +773,6 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    // ---------------- 队列消费（776-855） ----------------
-
     public int GetRenderDelay(object dm, int pageNo, TilePosition tile)
     {
         lock (_requestAccess)
@@ -943,7 +794,6 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>RenderCache::GetNextRequest：LIFO 取队尾。</summary>
     private bool GetNextRequestLocked(PageRenderRequest req, int threadIdx)
     {
         if (_requestCount <= 0 || _requestCount > KMaxPageRequests) return false;
@@ -973,7 +823,6 @@ internal sealed class TileRenderCache : IDisposable
         return _requestCount == 0;
     }
 
-    /// <summary>RenderCache::CancelRenderingBlocking：清队列 + 轮询打断在途（收尾用）。</summary>
     public void CancelRenderingBlocking(object dm)
     {
         ClearQueueForDisplayModel(dm);
@@ -1018,7 +867,6 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>RenderCache::AbortRendering。</summary>
     public void AbortRendering(object dm)
     {
         lock (_requestAccess)
@@ -1032,7 +880,6 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    /// <summary>ClearQueueForDisplayModel：按页/瓦片清队列（不同 res 或不可见瓦片移除）。</summary>
     private void ClearQueueForDisplayModelLocked(object? dm, int? pageNo, TilePosition? tile)
     {
         int reqCount = _requestCount;
@@ -1063,7 +910,6 @@ internal sealed class TileRenderCache : IDisposable
         var cr = _curReqs[threadIdx];
         if (cr == null) return;
         // AbortCookie 对应物（Sumatra RenderCache.cpp:1043-1052）：置标志 +
-        // 跨线程写 cookie.abort=1 —— MuPDF 在 display-list 操作间隙自查，
         // 在途渲染毫秒级终止，而不是跑完全程再丢弃（400% 快滚 CPU 风暴根因）。
         cr.Abort = true;
         if (cr.Cookie != IntPtr.Zero)
@@ -1071,8 +917,6 @@ internal sealed class TileRenderCache : IDisposable
             try { GlanceRX.Interop.GlanceRXCookie.Abort(cr.Cookie); } catch { }
         }
     }
-
-    // ---------------- RenderCacheThread（1056-1180） ----------------
 
     private void RenderCacheThread(object? data)
     {
@@ -1087,7 +931,6 @@ internal sealed class TileRenderCache : IDisposable
             lock (_requestAccess)
             {
                 // 清 _curReqs[threadIdx]（= Sumatra ClearCurrentRequest）。
-                // 此刻起 aborter 再也拿不到上一请求的 cookie → 同锁内释放，无 UAF。
                 queueEmpty = ClearCurrentRequestLocked(threadIdx);
                 if (pendingCookie != IntPtr.Zero)
                 {
@@ -1108,7 +951,6 @@ internal sealed class TileRenderCache : IDisposable
             {
                 if (!GetNextRequestLocked(req, threadIdx)) { continue; }
                 // FitzAbortCookie 分配（Sumatra: RenderPageArgs{&req.abortCookie} 由引擎
-                // 出口分配；我们同样在开渲前创建）→ 存入 _curReqs 同一对象，aborter 可见。
                 try
                 {
                     cookie = GlanceRX.Interop.GlanceRXCookie.New();
@@ -1121,7 +963,6 @@ internal sealed class TileRenderCache : IDisposable
             if (!_host.PageVisibleNearby(req.PageNo))
             {
                 // Sumatra：无回调的 legacy 请求跳过不可见页；带回调的照样渲染
-                // （cb 内部决定是否重绘）。我们的 cb 恒有效 → 照样渲染。
             }
 
             if (_host.PauseRendering) continue;
@@ -1171,11 +1012,7 @@ internal sealed class TileRenderCache : IDisposable
         }
     }
 
-    // ---------------- PaintTile / Paint（1184-1360，HDC → Win2D sink） ----------------
-
-
-    /// <summary>RenderCache::PaintTile：画一颗瓦片；未命中按需请求。返回 renderDelay。
-    /// isTargetRes 期用了替身（缩放过渡）→ neededScaling=true（conservation 不清其他分辨率）。</summary>
+    /// <summary>RenderCache::PaintTile：画一颗瓦片；未命中按需请求。返回 renderDelay。 isTargetRes 期用了替身（缩放过渡）→ neededScaling=true（conservation 不清其他分辨率）。</summary>
     private int PaintTile(Rect isect, int pageNo, TilePosition tile, Rect tileOnScreenFull,
         float zoom, bool renderMissing, bool isTargetRes, ref bool neededScaling)
     {
@@ -1198,7 +1035,6 @@ internal sealed class TileRenderCache : IDisposable
             }
         }
 
-        // HasBitmap = CPU 真身或 GPU 副本有一个可画（GPU 就位后 CPU 份会被释放，见 ReleaseCpuBitmap）。
         if (entry == null || !entry.HasBitmap)
         {
             bool didReduce = entry != null && ReduceTileSize();
@@ -1212,24 +1048,17 @@ internal sealed class TileRenderCache : IDisposable
         }
 
         // ---- BlitPixmapRegion（RenderCache.cpp:1220-1234）1:1 ----
-        // target = isect（视口物理像素）；source = 位图内像素矩形。
         // ⚠ source 的坐标单位是【位图像素】，绝不能拿 DIP 偏移直接当源索引 ——
-        // 那是 Win2D DrawImage 的源/目标异单位陷阱（DIP 与 px 混用会让每个瓦片只显示
-        // 左侧 1/DpiScale 的内容并把其余拉伸，表现为页面右侧缺一块 + 发糊）。
         double bmpW = entry.BitmapW, bmpH = entry.BitmapH;
         double factor = Math.Min(bmpW / tileOnScreenFull.Width, bmpH / tileOnScreenFull.Height);
 
         // 源起点 = 目标起点相对瓦片原点的偏移 × factor。
-        // Sumatra 写作 xSrc = -min(tileOnScreen.x, 0)；因 isect = bounds∩tileOnScreen 且 bounds
-        // 原点在 (0,0)，恒有 xSrc == isect.x - tileOnScreen.x，故两式完全等价（这里用通式，
-        // 对 bounds 原点不为 0 也成立）。
         double sx = (isect.X - tileOnScreenFull.X) * factor;
         double sy = (isect.Y - tileOnScreenFull.Y) * factor;
         double sw = isect.Width * factor;
         double sh = isect.Height * factor;
 
         // 取整（Sumatra 用 int 截断）+ 夹到原位图内：夹掉多少就在 target 同侧裁掉多少
-        // （保持像素对齐，绝不用拉伸去凑满 target）。
         double x0 = Math.Floor(sx), y0 = Math.Floor(sy);
         double x1 = Math.Round(sx + sw), y1 = Math.Round(sy + sh);
         Rect target = isect;
@@ -1251,11 +1080,7 @@ internal sealed class TileRenderCache : IDisposable
         return 0;
     }
 
-    /// <summary>RenderCache::Paint 1:1：目标层瓦片 BFS，只画视口相交瓦片，未命中请求；
-    /// gConserveMemory 收尾（FreePage 其他分辨率 + FreeNotVisible）。
-    /// `pageOnScreen` 传【未旋转页帧】的页矩形（物理像素），旋转由外壳在 DrawingSession 上补；
-    /// Sumatra 的 `bounds`（更新区）在这里由 `PageFrameViewPort` 内部导出（= 视口在页帧的外接矩形），
-    /// 故不再作为参数传入 —— Glance 每帧画整个视口，没有「局部更新区」这个概念。</summary>
+    /// <summary>RenderCache::Paint 1:1：目标层瓦片 BFS，只画视口相交瓦片，未命中请求； gConserveMemory 收尾（FreePage 其他分辨率 + FreeNotVisible）。</summary>
     public int Paint(int pageNo, Rect pageOnScreen, bool renderMissing, float zoom)
     {
         // zoom 由外壳 Draw 显式传入（与 dest 矩形同一来源/同一时刻）——显示端几何与
@@ -1265,10 +1090,7 @@ internal sealed class TileRenderCache : IDisposable
         maxRes = Math.Max(maxRes, targetRes);
 
         // Sumatra 的 pi->pageOnScreen 是整数 Rect（layout 产出）。
-        // 这里同样取整，好让 target/source 全部落在整物理像素上 → factor 精确 == 1.0，
-        // 且 Win2D 设备像素 == DIP×RasterizationScale == 这里的像素 → 真正 1:1 直拷（不重采样）。
         // ⚠ 外壳压在 DrawingSession 上的旋转枢轴必须取【这份取整后矩形】的中心，否则旋转页
-        //   会出现半像素偏移 → 又被重采样。
         pageOnScreen = new Rect(
             Math.Round(pageOnScreen.X), Math.Round(pageOnScreen.Y),
             Math.Round(pageOnScreen.Width), Math.Round(pageOnScreen.Height));
@@ -1307,7 +1129,6 @@ internal sealed class TileRenderCache : IDisposable
                 renderDelayMin = TileRenderDelay.Failed;
             else
                 renderDelayMin = Math.Min(renderDelay, renderDelayMin);
-            // 从左到右、从上到下绘制（res 跨层时排序，Sumatra 原样）。
             if (tile.Res > 0 && qi < queue.Count && tile.Res < queue[qi].Res)
                 queue.Sort(qi, queue.Count - qi, TileComparer.Instance);
         }
@@ -1316,7 +1137,6 @@ internal sealed class TileRenderCache : IDisposable
         {
             if (!neededScaling)
             {
-                // 目标层全覆盖 → 释放该页其他分辨率的瓦片。
                 var tile = new TilePosition(targetRes, ushort.MaxValue, 0);
                 lock (_cacheAccess) FreePageLocked(_host, pageNo, tile);
             }
@@ -1348,8 +1168,6 @@ internal sealed class TileRenderCache : IDisposable
         if (rotation >= 90) return 90;
         return rotation;
     }
-
-    // ---------------- Dispose（~RenderCache） ----------------
 
     public void Dispose()
     {

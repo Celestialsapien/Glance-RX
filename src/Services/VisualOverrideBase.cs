@@ -23,57 +23,33 @@ using Microsoft.UI.Xaml.Media;
 
 namespace GlanceRX.Services;
 
-/// <summary>
-/// <see cref="ButtonVisualOverride"/> 与 <see cref="ToggleButtonVisualOverride"/> 的共享基座。
-/// 两类的「接管视觉输出」机制 90% 相同（实例表 / 主题同步重绘 / 指针几何判据 / 模板根解析 / 主题资源取值），
-/// 只有 (a) 是否关心 IsChecked、(b) 透明静止档、(c) 单按钮局部覆写 三处语义不同。
-/// 把相同的 10 个成员提到此处，修一处即两类受益 —— 杜绝「姊妹类同款地雷」
-/// （10-03 的 EnsureRegistered 缺陷就是两边各踩一次才暴露的）。
-/// </summary>
+/// 与 的共享基座。 两类的「接管视觉输出」机制 90% 相同（实例表 / 主题同步重绘 / 指针几何判据 / 模板根解析 / 主题资源取值），
 internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 {
     // 所有已接管的 Link 实例，供主题切换时同步强制重绘（见 RefreshAll），
-    // 也供浮层项的清理 / 独占 hover 遍历。
     // ⚠ 成员资格会因 Flyout 卸载而丢失，Link.Loaded 必须用 EnsureRegistered() 补回，否则遍历会永久漏项。
-    // 静态字段随 closed-generic 各持一份：ButtonVisualOverride 与 ToggleButtonVisualOverride 互不影响（与重构前等价）。
     protected static readonly List<BaseLink> _instances = new();
 
     // 弹模态对话框（文件选择器等）期间置 true：抑制所有按钮的 hover 更新（强制静止）。
-    // 弹窗打开瞬间常有游离 PointerMoved/Entered 把按钮 hover 重新置 true、且弹窗期间整页几何驱动不触发
-    // ⇒ 按钮停在悬浮态、关闭后随鼠标移动才回落（"凭空变色"）。置 true 时立即把所有已接管按钮清回静止；
-    // 置 false 后由下一次真实指针移动按几何恢复。详见 ButtonVisualOverride / MainPage 的 OpenPdfAsync。
     protected static bool _hoverSuppressed;
 
-    /// <summary>强制所有已接管按钮按当前主题立即重绘。应在主题被同步设值的时刻调用
-    /// （如 MainPage 主题下拉），消除 ActualThemeChanged 异步传播造成的「旧白底闪一帧」。</summary>
+    /// <summary>强制所有已接管按钮按当前主题立即重绘。应在主题被同步设值的时刻调用 （如 MainPage 主题下拉），消除 ActualThemeChanged 异步传播造成的「旧白底闪一帧」。</summary>
     public static void RefreshAll()
     {
         foreach (var link in _instances) link.ForceRefresh();
     }
 
-    /// <summary>
-    /// 按<b>实时指针位置</b>重算本类所有已接管按钮的 hover —— 几何判据，只点亮指针真正落在里面的那颗（天然独占）。
-    /// <para>这是「悬浮色残留」的根因修复：hover 的权威来源改成"每次指针移动时的实时几何重算"，
-    /// 而<b>不再依赖每颗自己收到 <c>PointerExited</c></b> —— 该事件在 popup/flyout 输入上下文切换、
-    /// 快速移动、LightDismiss 覆盖层移除时会被 WinUI 吞掉或误派发（10-03 浮层 8 颗、10-04 缩放胶囊 4 颗均因此残留）。
-    /// 由页面/容器级 <c>PointerMoved</c> 驱动 ⇒ 任何残留都会在<b>下一次指针移动时自愈</b>。</para>
-    /// <para>性能：每次移动遍历全部实例做 <c>GetCurrentPoint</c> 几何判定，但 <c>SetHover</c> 只在
-    /// hover 真变化时才置脏重绘，未变化的走 <c>Apply</c> 早退 ⇒ 不产生额外重绘。</para>
-    /// </summary>
+    /// 按实时指针位置重算本类所有已接管按钮的 hover —— 几何判据，只点亮指针真正落在里面的那颗（天然独占）。
     public static void UpdateHoverFromPointer(PointerRoutedEventArgs e)
     {
         foreach (var link in _instances)
         {
-            // 活在另一棵 Xaml 树的（popup/flyout 内容）：跨树坐标不可靠，由所在容器的处理器驱动
             if (link.ExcludeFromPageHoverDrive) continue;
             link.SetHoverFromPointer(e);
         }
     }
 
-    /// <summary>弹模态对话框期间调用：抑制全部已接管按钮的 hover 更新（强制静止）。
-    /// 仅应在「点击按钮即弹模态对话框、鼠标随对话框离开按钮」的路径里 <c>true → await → false</c> 包裹，
-    /// 如打开/保存文件选择器。置 true 时立即把所有已接管按钮清回静止；置 false 后由下一次真实
-    /// 指针移动按几何恢复 hover / 静止，杜绝「凭空变色」。</summary>
+    /// <summary>弹模态对话框期间调用：抑制全部已接管按钮的 hover 更新（强制静止）。 仅应在「点击按钮即弹模态对话框、鼠标随对话框离开按钮」的路径里 true → await → false 包裹， 如打开/保存文件选择器。置 true 时立即把所有已接管按钮清回静止；</summary>
     public static void SetHoverSuppressed(bool suppressed)
     {
         _hoverSuppressed = suppressed;
@@ -83,22 +59,7 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         }
     }
 
-    /// <summary>
-    /// 对<b>指定的那一颗</b>已接管按钮开启 hover「冷处理」：先<b>立即</b>把它清回静止，
-    /// 再在窗口期内<b>拒绝一切"点亮"请求</b>（见 <see cref="BaseLink.SetHover"/>）。窗口只由
-    /// <b>该按钮自己的真实 <c>PointerMoved</c></b> 提前解除（<c>PointerMoved</c> 不可能来自框架补发，
-    /// 见 <see cref="BaseLink"/> 的 ④），<paramref name="windowMs"/> 只是兜底过期时间。
-    /// <para><b>为什么必须"按窗口"而不是"清一次"</b>（2026-10-18 实证）：<c>ButtonBase</c> 松手时经
-    /// <c>ReleasePointerCaptureInternal()</c> 补发一次<b>假 PointerExited</b>，并在<b>约 380ms 后"圆谎"</b>补一次
-    /// <c>PointerEntered</c>，带的是<b>松手那一刻的旧坐标</b>。若浮层在这段时间内因钳制发生位移，那个迟到事件
-    /// 仍按旧坐标判定"指针还在按钮里"⇒ 把已滑出光标下方的按钮重新点亮，而几何驱动只在真实移动时重算
-    /// ⇒ 悬浮色一直残留到用户动鼠标。零时长的 <c>true→false</c> 清一次完全挡不住它（首次修复因此无效）。</para>
-    /// <para><b>为什么作用域是"被按的那一颗"</b>：那两次假事件都由<b>该按钮自己的 ButtonBase</b> 在
-    /// 捕获释放路径上补发，<b>不可能发给别的按钮</b>。早先按子树整体冷处理，会让本无假事件的邻居按钮
-    /// 也被禁亮整整一个窗口期（点圆点收起后，指针恰好停在胶囊按钮上时光效迟迟不亮）——故收窄到单颗。</para>
-    /// <para><b>为什么不伤及几何驱动这个"命根"</b>：判据（<c>GetCurrentPoint</c> + ActualWidth/Height）一行不改，
-    /// 影响范围只有这一颗按钮且在窗口期后自动失效；真实移动一到即解除，正常手感不变。</para>
-    /// </summary>
+    /// 对指定的那一颗已接管按钮开启 hover「冷处理」：先立即把它清回静止， 再在窗口期内拒绝一切"点亮"请求（见 ）。
     protected static void BeginHoverHoldOffFor(ButtonBase? target, int windowMs = 900)
     {
         if (target == null) return;
@@ -110,9 +71,7 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         }
     }
 
-    /// <summary>接管逻辑的共享内核。具体按钮类型（Button / ToggleButton）由 <typeparamref name="TButton"/> 参数化；
-    /// 类型相关的状态回调（如 ToggleButton.IsChecked）由 <see cref="AttachExtra"/> 补挂，状态表由 <see cref="Apply"/> 各自实现。
-    /// 用 public 以便从各自独立的接管器类（非嵌套、无法直接触达 protected 嵌套类型）派生 Link。</summary>
+    /// <summary>接管逻辑的共享内核。具体按钮类型（Button / ToggleButton）由 参数化； 类型相关的状态回调（如 ToggleButton.IsChecked）由 补挂，状态表由 各自实现。</summary>
     public abstract class BaseLink
     {
         protected readonly TButton _button;
@@ -123,15 +82,12 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         protected ContentPresenter? _root;
 
         // hover「冷处理」到期时间戳（TickCount64，0 = 未启用；见 BeginHoverHoldOffFor）。
-        // 期间拒绝一切"点亮"请求 —— 专挡 ButtonBase 松手约 380ms 后补发的"圆谎" PointerEntered。
         private long _holdOffUntilTicks;
 
         protected BaseLink(TButton button) { _button = button; }
 
-        /// <summary>本 Link 接管的按钮（供包含类做子树归属判断等）。</summary>
         internal TButton Button => _button;
 
-        /// <summary>开启 hover 冷处理：立即清回静止，并在 <paramref name="untilTicks"/> 前拒绝点亮。</summary>
         internal void BeginHoverHoldOff(long untilTicks)
         {
             _holdOffUntilTicks = untilTicks;
@@ -140,11 +96,9 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 
         internal void Attach()
         {
-            // ① 决定视觉的真源挂依赖属性回调（按下）
             _button.RegisterPropertyChangedCallback(
                 ButtonBase.IsPressedProperty, (s, e) => Sync());
 
-            // ①' 类型相关的额外状态回调（ToggleButton 挂 IsChecked；Button 无事）
             AttachExtra();
 
             // ② 松手这一帧看一眼：此时状态已回写，而假 exited 与状态窜扰都还没发生
@@ -152,9 +106,6 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 
             // ③ 主题切换 / 反复挂载都可能让控件模板被重新应用（模板根换成新实例），
             //    并置 _dirty 强制重算 —— 否则状态都没变时会被 Apply 的早退挡掉，资源里的主题色换了也白换。
-            //    ⚠ Loaded 必须重新登记到 _instances（见 EnsureRegistered 注释）：下面 ⑤ 挂了 Unloaded，
-            //    Flyout 关闭会卸载内容并把本 Link 摘出实例表；Attach 又受业务守卫不会重跑 ⇒ 若 Loaded
-            //    不补回去，任何"按实例表遍历"的操作都会永久漏掉这一项。
             _button.ActualThemeChanged += (s, e) => { _dirty = true; Sync(); };
             _button.Loaded += (s, e) =>
             {
@@ -165,7 +116,6 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 
             // ④ 指针落点只用来维护「鼠标到底在不在按钮上」，绝不采信 IsPointerOver / PointerExited
             //    ⚠ PointerMoved 只可能是<b>真实</b>移动 —— ButtonBase 那两次"假退出 / 约 380ms 后圆谎"
-            //    补的都是 PointerExited / PointerEntered，绝不会补 PointerMoved ⇒ 只有它有权提前解除冷处理。
             _button.PointerEntered += (s, e) => Track(e);
             _button.PointerMoved += (s, e) => { _holdOffUntilTicks = 0; Track(e); };
             _button.PointerExited += (s, e) => Track(e);
@@ -173,7 +123,6 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 
             Sync();
 
-            // ⑤ 注册到全局实例表，供主题切换时 RefreshAll() 同步重绘（见类级注释）。
             _instances.Add(this);
             _button.Unloaded += OnUnloaded;
         }
@@ -183,12 +132,7 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 
         private void OnUnloaded(object sender, RoutedEventArgs e) => _instances.Remove(this);
 
-        /// <summary>
-        /// 保证本 Link 仍在全局实例表 <see cref="_instances"/> 里（幂等）。
-        /// ⚠ Flyout/Popup 关闭会卸载内容 ⇒ <see cref="OnUnloaded"/> 把本 Link 摘出实例表，而重开时外部
-        /// <c>Attach</c> 受业务守卫不会重跑、只有 Loaded 回调会跑。若不在此补回去，所有按 <c>_instances</c>
-        /// 遍历的操作都会**永久漏掉这一项**（10-03 实证：悬浮色关菜单后仍残留、下次展开还在）。
-        /// </summary>
+        /// 保证本 Link 仍在全局实例表 里（幂等）。
         private void EnsureRegistered()
         {
             for (int i = 0; i < _instances.Count; i++)
@@ -198,7 +142,6 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             _instances.Add(this);
         }
 
-        /// <summary>置脏并立即重绘（供外部 RefreshAll 调用）。</summary>
         internal void ForceRefresh()
         {
             _dirty = true;
@@ -207,14 +150,9 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
 
         private void Track(PointerRoutedEventArgs e) => SetHoverFromPointer(e);
 
-        /// <summary>按指针相对本按钮的坐标几何判定 hover —— 同一可视树内、无跨树坐标系问题。
-        /// 只在 hover 真变化时才置脏重绘（未变化不触发 Sync，省掉每次移动的无谓 Refresh/Apply）。
-        /// <para>是否参与整页驱动由 <see cref="ExcludeFromPageHoverDrive"/> 决定（<b>不是</b>靠覆写本方法）。
-        /// ⚠ 必须是 <c>internal</c> 而非 <c>protected</c>：包含类 <c>VisualOverrideBase</c> 不是
-        /// <c>BaseLink</c> 的派生类，protected 成员对包含类不可访问（CS0122，实测）。</para></summary>
+        /// <summary>按指针相对本按钮的坐标几何判定 hover —— 同一可视树内、无跨树坐标系问题。 只在 hover 真变化时才置脏重绘（未变化不触发 Sync，省掉每次移动的无谓 Refresh/Apply）。 是否参与整页驱动由 决定（不是靠覆写本方法）。</summary>
         internal void SetHoverFromPointer(PointerRoutedEventArgs e)
         {
-            // 弹模态对话框期间直接按静止处理（见 SetHoverSuppressed），不读几何。
             if (_hoverSuppressed) { SetHover(false); return; }
             var pos = e.GetCurrentPoint(_button).Position;
             bool inside = pos.X >= 0 && pos.Y >= 0
@@ -222,31 +160,19 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             SetHover(inside);
         }
 
-        /// <summary>是否<b>退出</b>「整页 hover 几何驱动」。默认 false = 参与。
-        /// <para>需要退出的情形：本 Link 的按钮活在<b>另一棵 Xaml 树</b>（popup / flyout 内容）——
-        /// 跨树 <c>GetCurrentPoint</c> 的坐标不可靠（10-03 实证踩过），且它已由<b>所在容器</b>的处理器驱动
-        /// ⇒ 整页驱动必须跳过，否则会误清 / 误亮。</para>
-        /// <para>⚠ 这是<b>事件</b>语义，与「静止档是否透明」的<b>外观</b>语义正交，绝不能复用同一个标志：
-        /// 缩放胶囊 4 颗静止档同样是透明的（要并入亚克力胶囊、看不见圆边界），但它在<b>主可视树</b>里、
-        /// 必须参与整页驱动，否则悬浮色残留会立刻回归（10-04）。</para></summary>
+        /// 是否退出「整页 hover 几何驱动」。
         internal virtual bool ExcludeFromPageHoverDrive => false;
 
-        /// <summary>是否<b>只信软件自身主题源</b>、跳过视觉树遍历（默认 false = 走遍历）。
-        /// <para>仅 popup / flyout 独立树需要置 true：该树的 <c>FlyoutPresenter</c> 上挂着 WinUI 自己
-        /// 镜像的 <see cref="FrameworkElement.RequestedTheme"/>，它<b>滞后于</b> app 主题（10-09 日志实证：
-        /// app 已切深色、<c>FlyoutPresenter</c> 仍报 Light）⇒ 遍历命中之即取到浅色档 ⇒ 按钮在深色下变白。
-        /// 直接取 <c>MainWindow.IsDarkTheme</c>（确定性、已含"Default 回落系统"）即可绕开这个滞后镜像。</para></summary>
+        /// <summary>是否只信软件自身主题源、跳过视觉树遍历（默认 false = 走遍历）。 仅 popup / flyout 独立树需要置 true：该树的 FlyoutPresenter 上挂着 WinUI 自己 镜像的 ，</summary>
         protected virtual bool UseAppThemeSourceOnly => false;
 
-        /// <summary>直接设定 hover（供页面/容器级驱动「全灭」或外部指派）；
-        /// 同样只在真变化时才置脏重绘。</summary>
+        /// <summary>直接设定 hover（供页面/容器级驱动「全灭」或外部指派）； 同样只在真变化时才置脏重绘。</summary>
         internal void SetHover(bool hover)
         {
-            // 弹模态对话框期间抑制 hover（详见 SetHoverSuppressed）：任何 hover 请求都按静止处理，
+            // 弹模态对话框期间抑制 hover：任何 hover 请求都按静止处理，
             // 否则弹窗打开瞬间的游离 PointerMoved/Entered 会把按钮卡在悬浮态、且弹窗期间整页几何驱动不触发。
             if (_hoverSuppressed) hover = false;
             // 冷处理窗口内拒绝"点亮"（见 BeginHoverHoldOffFor）：挡的正是 ButtonBase 松手约 380ms 后
-            // 补发的那次"圆谎" PointerEntered —— 它带旧坐标，会把刚位移出去的按钮重新点亮。
             if (hover && Environment.TickCount64 < _holdOffUntilTicks) hover = false;
             if (_hover == hover) return;
             _hover = hover;
@@ -254,11 +180,7 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             Sync();
         }
 
-        /// <summary><b>权威指派</b>：调用方已按<b>实时指针位置</b>算好几何（不经过任何指针事件），
-        /// 直接设定 hover 状态，<b>不受冷处理窗口约束</b>（那窗口是给「可能带旧坐标的迟到事件」设的，
-        /// 与本地实时几何无关）。仅用于「元素因布局变化滑到静止指针下方」这种 WinUI 不会主动派发
-        /// hover 事件的场合 —— 例如白板卡片胶囊展开/收起后按当前指针补判一次。
-        /// 仍尊重 <c>_hoverSuppressed</c>（弹模态对话框期间一律静止）。</summary>
+        /// <summary>权威指派：调用方已按实时指针位置算好几何（不经过任何指针事件）， 直接设定 hover 状态，不受冷处理窗口约束（那窗口是给「可能带旧坐标的迟到事件」设的， 与本地实时几何无关）。</summary>
         internal void ForceHover(bool hover)
         {
             if (_hoverSuppressed) hover = false;
@@ -268,14 +190,12 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             Sync();
         }
 
-        /// <summary>置脏后重解析模板根并应用当前状态。派生类经 <see cref="Apply"/> 实现状态→画刷映射。</summary>
         protected void Sync()
         {
             Refresh();
             Apply();
         }
 
-        /// <summary>重新解析模板根（每次刷新都做，模板可能被重新应用过）。</summary>
         private void Refresh()
         {
             ContentPresenter? root = null;
@@ -284,10 +204,8 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             _root = root;
         }
 
-        /// <summary>把当前状态映射到对应主题画刷并写到模板根。状态集因按钮类型而异，由子类实现。</summary>
         protected abstract void Apply();
 
-        // —— 浮层透明项专属（仅 ButtonVisualOverride 用到；ToggleButton 为空实现）——
         /// <summary>供浮层强清遍历调用：仅当本项是 transparentAtRest 时才清 hover。基类空实现。</summary>
         protected virtual void ClearTransparentHoverIfAny() { }
         /// <summary>供浮层独占 hover 遍历调用：仅当本项是 transparentAtRest 时才按 hovered 置 hover。基类空实现。</summary>
@@ -296,16 +214,8 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         internal void ClearTransparentHoverState() => ClearTransparentHoverIfAny();
         internal void SetTransparentHoverState(Button? hovered) => SetTransparentHover(hovered);
 
-        /// <summary>
-        /// 取主题资源：<b>主题字典优先，顶层字典降级为兜底</b>。取不到返回 null —— 写 null 等于清掉本地值，
-        /// 会回落到模板的 TemplateBinding，不会留透明块。可被子类覆写（如 ToggleButton 的局部画笔色覆写）。
-        /// </summary>
-        /// <remarks>
+        /// 取主题资源：主题字典优先，顶层字典降级为兜底。
         /// 【为什么必须反过来查（2026-09-27 实测，勿改回旧顺序）】
-        /// 旧实现「先顶层字典，再主题字典」会命中 generic.xaml 提升上来的同名键（不随主题切换、Dark 返回 Light 值）
-        /// ⇒ 主题字典里的配色永远轮不到、改了 App.xaml 画面纹丝不动。故顺序固定为 ① 主题字典 → ② Default 档 → ③ 顶层兜底。
-        /// 且主题字典无 "Dark" 键（暗色值在 "Default" 里），用 <see cref="ResolvedThemeDictKey"/> 确定性映射、绝不依赖异步的 ActualTheme。
-        /// </remarks>
         protected virtual object? Resource(string key)
         {
             var resources = Application.Current?.Resources;
@@ -331,23 +241,12 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             return null;
         }
 
-        /// <summary>
         /// 确定性主题源：把"当前应是深色还是浅色"映射成 WinUI 主题字典的键名（Default=暗 / Light=浅）。
-        /// 从 <c>_button</c> 沿视觉树向上找第一个显式设置 <see cref="FrameworkElement.RequestedTheme"/>
-        /// 为 Dark/Light 的祖先（本 app 主题正是同步写到 MainPage 上的那个值），用它判定深浅；
-        /// 全链都是 Default(跟随系统)、或弹层独立树走到父链断裂时，回落【软件自己的主题设置】
-        /// （<c>MainWindow.IsDarkTheme</c>，已含"Default 回落系统"；详见方法内注释），
-        /// 只有连窗口都取不到才用 <c>Application.Current.RequestedTheme</c>（系统主题）。
-        /// 绝不用 <c>_button.ActualTheme</c> —— 它在 RequestedTheme 设置后要经布局通道异步传播，
-        /// 主题切换瞬间仍停在旧主题 ⇒ Resource() 读到旧字典、浅色下涂白底，在深色模式里闪一下白。
-        /// </summary>
         protected string ResolvedThemeDictKey()
         {
             try
             {
                 // popup / flyout 独立树：跳过遍历，直接用确定性的软件主题源（见 UseAppThemeSourceOnly 注释）。
-                // 遍历会命中 FlyoutPresenter 上【WinUI 自己镜像的、滞后于 app 主题的】RequestedTheme
-                // （10-09 日志实证：app 已深色、FlyoutPresenter 仍报 Light）⇒ 取到浅色档 ⇒ 深色下按钮变白。
                 if (UseAppThemeSourceOnly && (Application.Current as App)?.MainWindow is MainWindow popupMw)
                     return popupMw.IsDarkTheme ? "Default" : "Light";
 
@@ -358,16 +257,8 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
                     if (e.RequestedTheme == ElementTheme.Light) return "Light";
                     e = VisualTreeHelper.GetParent(e) as FrameworkElement;
                 }
-                // ⚠ 兜底必须用【软件自己的主题设置】，不能直接用 Application.Current.RequestedTheme（系统设置）：
+                // ⚠ 兜底必须用【软件自己的主题设置】，不能直接用 Application.Current.RequestedTheme（系统设置）。
                 //    ① 全链都是 Default（跟随系统）时掉到这里（popup 树已在上方 UseAppThemeSourceOnly 分支短路，
-                //       不会走到这里 —— 10-09 前误以为它会因父链断裂而落到此处，实测证明遍历会命中 FlyoutPresenter）；
-                //    ② Application.Current.RequestedTheme 在本 app 里【从未被赋值】，它恒等于 Windows 的
-                //       "默认应用模式"系统设置，与用户在软件里选的主题完全无关 ——
-                //       用户系统应用模式=浅色、软件设为深色时，此处会判成"浅色"⇒ 取到浅色字典的画刷。
-                //    ⇒ 后果：浅色画刷被应用到按深色渲染的按钮，浅色画刷内的
-                //      {ThemeResource GlanceFillNeutral*} 在深色字典查不到 ⇒ COMException + 配色错乱。
-                //    正解 = 取窗口的 WindowRequestedTheme（软件设置已写入），Default 时再回落系统
-                //      —— 与 GpuPageView.xaml.cs:2452 的确定性主题源同源；MainWindow.IsDarkTheme 已封装该回落。
                 if ((Application.Current as App)?.MainWindow is MainWindow mw)
                     return mw.IsDarkTheme ? "Default" : "Light";
 
@@ -376,12 +267,10 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
             }
             catch
             {
-                // 最坏回落 ActualTheme（可能仍带旧竞态，但不崩）
                 return _button.ActualTheme == ElementTheme.Dark ? "Default" : "Light";
             }
         }
 
-        /// <summary>按主题名取出主题字典；取不到返回 null。</summary>
         protected static ResourceDictionary? LookupThemeDict(ResourceDictionary resources, string themeName)
         {
             if (resources.ThemeDictionaries.TryGetValue(themeName, out var dict)) return dict as ResourceDictionary;
