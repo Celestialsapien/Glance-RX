@@ -5228,7 +5228,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     /// 附：所谓"快速掠过被跳过"与上者是同一件事，并非采样丢失 —— 8ms 派发间隔 × 1200px/s ≈ 9.6px
     ///   步长，小于命中带直径（约 20px）；真实原因是高亮还没等出来，指针就已经离开。
     ///   （另实测 GetIntermediatePoints 在桌面鼠标上基本只返回 1 个点，拿不到中间采样，
-    ///    若要真补采样只能走 Win32 GetMouseMovePointsEx —— 但按上面的算术，补了也无收益。）</summary>
+    ///    若要真补采样只能走 Win32 GetMouseMovePointsEx —— 但按上面的算术，补了也无收益。）
+    ///
+    /// ⚠【2026-10-22 追加：连"剥离到合成器"也被实测否掉了，勿再尝试换渲染路径】
+    /// 上一段说"唯一出路是剥离 hover 层"，实测不成立。做了三路并行的对照探针：
+    ///   同一次 PointerMoved 里同时更新 ① Visual.Offset（合成器，不碰画布、不走渲染 pass）
+    ///   ② TranslateTransform（XAML 渲染 pass，不碰画布）③ ScreenCanvas.Invalidate → Draw（现状）；
+    ///   另加一路 ④ 后台每 8ms 用 Win32 GetCursorPos 轮询 + TryEnqueue 改 Visual.Offset（完全绕开指针事件）。
+    /// 实测（4481 + 3200 次移动）：
+    ///   ① 指针事件**不陈旧**：事件坐标与"此刻真实光标"相差恒为 0.80px（正好 1 个物理像素，即取整误差），
+    ///      P90 仅 0.80001px ⇒ 事件到达时就是最新位置，"事件投递延迟"这个假设被排除；
+    ///   ② UI 线程**空转**：轮询回调落到 UI 线程的排队延迟 P50 = 0.08ms（独立印证上面的第 ④ 条）；
+    ///   ③ 于是 trace 里 dtMax 96~553ms 的"断层"只是笔画之间的停顿，不是卡顿；
+    ///   ④ 但三条绘制路径**全都明显落后光标**，且**轮询 + 合成器那一路反而最慢** ——
+    ///      因为它不在"输入驱动的那次提交"里，要多等一个提交周期。
+    /// ⇒ 延迟由**提交→呈现的节拍**决定，应用层无论选哪条绘制路径都活在这个节拍里；
+    ///   真正贴近光标的只有 DWM 自己画的鼠标指针。故"换架构/剥离 hover 层"这条路也一并关闭。</summary>
     private void UpdateCanvasEdgeHover(Point vp)
     {
         string? hover = (IsPointOnCanvasCardOrControl(vp) || IsPointOverCanvasOverlayChrome(vp))
