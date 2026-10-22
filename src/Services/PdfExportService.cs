@@ -252,7 +252,7 @@ public class PdfExportService
                             if (a.Elements["/InkList"] is not PdfArray inkList || inkList.Elements.Count == 0) continue;
                             if (inkList.Elements[0] is not PdfArray stroke || stroke.Elements.Count < 2) continue;
 
-                            // 遗留笔迹迁移：pre-fix 版本写入时 page.Width/Height.Point 返回【MediaBox 未旋转尺寸】
+                            // 兼容旧文件：早期版本写入时 page.Width/Height.Point 返回【MediaBox 未旋转尺寸】
                             double useWc = Wc, useHc = Hc;
                             if (isLegacy)
                             {

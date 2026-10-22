@@ -367,7 +367,7 @@ internal static class CanvasMarkdown
     }
 
     /// 定界符配对：先按"同类已开则闭合、否则开启"的栈规则匹配。
-    /// ⚠ 旧实现会把它们"顺手收尾"，导致 `**==测试**` 的 `==` 被当成已闭合（标记被吃掉还上高亮）；
+    /// ⚠ 不能把它们"顺手收尾"，否则 `**==测试**` 的 `==` 被当成已闭合（标记被吃掉还上高亮）；
     private static void MatchDelimiters(string text, List<(int Pos, int Len, TokenKind Kind)> tokens,
         bool[] skip, List<(int Start, int End, TokenKind Kind)> spans,
         out List<(int Pos, int Len, TokenKind Kind)> unclosed, List<DelimiterPair>? pairs = null)

@@ -212,7 +212,7 @@ public sealed partial class MainPage : Page
 
     // 画笔模式圆环光标（窗口作用域，真实 HCURSOR + 作用域限定）。
     // WinUI 3 主视图（客户区）由 XAML Island 承载，光标由框架经【指针输入】设置，
-    // 退出/崩溃都通过 SPI_SETCURSORS 兜底恢复，彻底告别此前"卡死圆环"。
+    // 退出/崩溃都通过 SPI_SETCURSORS 兜底恢复，不会残留「卡死圆环」。
     private bool _penRingActive;
     private IntPtr _hRingCursor;        // 当前画笔圆环光标句柄（GDI 资源，需 DestroyIcon 释放）
     private int _ringDiameter;
@@ -332,7 +332,7 @@ public sealed partial class MainPage : Page
         GpuViewer.CanvasNodeBringToFrontRequested += GpuCanvas_BringToFront;
         GpuViewer.CanvasUndoRequested += (_, __) => RequestUndo();
         GpuViewer.CanvasRedoRequested += (_, __) => RequestRedo();
-        // Ctrl+Z / Ctrl+Y 不走 Page 加速器（在文本框聚焦时会被吞掉），改为整页 KeyDown 兜底。
+        // Ctrl+Z / Ctrl+Y 不走 Page 加速器（在文本框聚焦时会被吞掉），故由整页 KeyDown 兜底。
         this.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(UndoRedo_KeyDown), true);
 
         WelcomePanel.Visibility = Visibility.Visible;
@@ -345,9 +345,7 @@ public sealed partial class MainPage : Page
 
         this.Loaded += MainPage_Loaded;
         // 【开关侧边栏 = 保持"阅读位置不变量"，而不是死板 fit 到视口】
-        // 目标（用户拍板）：纵向布局下，开关前/后视口左右两条边线切到的内容完全一致 ——
-        // （一路调到开 500ms / 关 400ms，是框架默认 0.2s/0.1s 的 2.5~4 倍），用户实测**无感**、明确放弃
-        // ⇒ 已整体移除，恢复框架默认。⚠ 无感的原因**未确证**：从 2.5 倍差异不可能感知不到这一点看，
+        // 目标：纵向布局下，开关前/后视口左右两条边线切到的内容完全一致（过渡时长用框架默认）。
         SidebarSplitView.PaneOpening += (s, e) => QueueSidebarReanchor();
         SidebarSplitView.PaneClosing += (s, e) => QueueSidebarReanchor();
         SidebarSplitView.PaneOpened += (s, e) => UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
@@ -379,8 +377,8 @@ public sealed partial class MainPage : Page
     }
 
     /// 让侧边栏底色与主视图基色区分（现代分层配色）： 浅色模式用比主视图基色(#F3F3F3)更深的 #EAEAEA，深色模式用比主视图基色(#202020)更浅的 #2A2A2A。
-    /// ⚠ 必须在【代码后置】着色，不能引用 App.xaml 主题字典的【自定义】键（那会破坏主题切换，
-    /// 见 2026-10-06 根因定位）；也不能覆盖系统键 CardStrokeColorDefaultBrush（连坐 9 处引用 + 25 个别名）。
+    /// ⚠ 必须在【代码后置】着色，不能引用 App.xaml 主题字典的【自定义】键（那会破坏主题切换）；
+    /// 也不能覆盖系统键 CardStrokeColorDefaultBrush（连坐 9 处引用 + 25 个别名）。
     private void UpdateSidebarBackground()
     {
         if (ThumbnailSidebarPanel == null) return;
@@ -392,7 +390,7 @@ public sealed partial class MainPage : Page
     }
 
     /// 工具栏内任意按钮点击后的焦点剥夺处理。
-    /// Focus 会静默失败、焦点仍留在按钮上→Enter/Space 仍重触发（这是上一版失效的根因）。
+    /// Focus 会静默失败、焦点仍留在按钮上→Enter/Space 仍重触发。
     private void OnPointerReleasedDefocus(object sender, PointerRoutedEventArgs e)
     {
         bool inFlyout = false;
@@ -410,7 +408,7 @@ public sealed partial class MainPage : Page
     /// 禁止任何焦点落到 ButtonBase 上：用户要求按钮只由鼠标单击触发，不保留 Tab+Enter 触发路径， 点后焦点也不残留→Enter/Space 不重触发。
     private void OnGettingFocusBlockButtons(UIElement sender, GettingFocusEventArgs e)
     {
-        // 根因修复：原实现用 e.Cancel=true 拦截焦点落到 ButtonBase / 程序化聚焦输入框。但 WinUI 在
+        // ⚠ 一律用 TryCancel()（是否取消由这里判），不要 e.Cancel = true 硬拦：WinUI 在
         if (e.NewFocusedElement is ButtonBase)
             e.TryCancel();
         // 页数输入框：焦点其实落在自绘控件的隐藏宿主上，故按"是否本控件的宿主"识别。仅允许用户
@@ -512,7 +510,6 @@ public sealed partial class MainPage : Page
     }
 
     /// 对比视图「打开第二份 PDF」圆形按钮的手绘符号，固定为「恒定 2 物理像素」描边： 描边 DIP = 2 / RasterizationScale，保证任意缩放下设备描边宽恒为 2（偶）像素。
-    /// （判据与推导见 .workbuddy/memory/2026-10-01.md「奇偶必须配对」。）
     private void ApplyGlyphStrokeThickness()
     {
         double scale = this.XamlRoot?.RasterizationScale ?? 1.0;
@@ -572,7 +569,7 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(SettingsButton);
         ButtonVisualOverride.Attach(AddBookmarkButton);
 
-        // 欢迎页「打开 PDF」按钮（10-05）：并入几何驱动 + accent 紫配色，去掉原生 VSM flicker。
+        // 欢迎页「打开 PDF」按钮：几何驱动 + accent 紫配色，避开原生 VSM flicker。
         ButtonVisualOverride.Attach(OpenPdfButton, accent: true);
 
         // 对比视图开/关 PDF 的两颗 pill：改用 ButtonVisualOverride（整颗变色，与功能按钮同逻辑）。
@@ -584,8 +581,8 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(GuideButton, inPopupTree: true);
 
         // 缩放胶囊 4 颗（ZoomOut / ZoomIn / ZoomValue / FitWidth）：与对比视图两颗【完全同一路线】——
-        // 同样套 ButtonNoStateMachineStyle、同样静止就带底、hover / pressed 整颗变色（10-02 用户拍板）。
-        // ⚠ 10-04 起静止档改为【完全透明】（transparentAtRest）：胶囊背景是【亚克力】FlyoutPresenterBackground
+        // 同样套 ButtonNoStateMachineStyle、同样静止就带底、hover / pressed 整颗变色。
+        // ⚠ 静止档为【完全透明】（transparentAtRest）：胶囊背景是【亚克力】FlyoutPresenterBackground
         //   ⚠ 这里【不传 inPopupTree】：胶囊在主可视树，必须参与整页 hover 几何驱动，否则悬浮色残留回归。
         ButtonVisualOverride.Attach(ZoomOutButton, transparentAtRest: true);
         ButtonVisualOverride.Attach(ZoomInButton, transparentAtRest: true);
@@ -598,8 +595,8 @@ public sealed partial class MainPage : Page
 
         AttachZoomPresetOverrides();
 
-        // —— 悬浮色残留的通用根治（10-04）——
-        // 根因：hover 原本只由【每颗按钮自己】的 PointerEntered/Moved/Exited 维护（基类 Track），
+        // —— 悬浮色残留的通用根治 ——
+        // hover 若只由【每颗按钮自己】的 PointerEntered/Moved/Exited 维护（基类 Track），
         if (this.Content is UIElement pageRoot && !_pageHoverDriveAttached)
         {
             pageRoot.AddHandler(PointerMovedEvent, new PointerEventHandler(PageRoot_PointerMoved), true);
@@ -1434,7 +1431,7 @@ public sealed partial class MainPage : Page
 
             // 3. 成功提示：改用右下角小弹窗（自动消失），不再弹模态对话框（免去点击确定）。
             if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveAsToastSuccess"), ToastIconKind.Success);
-            // 原模态对话框会引发焦点态变化导致视口漂移，曾需在对话框后补保视口；现已无对话框，
+            // FileSavePicker 会改变焦点态导致视口漂移，故返回后仍需补保视口（已不用模态对话框），
             try { GpuViewer.RestoreView(savedView); } catch { }
             try { GpuViewer.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => GpuViewer.RestoreView(savedView)); } catch { }
             return true;
@@ -2073,7 +2070,7 @@ public sealed partial class MainPage : Page
     }
 
     /// 直接切换行模板里三层底色的显隐 —— 刻意不走 VisualStateManager： ListViewItem 控件自身的状态机会以 IsPointerOver 为依据调用 GoToState("N…
-    /// 我们一旦定义同名状态就被它抢（假 PointerExited 到时它把行切回 Normal，10-17 实测"改了没变化"）。
+    /// 我们一旦定义同名状态就被它抢（假 PointerExited 到时它把行切回 Normal，实测"改了没变化"）。
     /// ⚠ 每次都重新解析模板根，绝不缓存：模板被框架重新应用后旧节点即"幻影"（写它等于写空气）。
     private static void ApplyBookmarkRowVisual(ListViewItem row, string state)
     {
@@ -3155,8 +3152,8 @@ public sealed partial class MainPage : Page
 
     // ---------------- 画笔模式圆环光标（窗口作用域，SetSystemCursor + 作用域判定） ----------------
     // 用真实 HCURSOR 圆环替换"系统箭头"本身（SetSystemCursor），框架每帧 SetCursor(箭头) 实际画出圆环，
-    // 故主视图/边缘生效、零滞后（这正是此前 WM_SETCURSOR 子类化拦不到 Island 主视图的根因）。
-    // 窗口外、标题栏、已展开工具栏、已展开画笔颜色胶囊均为原生光标，退出/崩溃兜底也恢复，彻底告别此前 SetSystemCursor 泄漏到全局的"卡死圆环"。
+    // 故主视图/边缘生效、零滞后（WM_SETCURSOR 子类化拦不到 Island 主视图）。
+    // 窗口外、标题栏、已展开工具栏、已展开画笔颜色胶囊均为原生光标，退出/崩溃兜底也恢复，不会把 SetSystemCursor 泄漏到全局（「卡死圆环」）。
 
     private void RefreshRingCursor()
     {
@@ -3593,7 +3590,7 @@ public sealed partial class MainPage : Page
         try
         {
             // 圆环直接以【目标显示尺寸】渲染——光标按位图自身像素尺寸显示，系统不缩放，
-            // 根因修复（黑边 + 上下左右发平）：此前用 1bpp AND 掩码做二值透明，系统走"掩码模式"忽略 alpha。
+            // ⚠ 不能用 1bpp AND 掩码做二值透明：系统会走"掩码模式"忽略 alpha（黑边 + 上下左右发平）。
             int diameter = (int)Math.Clamp(_activeThickness * 3.0, 14, 20);
             string colorHex = ResolveActiveColorHex();
             if (_hRingCursor != IntPtr.Zero && _ringDiameter == diameter && _ringColorHex == colorHex)
@@ -3617,7 +3614,7 @@ public sealed partial class MainPage : Page
     }
 
     // 构造透明背景、仅一圈【纯色】圆环的 HCURSOR（无内外描边，本体即画笔色）。
-    // 根因修复（黑边 + 上下左右发平）：此前用 1bpp AND 掩码做二值透明 → 系统走"掩码模式"忽略 alpha，
+    // ⚠ 不能用 1bpp AND 掩码做二值透明 → 系统会走"掩码模式"忽略 alpha（黑边 + 上下左右发平），
     private IntPtr CreateRingCursorHandle(int diameter, byte r, byte g, byte b)
     {
         int d = Math.Max(12, diameter);
@@ -4284,7 +4281,7 @@ public sealed partial class MainPage : Page
     }
 
     // ======================= 最小窗口尺寸（DIP；MainWindow 换算成物理像素后经 WM_GETMINMAXINFO 施加）=======================
-    // 设计目标（用户拍板）。
+    // 设计目标：
     //   · 宽度 —— 展开工具栏时「侧边栏 / 阅读 / 画笔 / 白板 / 设置 / …」这一组必须能并排放下且互不重叠。
     // 宽度取自工具栏自身的实测宽度（与收纳判定同源口径）⇒ 随 DPI / 语言 / 主题自适应，不写死像素。
     private const double A4ShortEdgePt = 595.276;
@@ -4738,7 +4735,7 @@ public sealed partial class MainPage : Page
         if (sender is Button b) RefreshColorSwatchState(b);
     }
 
-    /// <summary>给颜色按钮逐个挂悬浮/离开事件（悬浮预览用）。 悬浮/按下的底色与边框透明档已在 XAML 解析期写进每个按钮自己的 Resources， 这里不做任何 element.Resources 写入（运行时写入是 2026-09-29 闪退的根因）。</summary>
+    /// <summary>给颜色按钮逐个挂悬浮/离开事件（悬浮预览用）。 悬浮/按下的底色与边框透明档已在 XAML 解析期写进每个按钮自己的 Resources， 这里不做任何 element.Resources 写入（运行时写入会闪退）。</summary>
     private void AttachColorSwatchHover()
     {
         if (ColorSelectorPanel == null) return;
@@ -4839,7 +4836,7 @@ public sealed partial class MainPage : Page
             ViewerDivider.Visibility = Visibility.Visible;
             // 刚开分屏时右侧还是空的："+"常驻可见，否则用户在空白区找不到入口。
             SetSecondaryOpenPillPinned(GpuViewerRight.Visibility != Visibility.Visible);
-            // 兜底：容器此前一直 Collapsed，可能错过了工具栏的 SizeChanged，这里补算一次纵向偏移。
+            // 兜底：容器为 Collapsed 时可能错过工具栏的 SizeChanged，这里补算一次纵向偏移。
             UpdateSecondaryPillTopOffset();
             UpdateSyncScrollBar();
         }
@@ -4937,7 +4934,7 @@ public sealed partial class MainPage : Page
     }
 
     /// 快速缩放菜单展开瞬间：强制缩放胶囊同步可见（二者同生共死）。
-    /// 竞态根因：胶囊正在淡出（此前 BottomZoomPill_PointerExited 或 _zoomPillHideTimer 已触发
+    /// 竞态：胶囊正在淡出（BottomZoomPill_PointerExited 或 _zoomPillHideTimer 已触发
     // 缩放预设浮层里的 8 颗倍率按钮：没有 x:Name，按容器遍历接管。
     // ⚠ Flyout 内容活在主可视树之外：InitializeComponent 时 ZoomPresetPanel.Children 一般已可用，
     private void AttachZoomPresetOverrides()
@@ -4962,7 +4959,7 @@ public sealed partial class MainPage : Page
         if (attached > 0)
         {
             // 菜单面板「独占 hover」：由面板自身的 PointerMoved 实时算指针落在哪颗内，
-            // PointerExited —— 后者在 popup/flyout 输入上下文切换时常被 WinUI 吞掉（旧项残留亮着的根因）。
+            // PointerExited —— 后者在 popup/flyout 输入上下文切换时常被 WinUI 吞掉（否则旧项会残留亮着）。
             ZoomPresetPanel.AddHandler(PointerMovedEvent, new PointerEventHandler(ZoomPresetPanel_PointerMoved), true);
             // 指针离开整片菜单 ⇒ 全灭（用相对坐标核对确已离开，排除「从面板背景移到子项」的假退出）。
             ZoomPresetPanel.AddHandler(PointerExitedEvent, new PointerEventHandler(ZoomPresetPanel_PointerExited), true);
@@ -5401,7 +5398,7 @@ public sealed partial class MainPage : Page
         }
     }
 
-    /// <summary>批注持久化已改为"保存时写入 PDF 真实 /Ink 注解对象"（见 SaveOriginalPdfAsync / ExportPdfAsync）， 文件即唯一真相源。</summary>
+    /// <summary>批注持久化走"保存时写入 PDF 真实 /Ink 注解对象"（见 SaveOriginalPdfAsync / ExportPdfAsync）， 文件即唯一真相源。</summary>
     public Task SaveAnnotationsAsync() => Task.CompletedTask;
 
     /// <summary>从 PDF 文件读回 Glance 写入的真实 /Ink 注解对象，重建叠加层模型。文件即唯一真相源： 无 JSON 侧栏、无副本。"不保存退出"不再需要回滚——未保存的笔迹从未落盘，文件始终是 上次保存态，重开即读到已保存批注。</summary>

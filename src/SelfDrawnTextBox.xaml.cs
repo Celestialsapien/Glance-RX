@@ -484,7 +484,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
         FocusHost();
         // ⚠ 光标必须在这里【无条件】起表，不能只靠 Host_GotFocus。
         // 焦点若【已经在】宿主上（例如点 √/× 结束编辑时，按钮被调用方的 GettingFocus 拦截挡下、
-        // （10-17 实测）。反之"点别处失焦退出"时焦点真丢了，GotFocus 会来，所以那条路一直正常 ——
+        // 反之"点别处失焦退出"时焦点真丢了，GotFocus 会来，所以那条路一直正常 ——
         StartBlink();
         int len = Host.Text?.Length ?? 0;
         Host.SelectionStart = len;

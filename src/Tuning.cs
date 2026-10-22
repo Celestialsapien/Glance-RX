@@ -22,7 +22,7 @@ using System.IO;
 
 namespace GlanceRX
 {
-    /// 设计手感调参中心 / Design-feel tuning hub. 原本这些值是散落在 GpuPageView / MainPage 里的编译期 const。
+    /// 设计手感调参中心 / Design-feel tuning hub. 所有手感相关的编译期常量集中在此（GpuPageView / MainPage 不再各自定义）。
     public static class Tuning
     {
 

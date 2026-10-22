@@ -130,7 +130,7 @@
                只抄 Template 会丢 Padding / CornerRadius / Foreground 而让外观变形（09-29 实测踩过）。 -->
         <Style x:Key="ZoomFlyoutItemNoStateMachineStyle" TargetType="Button">
             <Setter Property="IsTabStop" Value="False"/>
-            <!-- 上下不对称 Padding（上 7 / 下 9，总高不变）：抵消字体行盒下降部预留，把居中文字整体上移 1px（10-02 精修）。 -->
+            <!-- 上下不对称 Padding（上 7 / 下 9，总高不变）：抵消字体行盒下降部预留，把居中文字整体上移 1px。 -->
             <Setter Property="Padding" Value="16,7,16,9"/>
             <!-- 居中对齐 + 字号与项目其它按钮同源（字体键必须用 ContentControlThemeFontFamily，
                  不是 ControlContentThemeFontFamily —— 后者在本 WinUI 版本不存在，会 XamlParseException 崩启动，10-02 踩过）。
@@ -971,10 +971,9 @@
 
                         </StackPanel.RenderTransform>
 
-                        <!-- 画笔色板（7 色，详见 2026-09-22 日志）：高饱和、清晰可分的一组记号笔色。
+                        <!-- 画笔色板（7 色）：高饱和、清晰可分的一组记号笔色。
                              第 1 位 = 主题强调紫（Obsidian 紫），按深浅主题切换：浅 #9873F7 / 深 #A882FF；
-                             其余 6 色仅顺序调动、色号不变：蓝→青→绿→黄→红→黑。
-                             原第 4 位粉红移除，空出的首位给主题强调紫。 -->
+                             其余 6 色色号不变：蓝→青→绿→黄→红→黑。 -->
 
                         <Button x:Name="ColorAccentButton" Click="Color_Click" Tag="Accent" Width="16" Height="16" MinWidth="16" MinHeight="16" VerticalAlignment="Center" CornerRadius="8" Background="{ThemeResource GlanceAccentBrush}" BorderThickness="2" BorderBrush="Transparent" Padding="0">
 
@@ -1196,8 +1195,8 @@
 
 
 
-                <!-- 配色走 App.xaml 的 GlanceAccentButtonStyle（Obsidian 紫，10-05 已改为无状态机模板）；
-                     覆盖 generic 的 AccentButton* 主题键无效（见 App.xaml 第 12 轮注释）。视觉 hover/pressed
+                <!-- 配色走 App.xaml 的 GlanceAccentButtonStyle（Obsidian 紫、无状态机模板）；
+                     覆盖 generic 的 AccentButton* 主题键无效（见 App.xaml 注释）。视觉 hover/pressed
                      由 MainPage.xaml.cs 的 ButtonVisualOverride.Attach(OpenPdfButton, accent: true) 几何驱动，
                      消除点击弹文件选择器时的 VSM flicker。
 

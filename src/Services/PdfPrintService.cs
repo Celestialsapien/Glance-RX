@@ -95,7 +95,7 @@ public sealed class PdfPrintService : IDisposable
         if (!PrintManager.IsSupported())
             return false;
 
-        // 根因修复（打印崩溃）：PrintManager.IsSupported() 仅表示系统支持打印 API，不表示已安装打印机。
+        // ⚠ PrintManager.IsSupported() 仅表示系统支持打印 API，不表示已安装打印机。
         // 无打印机时点打印仍会触发 PrintTaskRequested，并在 deferral.Complete() 抛 COMException 使进程崩溃。
         if (!HasAnyPrinter())
             return false;
@@ -139,8 +139,7 @@ public sealed class PdfPrintService : IDisposable
         }
     }
 
-    /// 根因修复（打印崩溃）：PrintManager.IsSupported() 不表示已安装打印机。
-    /// 根因修复（打印崩溃）：PrintManager.IsSupported() 不表示已安装打印机。此方法读取后台打印程序的
+    /// ⚠ PrintManager.IsSupported() 不表示已安装打印机。此方法读取后台打印程序的
     /// 走「未找到打印机」提示分支，避免进入 PrintTaskRequested 后在 deferral.Complete() 抛 COMException 崩溃。
     private static bool HasAnyPrinter()
     {
@@ -248,7 +247,7 @@ public sealed class PdfPrintService : IDisposable
         }
         finally
         {
-            // 根因修复（打印崩溃）：仅当 PrintTask 创建成功才完成 deferral。无打印机 / 创建失败时
+            // ⚠ 仅当 PrintTask 创建成功才完成 deferral。无打印机 / 创建失败时
             // Complete() 会抛 COMException 使进程崩溃。任务已创建则正常完成（即使后续配置抛错也不影响）。
             if (taskCreated)
                 deferral.Complete();

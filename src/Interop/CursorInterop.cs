@@ -86,7 +86,7 @@ internal static class CursorInterop
     private static extern bool DeleteObject(IntPtr hObject);
 
     /// 把【系统共享光标】复制成"调用方拥有"的 HCURSOR 副本（GetIconInfo + CreateIconIndirect）。
-    /// 【为何不能用 CopyIcon —— 这就是此前资源替换静默失效的根因】：
+    /// 【为何不能用 CopyIcon】：
     public static IntPtr CloneSystemCursor(int idcId)
     {
         IntPtr src = LoadCursor(IntPtr.Zero, idcId);

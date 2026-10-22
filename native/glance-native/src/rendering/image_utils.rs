@@ -16,7 +16,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 
 // Image utilities - PNG encoding and format conversion
-// Phase 4: Simplified implementation (full PNG encoding in Phase 4)
+// Simplified implementation
 
 /// Encode raw RGBA pixels as PNG
 /// Note: Full implementation requires image crate in Cargo.toml
@@ -26,7 +26,7 @@ pub fn encode_png(_pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, St
         return Err("Invalid image dimensions".to_string());
     }
 
-    // Phase 4: Full PNG encoding implementation
+    // Full PNG encoding implementation
     // For now, return minimal valid PNG (1x1 transparent pixel)
     // Real implementation: encode actual pixel data
     Ok(vec![

@@ -108,7 +108,7 @@ public sealed class CanvasNodeEventArgs : EventArgs
     public bool RerouteFromEnd { get; init; }
 }
 
-/// GPU 阅读器（Phase 2.3：视口画布架构 —— 内存硬上限）。
+/// GPU 阅读器（视口画布架构 —— 内存硬上限）。
 /// Invalidate 远处区域无法回收显存 → 滚完全本必然爬到 文档总面积×DPI×4B（实测 ~950MB）。
 public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileRenderHost
 {
@@ -133,7 +133,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private bool _didInitialFit;
 
     // ================= 统一运动引擎（vsync 帧泵 + 临界阻尼弹簧） =================
-    // 旧实现有两个结构性病根，任何参数微调都治不好。
 
     private Spring1D _scrollH, _scrollV;
     private Spring1D _zoomLog;
@@ -232,7 +231,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private double _hostResizeDocLeftX;
 
-    /// <summary>快照时视口【上缘】切到的文档 Y —— 三条不动边线之「上」。 原名"竖直中心"（交叉轴中心），09-23 改为上缘：语义由"上下对称展开"改为 **上边钉住、只让下边露出更多内容**。</summary>
+    /// <summary>快照时视口【上缘】切到的文档 Y —— 三条不动边线之「上」：上边钉住、只让下边露出更多内容。</summary>
     private double _hostResizeDocTopY;
 
     /// <summary>当前连续布局方向。切换时：重排布局 → 若原本处于"适应"缩放则换算为新主轴的适应值 （否则保留用户手动缩放）→ 锚定切换前的当前页，使视口不飘走。</summary>
@@ -442,7 +441,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 ? EndScrollOffset(horizontal: true, z)
                 : Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z);
             // 直接跳：必须把滚动弹簧权威镜像同步到新位置（并同步 _live*），否则后续 GoToPageSmooth
-            // 视图先弹回旧页再动画过去（Home/End 后首按 PgDn/PgUp 异常 up/down 一次的根因）。
+            // 会先弹回旧页再动画过去（Home/End 后首按 PgDn/PgUp 会多跳一次）。
             _scrollH.Reset(targetX);
             _scrollV.Reset(_liveV);
             SyncLiveView(targetX, _liveV, z);
@@ -646,7 +645,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _zoomOmega = omega;
         _zoomFromRightDrag = fromRightDrag;
         // 【必须播种画布插值态】GetViewState 在 _isSmoothZooming 期间【只】读 _zoomAnimCurrent*。
-        // 原先本方法不播种，右键在缩放尽头(MaxZoom/MinZoom)按下并推动时 target==当前缩放 →
+        // 这些字段默认 0，不播种则缩放尽头(MaxZoom/MinZoom)按下并推动时起点按 0 换算。
         _zoomAnimCurrentFactor = z0;
         _zoomAnimCurrentH = _liveZoom > 0 ? _liveH : Viewer.HorizontalOffset;
         _zoomAnimCurrentV = _liveZoom > 0 ? _liveV : Viewer.VerticalOffset;
@@ -727,8 +726,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_zoomLog.IsSettled(ZoomSettleLog, ZoomSettleVel))
         {
             // 右键拖拽【按钮仍按住】时绝不收尾退出。
-            // 原先这里一律 FinishZoom —— 慢速右键拖拽/停顿中，弹簧每停稳一次就解冻并按"中间密度"
-            // （糊→清脉冲 + 瓦片锐度边界移动）→ 恰是"瓦片之间波动/蠕动"在慢拖时最明显的根因。
+            // 收尾会解冻并按"中间密度"重取瓦片（糊→清脉冲 + 瓦片锐度边界移动），
+            // 慢拖停滞时就表现为瓦片之间波动/蠕动。
             // 落定瞬间先把【显示态】吸附到精确目标并重绘最终帧：否则按住停顿期间停泵冻结的是
             _zoomLog.SnapToTarget();
             double zt = Math.Exp(_zoomLog.Value);
@@ -762,14 +761,15 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 右键拖拽是长交互，滚动条与外部同步条要跟着走 → 每帧下发一次真实视图。
         if (_zoomFromRightDrag)
         {
-            // 这里原先每个 Draw 帧都直接 ChangeView + ViewportChanged。120Hz 帧泵下逐帧
+            // 但逐帧 ChangeView + ViewportChanged 在 120Hz 帧泵下代价过高 ⇒ 合并到应用定时器统一发。
             EnsureZoomApplyTimer();
         }
         return true;
     }
 
     /// 提交最终视图，并开启"提交窗口"()：该窗口内画布继续读 _zoomAnimCurrent*，避免 ChangeView 异步落地前闪回缩放前的画面。
-    /// 【这里曾经是一个会让左右键彻底失效的死锁】ChangeView 在目标与当前值完全一致时【不会】触发
+    /// ⚠ ChangeView 在目标与当前值完全一致时【不会】触发 ViewChanged ⇒ 落地判定必须自带兜底，
+    ///   否则等待会永久挂起（左右键全失效）。
     private void CommitViewWithGuard(double h, double v, double zoom)
     {
         _committedH = h;
@@ -1074,7 +1074,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void Viewer_PointerWheelChanged(object sender, PointerRoutedEventArgs e) => HandlePointerWheel(e);
 
     /// <summary>捕获期兜底：拉线期间 this 持着指针捕获，wheel 被投到捕获元素（不在 Viewer 的冒泡路径上），挂 Viewer 的处理器收不到。
-    /// 只接管拉线 —— 卡片拖不出绑定页，拖动中的滚轮没有任何意义（用户裁定），其余手势与编辑框原生滚动一律不管。</summary>
+    /// 只接管拉线 —— 卡片拖不出绑定页，拖动中的滚轮没有意义；其余手势与编辑框原生滚动一律不管。</summary>
     private void Root_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         if (e.Handled) return;                       // 未捕获时已由 Viewer 路径处理，避免重复消费
@@ -1185,9 +1185,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// 宿主几何已生效后调用（侧边栏过渡起点之后一帧）：把阅读位置不变量当作**固定锚点**， 用弹簧把 zoom 平滑推到"主轴视口新旧比例"的目标值（而不是瞬时落定）。
-    /// 【语义（用户拍板 · 09-23 实测定案）】两种布局一律 —— **三条边线不动，只有下边内容变化**：
+    /// 【语义】两种布局一律 —— **三条边线不动，只有下边内容变化**：
     /// ⚠ 缩放比不随布局方向变：横向连续同样锁左右边线（与"适应视口"按 vpH 是两回事，别混）。
-    /// 【为什么这里能再用弹簧，而第 7 轮那版不能】
     public void BeginHostResizeReanchor()
     {
         if (!_hostResizeCaptureValid) return;
@@ -1425,7 +1424,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         QueueVisiblePages();
         InvalidateBoth();
 
-        // 【不立即清除 _pendingRestore】改为交给上方"校验重试"在视口真正落定后清除——
+        // 【不立即清除 _pendingRestore】交给上方"校验重试"在视口真正落定后清除——
         // 否则异步 fit/失焦等 ChangeView 可能在还原之后又把视口拽回首页/适应宽度
         if (_restoreRetries < RestoreRetryMax)
         {
@@ -1556,7 +1555,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return true;
     }
 
-    // ---------------- 标注叠加层（GPU Phase 5：五模式移植） ----------------
+    // ---------------- 标注叠加层（五模式移植） ----------------
     // 设计：数据/保存/撤销全部留在 MainPage（复用旧路径的 AnnotationViewModel 管线），
 
     public bool AnnotationInputActive
@@ -1861,7 +1860,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return new PageXform(s, unrotOrigin, cx, cy, (float)(rot * Math.PI / 180.0), rot != 0);
     }
 
-    /// <summary>某页在当前视图下的屏幕目标矩形（DIP，含居中补偿）。卡片/连线/手柄定位共用同一算法， 保证三者同源对齐；旧实现把该算法内联在绘制与命中两处，易漂移。</summary>
+    /// <summary>某页在当前视图下的屏幕目标矩形（DIP，含居中补偿）。卡片/连线/手柄定位共用同一算法， 保证三者同源对齐；绘制与命中必须共用这一份，各处内联必然漂移。</summary>
     private Rect ComputePageDest(int pageIdx, double z, double hOff, double vOff)
     {
         double vpW = _vpW, vpH = _vpH;
@@ -2177,7 +2176,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         this.PointerCaptureLost += Viewer_PointerCaptureLost;
         // （窗口外/标题栏/非子元素区域）后 PointerMoved 不再触发、手势无法自愈。
         this.PointerExited += Viewer_PointerExited;
-        // ── 滚动条滑块拖拽抑制（对齐 Sumatra 快拖静止行为；2026-09-13 CPU 风暴根因修复）──
+        // ── 滚动条滑块拖拽抑制（对齐 Sumatra 快拖静止行为，避免长时间 CPU 风暴）──
         // ScrollViewer 内置 ScrollBar 的 Thumb 拖拽期间抑制渲染请求（缓存瓦片照画、视口照常移动），
         Viewer.Loaded += (s, e) => HookScrollBarThumbs(Viewer);
         this.Unloaded += (s, e) => _hookedThumbs.Clear(); // 视图重挂载后模板 Thumb 是新实例，清旧引用
@@ -2561,8 +2560,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HideCanvasEditContextMenu();
         if (_zoomAnimCommitting)
         {
-            // 【这里曾经制造"双击缩放闪一帧别处画面"】原先无条件关窗并往下同步 _live*。
-            // 但双击/按钮缩放全程【不】逐帧 ChangeView（见 StepZoomFrame 注释，为性能刻意为之），
+            // 不能无条件关窗并往下同步 _live*：双击/按钮缩放全程【不】逐帧 ChangeView
+            // （见 StepZoomFrame 注释，为性能刻意为之），关窗过早会闪一帧别处画面。
             if (!IsCommittedViewReached())
             {
                 // 与看门狗共用同一套推进判定。上一轮正是因为看门狗漏了"zoom 未落地不得补发"
@@ -2857,7 +2856,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // ⚠ 它【不是】阅读态的实际行距：Win2D 实际按字体自然行高排（约 1.23 × 字号，实测差约 9%）。
     private const float CanvasLineHeight = CanvasCardFontSize * 1.35f;
     private const float CanvasCardFontSize = 12f;
-    // ⚠ 旧版曾设 CanvasEditFirstLineNudge(0.47) 补偿"RichEdit 编辑态 vs Win2D 阅读态"的首行基线差。
     private const float CanvasCardStrokeWidth = 1.0f;
     private const float CanvasCardSelectedStrokeWidth = 2.0f;
     private const float CanvasEdgeStrokeWidth = 1.6f;
@@ -2907,8 +2905,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return color;
     }
 
-    // 编辑态选区高亮（Win2D 自绘）。10-17 改：原为写死的半透明蓝 FromArgb(64,0,120,215)，
-    // 与工具栏页码框 / 书签编辑框（SelfDrawnTextBox 的 SelRect）不是一回事 ⇒ 三处拖选颜色不统一。
+    // 编辑态选区高亮（Win2D 自绘）：与工具栏页码框 / 书签编辑框（SelfDrawnTextBox 的 SelRect）
+    // 共用同一主题色 ⇒ 三处拖选颜色一致。
     // ⚠ 必须走主题字典取：该键【只】定义在 ThemeDictionaries 里、顶层字典没有
     // （与 ToggleButton* / GlanceAccent* 同一类坑，见 VisualOverrideBase.Resource 的注释）。
     // ⚠ 主题键用 MainWindow.IsDarkTheme 这个【确定性同步】源（暗色值在 "Default" 档、顶层无 "Dark"），
@@ -2948,7 +2946,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private static readonly string[] CanvasSides = { "top", "bottom", "left", "right" };
     private static readonly string[] CanvasCorners = { "tl", "tr", "bl", "br" };
     private const double CanvasMinNodeWidth = 60;        // 缩放下限（页局部 PDF 点）
-    // 高度下限 = 新建卡片默认高。此前误写为 40 > 默认高 ⇒ 新建空卡一旦放大，就再也缩不回
+    // 高度下限 = 新建卡片默认高：下限不得大于默认高，否则新建空卡一旦放大就再也缩不回
     private const double CanvasMinNodeHeight = CanvasNode.DefaultHeight;
     private static readonly Windows.UI.Color CanvasHandleFill = Windows.UI.Color.FromArgb(255, 255, 255, 255);
     // 手柄尺寸一律用【页局部 PDF 点】（与卡片边框/圆角同一坐标空间）→ 随页面缩放一起放大/缩小，
@@ -3023,8 +3021,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _hoverCanvasNodeId = null;
         // 撤销/重做可能改到【正在编辑】卡片的文本 → 同步编辑框内容，并把光标放到**改动区末尾**。
         // 否则编辑框残留旧文本，用户失焦提交时会用旧文本覆盖掉刚撤销/重做的结果。
-        // ⚠ 旧实现一律 `SetRange(end,end)`（理由写着"RichEditBox 没有 SelectionStart"），结果一按 Ctrl+Z
-        //   光标就飞到全文末尾，撤销后想接着改前一句必须重新点回去（用户报告"编辑不连贯"）。
+        // ⚠ 光标必须落在【改动区末尾】：一律 `SetRange(end,end)` 会让一按 Ctrl+Z 光标就飞到全文末尾，
+        //   撤销后想接着改前一句必须重新点回去。
         if (_canvasEditNodeId != null && CanvasEditBox != null &&
             idx.TryGetValue(_canvasEditNodeId, out var editNode))
         {
@@ -3656,7 +3654,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// 【编辑态边框控件的信号切割】把"编辑卡边框控件命中带"从编辑框的命中区里【挖掉】。
-    /// 这正是"用控件时编辑态被改动"的根因。事后用快照把光标跳回去只是补丁，信号仍然进了编辑框。
+    /// 否则用控件时编辑态会被改动；事后用快照把光标跳回去只是补丁，信号仍然进了编辑框。
     private void SyncCanvasEditHitCarve(Point vp)
     {
         if (_canvasEditNodeId == null || CanvasEditBox == null) return;
@@ -3763,7 +3761,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return true;
     }
 
-    /// <summary>Win2D 侧绘制滚动条 —— 【三态共用】。编辑态现在也走这里：编辑框已改为 Opacity=0 的不可见宿主， 不再有"不透明白底遮住画布"的问题，故滚动条可直接画在 Win2D 上（与阅读/选中态同一口径、同一观感）。</summary>
+    /// <summary>Win2D 侧绘制滚动条 —— 【阅读/选中/编辑三态共用】。编辑框是 Opacity=0 的不可见宿主， 不存在"不透明白底遮住画布"，故滚动条一律画在 Win2D 上（三态同一口径、同一观感）。</summary>
     private void DrawCanvasScrollBar(CanvasDrawingSession ds, CanvasNode node)
     {
         if (!TryGetCanvasScrollBarRect(node, out var rect)) return;
@@ -3831,7 +3829,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
-    /// <summary>预先算好行内代码/高亮的底纹矩形（layout 坐标，绘制时再平移到文本原点）。 横向用 GetCharacterRegions 给的实际字框（代码跨行时自然分成多个矩形）； 竖向**不用**它给的整行高，改为按该行基线收到贴合字面 —— 理由见 。</summary>
+    /// <summary>预先算好行内代码/高亮的底纹矩形（layout 坐标，绘制时再平移到文本原点）。 横向用 GetCharacterRegions 给的实际字框（代码跨行时自然分成多个矩形）； 竖向**不用**它给的整行高，而是按该行基线收到贴合字面。</summary>
     private static void BuildCanvasMarkdownBackdrops(CachedCanvasText cache)
     {
         BuildCanvasMarkdownBackdrops(cache.Layout, cache.DisplayText.Length, cache.Spans, cache.Backdrops);
@@ -4195,7 +4193,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
-    /// <summary>计算一条连线在屏幕空间的几何（端点 + 控制点）。命中测试与渲染共用同一套算法， 保证"看得到就能点到"。边名/页变换与旧版 DrawCanvasEdges 完全一致。</summary>
+    /// <summary>计算一条连线在屏幕空间的几何（端点 + 控制点）。命中测试与渲染共用同一套算法， 保证"看得到就能点到"。边名/页变换与 DrawCanvasEdges 一致。</summary>
     private bool ComputeEdgeScreenGeometry(CanvasEdge edge, IReadOnlyList<GpuPageInfo> pages,
         Func<int, Rect> destOf, Dictionary<string, CanvasNode> index, double z,
         out Vector2 a1, out Vector2 c1, out Vector2 c2, out Vector2 a2)
@@ -4766,15 +4764,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private string? _connFromNodeId;
     private string _connFromSide = "";
     // 拉线的两端【不缓存屏幕坐标】：源手柄由 (node, side) + 当前视口现场派生，目标由指针位置现场命中
-    // ⇒ 滚轮/键盘翻页/缩放/窗口尺寸任何变化都自动跟着走（旧版缓存快照会导致"起点与卡片脱离"）。
+    // ⇒ 滚轮/键盘翻页/缩放/窗口尺寸任何变化都自动跟着走（缓存屏幕坐标会让起点与卡片脱离）。
     private Point _connCursorScreen;          // 指针屏幕坐标（手势期间不随视口变化，故可缓存）
 
     // ---- 按住 Tab 上方的波浪键（`~）+ 两次点击建线（armed 态【不算手势】：不捕获指针、不冻结指针、不阻塞悬停）----
-    // 触发键的两次迁移（2026-10-22 用户裁定）：
-    //   Alt → 系统修饰键，Alt+数字/Alt+退格 在输框里被系统当助记键吃掉（页码框输不进数字），Alt+Esc / Alt+Tab 本身就是系统命令；
-    //   Q   → 普通字母键，但在**输入框有焦点**时会被输入法/编辑框收走（且与"按住某键"的常规用法撞车）；
-    //   `~`（Tab 上方，VK_OEM_3 = 0xC0）→ 既不是系统修饰键、也不是字母 ⇒ 不触发系统快捷键、不参与输入法组字，
-    //   且白板画布本就不是文本输入上下文，键会正常送到本视图。
+    // 选键依据：既不是系统修饰键、也不是字母 ⇒ 不触发系统快捷键（Alt 会被系统当助记键吃掉），
+    // 也不参与输入法组字（字母键在输入框有焦点时会被编辑框/输入法收走）。
+    // 波浪键 = Tab 上方、VK_OEM_3 = 0xC0；白板画布非文本输入上下文，键会正常送到本视图。
     private const VirtualKey ConnArmTriggerKey = (VirtualKey)0xC0;   // VK_OEM_3
     private bool _connArmActive;
     private string? _connArmNodeId;
@@ -5294,7 +5290,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         CancelCanvasResize();
         CancelCanvasConnArm();      // 退出白板 ⇒ 待接态一并作废（同上：没有捕获可兜底）
         // 编辑态必须走 EndCanvasEdit 正式收尾：它会提交最后一段尚未入史的文字、收起文本菜单，
-        // ⚠ 此前是直接 `_canvasEditNodeId = null` —— 编辑框折叠了但**焦点还留在它身上**，切到阅读/画笔模式后
+        // ⚠ 不能直接清 `_canvasEditNodeId` —— 编辑框折叠了但**焦点还留在它身上**，切到阅读/画笔模式后
         if (_canvasEditNodeId != null)
         {
             EndCanvasEdit(commit: true);
@@ -6365,7 +6361,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HighlightCanvasColorDot(match);
     }
 
-    /// <summary>给【两副】7 色圆点（卡片胶囊 / 连线胶囊）逐个挂悬浮/离开事件（悬浮预览放大用）。 绝不在此写 element.Resources（运行时写 Resources 在主题切换会闪退，2026-09-29 崩溃根因； 底色档已在 XAML 解析期逐按钮声明）。</summary>
+    /// <summary>给【两副】7 色圆点（卡片胶囊 / 连线胶囊）逐个挂悬浮/离开事件（悬浮预览放大用）。 绝不在此写 element.Resources（运行时写 Resources 在主题切换会闪退； 底色档已在 XAML 解析期逐按钮声明）。</summary>
     private void AttachCanvasColorDotHover()
     {
         AttachCanvasColorDotHoverIn(CanvasColorDotPanel);
@@ -7819,7 +7815,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                     var rotM = Matrix3x2.CreateRotation((float)(rot * Math.PI / 180.0), pivot);
                     if (rot == 90 || rot == 270)
                     {
-                        // ⚠ 90/270 半像素对齐修正（2026-09-20 根因，"旋转后落定整页糊"的真凶）。
+                        // ⚠ 90/270 旋转必须做半像素对齐修正：不做则落定后整页发糊。
                         // pivot=页中心（整数或 x.5 物理像素）。绕 pivot 转 90° 的落点
                         double px = pivot.X * dpi, py = pivot.Y * dpi;
                         double sSum = px + py, dDif = py - px;
@@ -8155,7 +8151,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     /// <summary>DisplayModel::RenderVisibleParts 的 1:1 对应物（= 原 QueueVisiblePages 职责）： 可见页正向请求 → 预测链（next/prev 各一页，</summary>
     // ---------------- 滚动条滑块拖拽期：抑制渲染请求（对齐 Sumatra 快拖静止行为） ----------------
-    // 根因（2026-09-13 定案）：400% 快拖 115 页时每个中间视口都全速发请求，而 MuPDF JPEG
+    // 400% 快拖 115 页时每个中间视口都全速发请求，而 MuPDF JPEG
     // 逐行顺序解码使瓦片成本 ∝ 瓦片 Y 偏移（page 114 实测页顶 36ms → 页底 352~454ms），
 
     private const int ScrollDragSettleDelayMs = 180;
@@ -8419,8 +8415,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_pages.Count == 0) return;
         _canvasClickEditPending = false;     // 新按下 ⇒ 清上一次的"单击已选中卡进编辑"待定（本次按下重新判定）
 
-        // 【这里曾经拦掉动画期间的一切按下，是"动画没结束就点不动"的直接原因，现已放行】
-        // 当初拦截的根因是：放行会 StopSmoothZoom 杀动画，又立刻用【ChangeView 尚未异步落地的】
+        // 【动画期间不拦按下，只有待还原未落定才拦】此时 ChangeView 尚未异步落地，继续分发会读到陈旧视图。
         if (_pendingRestore != null)
         {
             e.Handled = true;
@@ -8782,7 +8777,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 return;
             }
             // 上推放大、下拉缩小。锚点 = 按下时的鼠标位置：该文档点在屏幕上保持不动。
-            // 旧实现把每一个鼠标点直接当成缩放值下发（ChangeView + 整页重光栅）。两个后果。
+            // 缩放值取"按下点百分比 + 累计位移"的绝对目标，不是逐点直接下发 ChangeView + 整页重光栅。
             var pt = e.GetCurrentPoint(Viewer);
             double deltaY = _rightZoomStartY - pt.Position.Y;
             double raw = (_rightZoomStartPercent + deltaY) / 100.0;

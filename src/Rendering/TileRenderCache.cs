@@ -28,7 +28,7 @@ namespace GlanceRX.Rendering;
 
 // ============================================================================
 // TileRenderCache — 1:1 port of sumatrapdf-master/src/RenderCache.{h,cpp}
-//     ⚠ 历史坑（本文件曾因此出现"右侧缺失 + 发糊 + 瓦片错位"三个症状）。
+//     ⚠ 踩过：会出现"右侧缺失 + 发糊 + 瓦片错位"三个症状。
 
 internal static class TileRenderDelay
 {

@@ -49,8 +49,8 @@
                          但本 SDK(WinAppSDK 2.2.1)实测 <Color x:Key="GlanceAccentColor"> 正常编译（见下方画笔色板首位），
                          该警告已过时——纯 Color 资源可用。深色未选中底走 ControlFillColor*。 -->
 
-                    <!-- 欢迎页"打开文件"按钮专用画刷（第 12 轮）。
-                         ⚠ 第 11 轮在主题字典覆盖 generic 的 AccentButtonBackground* 键【无效】：按钮仍是系统蓝。
+                    <!-- 欢迎页"打开文件"按钮专用画刷。
+                         ⚠ 在主题字典覆盖 generic 的 AccentButtonBackground* 键【无效】：按钮仍是系统蓝。
                            根因 = XamlControlsResources 内部的 {ThemeResource AccentButtonBackground*} 只在 generic
                            自己的字典链解析，不回查 App 主题字典（与 AccentFillColor* 渗不进同族陷阱）。
                          ⇒ 正解 = App 自有 Style（GlanceAccentButtonStyle，见 ThemeDictionaries 之后）+ 模板，
@@ -72,7 +72,7 @@
                     <SolidColorBrush x:Key="GlanceAccentForeground" Color="#000000" />
                     <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#595959" />
 
-                    <!-- 未选中：generic 深色档同源的三档半透明白，跟亚克力一起走（第 8 轮透明化已回退） -->
+                    <!-- 未选中：generic 深色档同源的三档半透明白，跟亚克力一起走 -->
                     <SolidColorBrush x:Key="ToggleButtonBackground"
                                      Color="{ThemeResource ControlFillColorDefault}" />
                     <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver"
@@ -92,14 +92,14 @@
                     <SolidColorBrush x:Key="MenuFlyoutItemForegroundPressed"
                                      Color="{ThemeResource TextFillColorSecondary}" />
 
-                    <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
+                    <!-- （缩放胶囊 4 颗的静止档为【完全透明】，与浮层 8 颗共用 transparentAtRest，
                          不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->
 
-                    <!-- 缩放胶囊 4 颗的悬浮/点击态（10-05，第二轮：更透明）：深浅色【共用同一关系】——
+                    <!-- 缩放胶囊 4 颗的悬浮/点击态：深浅色【共用同一关系】——
                          悬浮=胶囊反色的【淡 frosted 叠加】（≈16% 白，只轻微提亮、亚克力照透），
                          按下=靠近胶囊色的【极淡叠加】（≈5% 黑，几乎贴回胶囊）。
                          本档为深色胶囊（暗）⇒ 悬浮 #29FFFFFF / 按下 #0D000000；浅色档对称反向（见 Light 字典）。
-                         ⚠ 第三轮(10-05)起 hover/pressed 的【alpha 与浅色档一致】(hover 16% / pressed 5%)，
+                         ⚠ hover/pressed 的【alpha 与浅色档一致】(hover 16% / pressed 5%)，
                          只翻转色相以反色：深=白、浅=偏灰的黑(#3A3A3A)；两模式叠加"强度"相同、亚克力透出一致。
                          （注：上一步曾把深色也降到 8% 想对齐，用户要求深色保持 16% 不动 ⇒ 改为浅色提回 16% 并改用偏灰黑柔化，
                           而非压低深色 alpha。）
@@ -117,8 +117,8 @@
                     <SolidColorBrush x:Key="ToggleButtonForegroundPressed"
                                      Color="{ThemeResource TextFillColorSecondary}" />
 
-                    <!-- 未选中边框：深色档。原生 9%/7% 白渐变在暗底上偏白（用户 09-28 反馈"边框偏白，要再黑一点"），
-                         改回 subdued 的均匀细描边 4~7% 白（第 6 轮"深色还好"档位），比原生更黑、不再发亮。
+                    <!-- 未选中边框：深色档。原生 9%/7% 白渐变在暗底上偏白，
+                         改用 subdued 的均匀细描边 4~7% 白，比原生更黑、不再发亮。
                          浅色档仍照抄原生（带翻转）。 -->
                     <SolidColorBrush x:Key="ToggleButtonBorderBrush" Color="#0AFFFFFF" />
                     <SolidColorBrush x:Key="ToggleButtonBorderBrushPointerOver" Color="#0EFFFFFF" />
@@ -176,7 +176,7 @@
                     <SolidColorBrush x:Key="GlanceAccentForeground" Color="#FFFFFF" />
                     <SolidColorBrush x:Key="GlanceAccentForegroundPressed" Color="#E6E6E6" />
 
-                    <!-- 浅色中性底标定（09-27 截图实测）：侧栏面板 #F3F3F3 / 工具栏 #FDFDFD。
+                    <!-- 浅色中性底标定（截图实测）：侧栏面板 #F3F3F3 / 工具栏 #FDFDFD。
                          纯白对齐同屏普通 Button，用户已验收；悬停/按下向灰压一/两档。三档字面量已直接内联到
                          ToggleButtonBackground* 画刷（见下），不再以 <Color> 资源定义，避免 WMC0001。 -->
 
@@ -194,10 +194,10 @@
                     <SolidColorBrush x:Key="MenuFlyoutItemForegroundPressed"
                                      Color="{ThemeResource TextFillColorSecondary}" />
 
-                    <!-- （缩放胶囊 4 颗的静止档现已改为【完全透明】，与浮层 8 颗共用 transparentAtRest，
+                    <!-- （缩放胶囊 4 颗的静止档为【完全透明】，与浮层 8 颗共用 transparentAtRest，
                          不再需要专属的静止档画刷 —— 见 ButtonVisualOverride.Apply 的透明档分支。） -->
 
-                    <!-- 缩放胶囊 4 颗悬浮/点击态（10-05，第二轮：更透明）：与深色档【同关系】——深色胶囊暗⇒悬浮淡白/按下淡黑；
+                    <!-- 缩放胶囊 4 颗悬浮/点击态：与深色档【同关系】——深色胶囊暗⇒悬浮淡白/按下淡黑；
                          浅色胶囊亮⇒对称反向：悬浮 #293A3A3A(≈16% 偏灰黑 #3A3A3A，比纯黑柔、对比更小)/按下 #0DFFFFFF(≈5% 白，贴回胶囊)，
                          hover/pressed 的【alpha 与深色档一致】(16%/5%)，仅色相翻转 ⇒ 两模式叠加强度相同、亚克力透出一致。 -->
                     <SolidColorBrush x:Key="ZoomPillButtonHoverBackground" Color="#293A3A3A" />
@@ -273,17 +273,17 @@
 
             </ResourceDictionary.ThemeDictionaries>
 
-            <!-- 欢迎页"打开文件"按钮专用强调样式（第 12 轮创建；10-05 改为无状态机）。
+            <!-- 欢迎页"打开文件"按钮专用强调样式（无状态机模板）。
                  覆盖 generic 的 AccentButtonBackground* 主题键无效（XamlControlsResources 内部 ThemeResource
                  不回查 App 主题字典，实测仍是系统蓝）⇒ 自有 Style + 模板。初始配色引用上面字典里的
                  GlanceAccentBrush{,PointerOver,Pressed}（Obsidian 紫三档）；文字/边框引用 generic 的
                  TextOnAccent* / AccentControlElevationBorderBrush（App 引 generic 方向正常）。
-                 模板骨架照抄 generic:8896-8956（AccentButtonStyle），但【已删除 VisualStateGroups 与
-                 BackgroundTransition】—— 该按钮原本靠原生 VSM 驱动 hover/pressed，点击弹文件选择器时输入
-                 上下文切换、无法判定鼠标是否仍在按钮上 ⇒ VSM 的 Pressed→Normal→PointerOver 在快速点击下
-                 闪烁（用户实测 flicker）。10-05 把视觉独占权交给 ButtonVisualOverride 的 accent 模式
-                 （Apply 的 _accent 分支按几何 hover + IsPressed 写同三档紫 + 同边框/前景），与本类其它
-                 接管按钮同源、flicker 根因消除。Disabled 档极少触发（欢迎页按钮恒可用），保持静止紫即可。 -->
+                 模板骨架照抄 generic:8896-8956（AccentButtonStyle），但【不含 VisualStateGroups 与
+                 BackgroundTransition】：原生 VSM 在点击弹文件选择器时（输入上下文切换、无法判定鼠标是否
+                 仍在按钮上）会让 Pressed→Normal→PointerOver 序列闪烁。视觉独占权交给
+                 ButtonVisualOverride 的 accent 模式（Apply 的 _accent 分支按几何 hover + IsPressed 写
+                 同三档紫 + 同边框/前景），与本类其它接管按钮同源。Disabled 档极少触发（欢迎页按钮恒可用），
+                 保持静止紫即可。 -->
             <Style x:Key="GlanceAccentButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
                 <Setter Property="Foreground" Value="{ThemeResource GlanceAccentForeground}" />
                 <Setter Property="Background" Value="{ThemeResource GlanceAccentBrush}" />

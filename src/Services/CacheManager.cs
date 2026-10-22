@@ -71,7 +71,7 @@ public static class CacheManager
 
             var dir = new DirectoryInfo(CacheDirectory);
 
-            // 一次性清理：旧版"未烘焙原始副本"机制已彻底移除（批注改为真实 PDF 注解对象、
+            // 一次性清理：早期版本留下的「未烘焙原始副本」缓存（批注已是真实 PDF 注解对象），
             foreach (var f in dir.GetFiles("anno_base_*.pdf"))
                 TryDelete(f);
 

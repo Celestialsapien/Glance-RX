@@ -90,19 +90,19 @@ public class ViewStateData
     /// <summary>文档旋转角（0/90/180/270）。影响布局坐标系，必须与偏移一同还原。</summary>
     public int RotationDegrees { get; set; }
 
-    /// <summary>连续布局方向：0=纵向单页连续，1=横向单页连续。须在偏移之前还原， 否则保存的偏移按错轴(横/纵)落定 → 还原后位置偏离。旧记录缺省 0=纵向，向后兼容。</summary>
+    /// <summary>连续布局方向：0=纵向单页连续，1=横向单页连续。须在偏移之前还原， 否则保存的偏移按错轴(横/纵)落定 → 还原后位置偏离。缺字段时按 0=纵向（向后兼容）。</summary>
     public int LayoutMode { get; set; }
 
-    /// <summary>纵向布局下的列数/排版：0=单页，1=双页对开，2=书籍对开。仅纵向布局生效； 横向胶片条忽略。须在偏移之前还原（与 LayoutMode 同理）。旧记录缺省 0=单页，向后兼容。</summary>
+    /// <summary>纵向布局下的列数/排版：0=单页，1=双页对开，2=书籍对开。仅纵向布局生效； 横向胶片条忽略。须在偏移之前还原（与 LayoutMode 同理）。缺字段时按 0=单页（向后兼容）。</summary>
     public int Arrangement { get; set; }
 
-    /// <summary>退出时侧边栏（缩略图/书签/大纲）是否展开。重开同一 PDF 时按此状态打开。 旧记录缺省 false（未记录 → 收起），与 SplitView 的 XAML 默认值一致。</summary>
+    /// <summary>退出时侧边栏（缩略图/书签/大纲）是否展开。重开同一 PDF 时按此状态打开。 缺字段时按 false（收起），与 SplitView 的 XAML 默认值一致。</summary>
     public bool SidebarOpen { get; set; }
 
     /// <summary>保存时刻（UTC Unix 秒），用于诊断与未来按时间排序。</summary>
     public long SavedAtUtc { get; set; }
 
-    /// <summary>窗口状态：0=未记录（旧记录 → 走默认右半屏），1=Normal，2=Maximized。 取值对齐 Sumatra 的 WIN_STATE_*（sumatrapdf-master/src/AppSettings.h:5-10）；</summary>
+    /// <summary>窗口状态：0=未记录（走默认右半屏），1=Normal，2=Maximized。 取值对齐 Sumatra 的 WIN_STATE_*（sumatrapdf-master/src/AppSettings.h:5-10）；</summary>
     public int WindowState { get; set; }
 
     /// <summary>窗口矩形（屏幕物理像素，与 AppWindow.Position/Size、MoveAndResize 同一坐标系）。 恒为【非最大化】矩形：最大化时存 GetWindowPlacement 的 rcNormalPosition，下次先按正常 尺寸摆好再最大化，</summary>

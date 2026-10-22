@@ -16,7 +16,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 
 // Logging utilities - debug output
-// Implemented in Phase 2+ as needed
+// 按需实现
 
 #[cfg(debug_assertions)]
 pub fn debug_log(msg: &str) {

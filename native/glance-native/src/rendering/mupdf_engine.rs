@@ -498,7 +498,7 @@ fn render_tile_rgb(
     };
     // ⛔ 绝不把 abort 标志交给 MuPDF 的 display-list 循环（`dl.run_with_cookie`）。
     //
-    // 根因（2026-09-13 定位；crash_native_av.log 已完整符号化复原调用栈）：
+    // 原因（crash_native_av.log 已完整符号化复原调用栈）：
     //   MuPDF 在节点间隙看到 cookie->abort 时是 **`break`**，不是 throw
     //   （list-device.c:1757 `if (cookie->abort) break;`）。这次运行就可能在
     //   `begin_group`/clip 之后中断，把 fz_draw_device 留在**不平衡**状态

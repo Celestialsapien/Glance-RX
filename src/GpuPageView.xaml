@@ -51,7 +51,7 @@
             <!-- 卡片/连线的悬浮胶囊【不做显隐动画】：高频点卡片时淡入淡出太喧宾夺主，直接 Visible↔Collapsed
                  （见 GpuPageView.xaml.cs 的 Show/HideCanvas*Toolbar）。缩放胶囊的动画不在此列。 -->
 
-            <!-- 卡片悬浮控件：改为与画笔颜色胶囊同源的胶囊外观（亚克力底 + 大圆角 + 投影）。
+            <!-- 卡片悬浮控件：与画笔颜色胶囊同源的胶囊外观（亚克力底 + 大圆角 + 投影）。
                  圆角 / 投影 / 描边画刷均与 PenOptionsCapsule 对齐；固定高度使 CornerRadius=高/2 ⇒ 真胶囊。
                  内部按钮的三态反馈在步骤 2 接管（本步只改容器外观，按钮仍透明）。 -->
             <!-- ⚠ Z 序：本胶囊用 Canvas.ZIndex 提到【不可见输入宿主】CanvasEditBox 之上 —— 它在 XAML 里声明得更晚

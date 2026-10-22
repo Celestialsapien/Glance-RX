@@ -23,13 +23,13 @@ using Microsoft.UI.Xaml.Media;
 namespace GlanceRX.Services;
 
 /// 接管普通功能按钮（，非 ）的视觉输出 —— 与 ToggleButtonVisualOverride 同源（共享 ）， 专治「鼠标松开后指针一动没动，按钮底色却先跳一档再跳回来」。
-/// 只有文字能被点中，10-02 实测），只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
+/// 只有文字能被点中），只给 hover / pressed 上色（菜单项语义：静止不该有独立底色）。
 internal class ButtonVisualOverride : VisualOverrideBase<Button>
 {
     /// 接管指定按钮的视觉输出。应在控件模板已应用之后调用（例如 Page.Loaded）。
     /// ⚠ 底色绝不能写 null：null 背景的 ContentPresenter 整片不参与命中测试，只有文字能被命中
-    /// ⇒ hover / click 只在文字附近生效、扫过文字后才整片可点（10-02 实测）。
-    /// ⚠ 前景也绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（10-02 实测浮层静止全不可见）。
+    /// ⇒ hover / click 只在文字附近生效、扫过文字后才整片可点。
+    /// ⚠ 前景也绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（浮层静止时全不可见）。
     public static void Attach(Button button, bool transparentAtRest = false, bool inPopupTree = false, bool accent = false)
     {
         if (button == null) return;
@@ -83,7 +83,7 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
 
         protected override void AttachExtra() { }
 
-        /// <summary>整页驱动退出：只有 inPopupTree（缩放预设浮层 8 颗）退出 —— 它们活在 popup 的 独立 Xaml 树，跨树 GetCurrentPoint 坐标不可靠（10-03 实证），且已由 ZoomPresetPanel 面板驱动 ⇒ 整页驱动必须跳过，</summary>
+        /// <summary>整页驱动退出：只有 inPopupTree（缩放预设浮层 8 颗）退出 —— 它们活在 popup 的 独立 Xaml 树，跨树 GetCurrentPoint 坐标不可靠，且已由 ZoomPresetPanel 面板驱动 ⇒ 整页驱动必须跳过，</summary>
         internal override bool ExcludeFromPageHoverDrive => _inPopupTree;
 
         /// <summary>popup 树按钮（缩放预设浮层 8 颗、操作指南按钮）跳过视觉树遍历、直接用软件主题源： 该树的 FlyoutPresenter 挂着 WinUI 自己镜像的 RequestedTheme，</summary>
@@ -124,10 +124,10 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
             _lastPressed = pressed;
             _lastHover = _hover;
 
-            // 欢迎页「打开 PDF」按钮（accent 模式，10-05 接管）：原来套 GlanceAccentButtonStyle（自带原生
-            // VSM + BrushTransition），点击弹文件选择器时输入上下文切换、且无法判定鼠标是否仍在按钮上
-            // ⇒ VSM 的 Pressed→Normal→PointerOver 序列在快速点击下闪烁（用户实测 flicker）。改为几何驱动后，
-            // ⇒ flicker 根因消除。配色沿用用户已验收的 Obsidian 紫三档（GlanceAccentBrush 0.9 / 0.8 梯度），
+            // 欢迎页「打开 PDF」按钮（accent 模式）：几何驱动上色，不套 GlanceAccentButtonStyle 的原生
+            // VSM + BrushTransition —— 点击弹文件选择器时输入上下文切换、且无法判定鼠标是否仍在按钮上，
+            // 会让 Pressed→Normal→PointerOver 序列在快速点击下闪烁。
+            // 配色用 Obsidian 紫三档（GlanceAccentBrush 0.9 / 0.8 梯度），
             if (_accent)
             {
                 if (pressed)
@@ -159,9 +159,9 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
             {
                 // 透明项静止档：背景写「透明刷」而非 null —— 目的有二。
                 //   ① 不涂成 App.xaml 的 ToggleButtonBackground（不透明中性底，会破坏菜单项透明设计）；
-                //      只在文字附近生效、扫过文字后才整片可点（10-02 实测）。透明刷不可见但仍可命中。
+                //      只在文字附近生效、扫过文字后才整片可点。透明刷不可见但仍可命中。
                 // ⚠ Foreground 也绝不能写 null：null 是「本地值 = 无画刷」而非「清值回退 TemplateBinding」，
-                //   文字会整段消失（10-02 实测：缩放预设浮层静止完全不可见、hover 才显形）。必须写回静止档前景刷。
+                //   文字会整段消失（缩放预设浮层静止完全不可见、hover 才显形）。必须写回静止档前景刷。
                 _root.Background = TransparentBrush;
                 _root.BorderBrush = null;
                 _root.Foreground = Resource("ToggleButtonForeground") as Brush;
@@ -170,7 +170,7 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
 
             if (_transparentAtRest)
             {
-                // 缩放胶囊 4 颗 + 浮层预设 8 颗（均 transparentAtRest）的悬浮/点击态（10-05 推广到浮层）。
+                // 缩放胶囊 4 颗 + 浮层预设 8 颗（均 transparentAtRest）的悬浮/点击态。
                 // 同源反色/近胶囊【淡叠加】档。静止完全透明（胶囊=并入亚克力、浮层=菜单项语义）；
                 // ⚠ 边框留 null：淡叠加已自带形状，加描边反而显脏。
                 string key = pressed ? "ZoomPillButtonPressed" : "ZoomPillButtonHover";

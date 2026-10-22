@@ -362,7 +362,7 @@ pub extern "C" fn mu_render_page_bgra(
 }
 
 // ============================================================================
-// Annotation Functions (Phase 2-3)
+// Annotation Functions
 // ============================================================================
 
 /// Save annotations to JSON file

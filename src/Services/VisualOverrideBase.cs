@@ -215,7 +215,7 @@ internal abstract class VisualOverrideBase<TButton> where TButton : ButtonBase
         internal void SetTransparentHoverState(Button? hovered) => SetTransparentHover(hovered);
 
         /// 取主题资源：主题字典优先，顶层字典降级为兜底。
-        /// 【为什么必须反过来查（2026-09-27 实测，勿改回旧顺序）】
+        /// 【为什么必须反过来查】
         protected virtual object? Resource(string key)
         {
             var resources = Application.Current?.Resources;
