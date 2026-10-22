@@ -104,6 +104,8 @@ public sealed class CanvasNodeEventArgs : EventArgs
     public string? ArrowStyle { get; init; }
     public string? EdgeColor { get; init; }
     public string? NodeColor { get; init; }
+    /// <summary>改线事件：为 true 时改的是连线起点(from)端，否则改终点(to)端。</summary>
+    public bool RerouteFromEnd { get; init; }
 }
 
 /// GPU 阅读器（Phase 2.3：视口画布架构 —— 内存硬上限）。
@@ -4057,6 +4059,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         string? hovEdge = _hoverCanvasEdgeId;    // 纯指针位置决定显隐（判据见 UpdateCanvasEdgeHover）
         foreach (var edge in edges)
         {
+            // 改线中的连线由预览橡皮筋替代绘制（避免旧位置 + 预览同时出现）。
+            if (_connRerouteEdgeId != null &&
+                string.Equals(edge.Id, _connRerouteEdgeId, StringComparison.Ordinal))
+                continue;
             if (!ComputeEdgeScreenGeometry(edge, pages, destOf, index, z,
                     out var a1, out var c1, out var c2, out var a2))
                 continue;
@@ -4527,6 +4533,28 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void DrawCanvasConnecting(CanvasDrawingSession ds)
     {
+        // 改线预览沿用【该连线自身】的颜色与箭头样式；紫色强调 + 接线指示只属于"从拉线控件新建连线"。
+        var strokeColor = _canvasAccentColor;
+        bool reroute = _connRerouteEdgeId != null;
+        bool arrowAtFixed = false, arrowAtMovingStyle = false;
+        if (reroute)
+        {
+            CanvasEdge[] edges;
+            lock (_canvasLock) edges = _canvasEdges;
+            CanvasEdge? re = null;
+            foreach (var ce in edges)
+                if (string.Equals(ce.Id, _connRerouteEdgeId, StringComparison.Ordinal)) { re = ce; break; }
+            if (re != null)
+            {
+                strokeColor = ParseCanvasColor(re.Color) ?? CanvasEdgeColor;
+                // 断 from 端 ⇒ 动端是 from、定端是 to；两端各按该线原有箭头样式绘制
+                // （原线在拖动期间不画，故定端的箭头也必须由预览补上，否则会凭空消失一截）。
+                bool fromArrow = IsArrowEnd(re.FromEnd), toArrow = IsArrowEnd(re.ToEnd);
+                arrowAtMovingStyle = _connRerouteDetachFrom ? fromArrow : toArrow;
+                arrowAtFixed = _connRerouteDetachFrom ? toArrow : fromArrow;
+            }
+        }
+
         var a1 = _connFromAnchorScreen;
         Vector2 a2;
         Vector2 endNormal;
@@ -4549,30 +4577,47 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var c1 = a1 + _connFromNormalScreen * k;
         var c2 = hasTarget ? a2 + endNormal * k : a2 - endNormal * k;
 
-        if (hasTarget)
+        // 动端一律画箭头：新建连线的默认样式就是单箭头（指向 to 端），拉出即带；
+        // 改线则按"原线在该端的箭头样式"，无箭头的那端就不画。
+        bool arrowAtMoving = reroute ? arrowAtMovingStyle : true;
+
+        // 端点收缩到箭头底边 + 向顶点延伸 seamOv 消缝（与 DrawCanvasEdges 同一几何约定）。
+        float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)CurrentZoom);
+        float seamOv = MathF.Max(1.5f, 0.15f * arrowLen);
+        Vector2 p1 = a1, p2 = a2;
+        if (arrowAtFixed)
         {
-            // 箭头高随缩放（页局部点 × z），与已存连线一致；连线收缩到箭头底边，尖端落在卡片边框。
-            float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)CurrentZoom);
+            var d = a1 - c1;
+            if (d.Length() > 1e-3f) p1 = a1 - (d / d.Length()) * arrowLen;
+        }
+        if (arrowAtMoving)
+        {
             var d = a2 - c2;
-            Vector2 arrowBase = d.Length() > 1e-3f ? a2 - (d / d.Length()) * arrowLen : a2;
-            float seamOv = MathF.Max(1.5f, 0.15f * arrowLen);
-            Vector2 lineEnd = arrowBase;
-            if (d.Length() > 1e-3f) lineEnd = arrowBase + (d / d.Length()) * seamOv;
-            using (var geo = BuildBezier(a1, c1, c2, lineEnd))
-            {
-                if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom));
-            }
-            DrawArrowHead(ds, arrowBase, a2, _canvasAccentColor);
-            ds.DrawCircle(a2, 7f, _canvasAccentColor, 2f);
+            if (d.Length() > 1e-3f) p2 = a2 - (d / d.Length()) * arrowLen;
         }
-        else
+        Vector2 l1 = p1, l2 = p2;
+        if (arrowAtFixed)
         {
-            using (var geo = BuildBezier(a1, c1, c2, a2))
-            {
-                if (geo != null) ds.DrawGeometry(geo, _canvasAccentColor, MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom));
-            }
-            ds.FillCircle(a2, 3.5f, _canvasAccentColor);
+            var d = a1 - c1;
+            if (d.Length() > 1e-3f) l1 = p1 + (d / d.Length()) * seamOv;
         }
+        if (arrowAtMoving)
+        {
+            var d = a2 - c2;
+            if (d.Length() > 1e-3f) l2 = p2 + (d / d.Length()) * seamOv;
+        }
+
+        using (var geo = BuildBezier(l1, c1, c2, l2))
+        {
+            if (geo != null) ds.DrawGeometry(geo, strokeColor, MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom));
+        }
+        if (arrowAtFixed) DrawArrowHead(ds, p1, a1, strokeColor);
+        if (arrowAtMoving) DrawArrowHead(ds, p2, a2, strokeColor);
+
+        // 接线指示：吸附目标时画 7px 圆环；动端【没有箭头】时补 3.5px 落点（有箭头时它会压住箭头，故只在无箭头端出现）。
+        // 两者可同时存在（改线拖到卡片上：圆环 + 落点），松手收尾后一并消失。
+        if (hasTarget) ds.DrawCircle(a2, 7f, strokeColor, 2f);
+        if (!arrowAtMoving) ds.FillCircle(a2, 3.5f, strokeColor);
     }
 
     // =====================================================================
@@ -4618,6 +4663,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private string _connTargetSide = "";
     private Vector2 _connTargetAnchorScreen;
     private Vector2 _connTargetNormalScreen;
+
+    // ---- 连线"改线"手势：拖动已有连线改接它的某一端（复用 _isCanvasConnecting 的预览状态机）----
+    private bool _canvasEdgePressPending;     // 按下在连线上、尚未判定单击(选中)还是拖动(改线)
+    private string? _canvasEdgePressEdgeId;
+    private Point _canvasEdgePressVp;
+    private string? _connRerouteEdgeId;       // 正在改线的连线 id（_isCanvasConnecting 期间有效）
+    private bool _connRerouteDetachFrom;      // true=断开 from 端（改起点），false=断开 to 端（改终点）
 
     private bool _isCanvasResizing;
     private CanvasNode? _canvasResizeNode;
@@ -4665,6 +4717,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private bool _canvasClickEditPending;
     private Point _canvasClickEditStartVp;
     private const double CanvasClickEditMoveThreshold = 4.0;   // 视口 DIP：超过即视为拖动而非点击
+    private const double CanvasEdgeRerouteStartThreshold = 8.0;   // 视口 DIP：连线拖动超过此值才进入改线（防止一点拖动就删掉整条线）
 
     private bool _canvasOverlaySyncPending;
     // 浮动控件缓存：实测尺寸 + 上次写入的位置（避免拖动时每帧重复 Measure / 无效 Margin 写入）。
@@ -4710,6 +4763,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeResizeCompleted;
     public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeDeleteRequested;
     public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeStyleChanged;
+    /// <summary>改线请求：把连线 EdgeId 的某一端（RerouteFromEnd ? 起点 : 终点）改接到 TargetNodeId 的 ToSide 边。 只改节点/边，FromEnd/ToEnd/Color 等样式保持不变。</summary>
+    public event EventHandler<CanvasNodeEventArgs>? CanvasEdgeRerouteRequested;
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeColorChanged;
     /// <summary>从连线手柄拖到空白处：请求在该处新建卡片并与源节点连成一条线 （NodeId=源节点、FromSide=源出边、PageIndex/X/Y=落点页与已 clamp 的左上角）。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeCreateConnectedRequested;
@@ -5084,9 +5139,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasDragNode = null;
         _canvasDragPage = -1;
         _isCanvasConnecting = false;
+        _connRerouteEdgeId = null;
         _connFromNodeId = null;
         _connTargetNodeId = null;
         _connTargetSide = "";
+        _canvasEdgePressPending = false;
+        _canvasEdgePressEdgeId = null;
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
@@ -5103,9 +5161,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasDragNode = null;
         _canvasDragPage = -1;
         _isCanvasConnecting = false;
+        _connRerouteEdgeId = null;
         _connFromNodeId = null;
         _connTargetNodeId = null;
         _connTargetSide = "";
+        _canvasEdgePressPending = false;
+        _canvasEdgePressEdgeId = null;
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
@@ -5285,6 +5346,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         if (!_isCanvasConnecting) return false;
         _isCanvasConnecting = false;
+        _connRerouteEdgeId = null;
         SyncCanvasOverlayNow();   // 取消连线 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
         _connFromNodeId = null;
         _connTargetNodeId = null;
@@ -5292,6 +5354,76 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         UnlockCanvasCursor();   // 连线结束 ⇒ 解锁光标（恢复框架默认）
         InvalidateOverlay();
         return true;
+    }
+
+    /// <summary>开始"改线"：拖动已有连线时断开离指针更近的一端（等距则断终点 to），复用新建连线的预览状态机（固定端 → 指针）。 起手即取消全部选中（本线或别的卡片/线）：胶囊随选中态一起收起，拖动期间不再随动；完成后按指针位置重判悬浮态（见 CommitCanvasEdgeReroute）。</summary>
+    private void BeginCanvasEdgeReroute(string edgeId, Point vp)
+    {
+        var pages = _pages;
+        if (pages.Count == 0) return;
+        CanvasEdge[] edges;
+        Dictionary<string, CanvasNode> index;
+        lock (_canvasLock) { edges = _canvasEdges; index = _canvasIndex; }
+        CanvasEdge? edge = null;
+        foreach (var ee in edges)
+            if (string.Equals(ee.Id, edgeId, StringComparison.Ordinal)) { edge = ee; break; }
+        if (edge == null) return;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return;
+        Rect DestOf(int idx) => ComputePageDest(idx, z, hOff, vOff);
+        if (!ComputeEdgeScreenGeometry(edge, pages, DestOf, index, z,
+                out var a1, out _, out _, out var a2))
+            return;
+        var p = new Vector2((float)vp.X, (float)vp.Y);
+        // 断开离指针更近的一端；两边等距时断终点（to），与用户口径一致。
+        bool detachFrom = Vector2.Distance(p, a1) < Vector2.Distance(p, a2);
+        // 固定端 = 另一端。ComputeEdgeScreenGeometry 已把 null 的 Side 写回模型，故此处非空。
+        string fixedNode = detachFrom ? edge.ToNode : edge.FromNode;
+        string fixedSide = detachFrom ? (edge.ToSide ?? "") : (edge.FromSide ?? "");
+        if (string.IsNullOrEmpty(fixedNode) || fixedSide.Length == 0) return;
+        // 改线：取消全部选中态（本线/其他线都一样），回到"悬浮态"工作；胶囊随选中态一起收起（拖动期间不再随动）。
+        SelectCanvasNode(null);
+        _hoverCanvasEdgeId = edgeId;
+        // 复用新建连线预览：源 = 固定端（预览从固定端锚点连到指针/目标）。
+        BeginCanvasConnection(fixedNode, fixedSide, vp);
+        _connRerouteEdgeId = edgeId;
+        _connRerouteDetachFrom = detachFrom;
+    }
+
+    /// <summary>改线收尾：落到卡片（且不是固定端所属卡片）→ 改接该端；落到空白 → 删除整条连线（不新建卡片）。 全程无选中态（改线开始时已清），完成后按指针位置重判悬浮态；不改动 FromEnd/ToEnd/Color（箭头样式）。</summary>
+    private void CommitCanvasEdgeReroute(string edgeId, bool detachFrom, string? fixedNode, Point dropPos)
+    {
+        _canvasPointerPos = dropPos;
+        _canvasPointerValid = true;
+        bool onCard = TryHitCanvasNode(dropPos, out var hit, out _, out _, out _) && hit != null;
+        // 落到固定端所属卡片 = 自连，不接受：连线保持原样（不删）。
+        if (onCard && hit != null && fixedNode != null &&
+            string.Equals(hit.Id, fixedNode, StringComparison.Ordinal))
+        {
+            UpdateCanvasEdgeHover(dropPos);
+            InvalidateOverlay();
+            return;
+        }
+        if (onCard && hit != null)
+        {
+            string side = ComputeTargetSide(hit.Id, dropPos);
+            CanvasEdgeRerouteRequested?.Invoke(this, new CanvasNodeEventArgs
+            {
+                EdgeId = edgeId,
+                RerouteFromEnd = detachFrom,
+                TargetNodeId = hit.Id,
+                ToSide = side
+            });
+            UpdateCanvasEdgeHover(dropPos);      // 完成后按当前指针位置重判悬浮态
+            InvalidateOverlay();
+            return;
+        }
+        // 空白 → 删除整条连线（不新建卡片）。
+        if (string.Equals(_hoverCanvasEdgeId, edgeId, StringComparison.Ordinal))
+            _hoverCanvasEdgeId = null;
+        CanvasEdgeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { EdgeId = edgeId });
+        UpdateCanvasEdgeHover(dropPos);
+        InvalidateOverlay();
     }
 
     private bool TryHitCanvasCorner(Point vp, out string nodeId, out string corner)
@@ -8250,7 +8382,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             {
                 StopSmoothZoom();
                 StopWheelScroll();
-                SelectCanvasEdge(hitEdgeId);
+                // 按下先挂"待定"：松手未超阈值 = 单击选中；超过阈值 = 拖动改线（不改变原选择态）。
+                _canvasEdgePressPending = true;
+                _canvasEdgePressEdgeId = hitEdgeId;
+                _canvasEdgePressVp = pt.Position;
+                this.CapturePointer(e.Pointer);
                 e.Handled = true;
                 return;
             }
@@ -8315,6 +8451,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             _canvasPointerPos = e.GetCurrentPoint(Viewer).Position;
             _canvasPointerValid = true;
+        }
+
+        // 连线按下待定：超过阈值 → 进入改线；未超 → 继续等松手（单击选中）。
+        if (_canvasEdgePressPending)
+        {
+            var mp = e.GetCurrentPoint(Viewer).Position;
+            double mdx = mp.X - _canvasEdgePressVp.X, mdy = mp.Y - _canvasEdgePressVp.Y;
+            if (mdx * mdx + mdy * mdy > CanvasEdgeRerouteStartThreshold * CanvasEdgeRerouteStartThreshold)
+            {
+                var pendEdge = _canvasEdgePressEdgeId;
+                _canvasEdgePressPending = false;
+                _canvasEdgePressEdgeId = null;
+                if (pendEdge != null) BeginCanvasEdgeReroute(pendEdge, mp);
+            }
+            e.Handled = true;
+            return;
         }
 
         if (_isCanvasScrollDragging)
@@ -8537,8 +8689,38 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             return;
         }
 
+        // 连线按下待定且未进入改线 ⇒ 这是一次单击：选中该连线（保持原有交互不变）。
+        if (_canvasEdgePressPending)
+        {
+            var clickEdge = _canvasEdgePressEdgeId;
+            _canvasEdgePressPending = false;
+            _canvasEdgePressEdgeId = null;
+            this.ReleasePointerCapture(e.Pointer);
+            if (clickEdge != null) SelectCanvasEdge(clickEdge);
+            e.Handled = true;
+            return;
+        }
+
         if (_isCanvasConnecting)
         {
+            if (_connRerouteEdgeId != null)
+            {
+                // 改线收尾：先取状态再 ReleasePointerCapture（释放会同步触发 CaptureLost 清空字段）。
+                var rerouteId = _connRerouteEdgeId;
+                bool detachFrom = _connRerouteDetachFrom;
+                var fixedNode = _connFromNodeId;
+                var rerouteDrop = e.GetCurrentPoint(Viewer).Position;
+                _isCanvasConnecting = false;
+                _connRerouteEdgeId = null;
+                _connFromNodeId = null;
+                _connTargetNodeId = null;
+                _connTargetSide = "";
+                this.ReleasePointerCapture(e.Pointer);
+                CommitCanvasEdgeReroute(rerouteId, detachFrom, fixedNode, rerouteDrop);
+                if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
+                e.Handled = true;
+                return;
+            }
             // 同拖动：必须先取状态再 ReleasePointerCapture（释放会同步触发 CaptureLost 清空字段）。
             var from = _connFromNodeId;
             var fromSide = _connFromSide;
@@ -8668,9 +8850,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             });
         }
         CancelCanvasResize();
+        _canvasEdgePressPending = false;
+        _canvasEdgePressEdgeId = null;
         if (_isCanvasConnecting)
         {
             _isCanvasConnecting = false;
+            _connRerouteEdgeId = null;
             _connFromNodeId = null;
             _connTargetNodeId = null;
             _connTargetSide = "";

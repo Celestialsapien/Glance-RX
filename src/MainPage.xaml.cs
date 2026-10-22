@@ -326,6 +326,7 @@ public sealed partial class MainPage : Page
         GpuViewer.CanvasNodeResizeCompleted += GpuCanvas_ResizeCompleted;
         GpuViewer.CanvasEdgeDeleteRequested += GpuCanvas_EdgeDeleteRequested;
         GpuViewer.CanvasEdgeStyleChanged += GpuCanvas_EdgeStyleChanged;
+        GpuViewer.CanvasEdgeRerouteRequested += GpuCanvas_EdgeRerouteRequested;
         GpuViewer.CanvasNodeColorChanged += GpuCanvas_NodeColorChanged;
         GpuViewer.CanvasNodeCreateConnectedRequested += GpuCanvas_CreateConnectedRequested;
         GpuViewer.CanvasNodeBringToFrontRequested += GpuCanvas_BringToFront;
@@ -5710,6 +5711,42 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { edge.FromEnd = oldFromEnd; edge.ToEnd = oldToEnd; edge.Color = oldColor; RefreshCanvas(); },
             redo: () => { edge.FromEnd = nFromEnd; edge.ToEnd = nToEnd; edge.Color = nColor; RefreshCanvas(); });
+        SaveCanvas();
+        RefreshCanvas();
+    }
+
+    /// <summary>改线：只改连线的节点/边（FromNode/FromSide 或 ToNode/ToSide），FromEnd/ToEnd/Color 等箭头样式原样保留。 空白删除走 CanvasEdgeDeleteRequested，不在本事件内发生。</summary>
+    private void GpuCanvas_EdgeRerouteRequested(object? sender, CanvasNodeEventArgs e)
+    {
+        if (_canvasDoc == null) return;
+        CanvasEdge? edge = null;
+        foreach (var ed in _canvasDoc.Edges)
+            if (string.Equals(ed.Id, e.EdgeId, StringComparison.Ordinal)) { edge = ed; break; }
+        if (edge == null) return;
+        string oldNode = e.RerouteFromEnd ? edge.FromNode : edge.ToNode;
+        string? oldSide = e.RerouteFromEnd ? edge.FromSide : edge.ToSide;
+        string newNode = e.TargetNodeId;
+        string? newSide = string.IsNullOrEmpty(e.ToSide) ? null : e.ToSide;
+        // 无变化（含改接回同一节点同一边）→ 不入历史。
+        if (string.Equals(oldNode, newNode, StringComparison.Ordinal) &&
+            string.Equals(oldSide ?? "", newSide ?? "", StringComparison.Ordinal))
+            return;
+        var ed2 = edge;
+        if (e.RerouteFromEnd) { ed2.FromNode = newNode; ed2.FromSide = newSide; }
+        else { ed2.ToNode = newNode; ed2.ToSide = newSide; }
+        PushCanvasHistory(
+            undo: () =>
+            {
+                if (e.RerouteFromEnd) { ed2.FromNode = oldNode; ed2.FromSide = oldSide; }
+                else { ed2.ToNode = oldNode; ed2.ToSide = oldSide; }
+                RefreshCanvas();
+            },
+            redo: () =>
+            {
+                if (e.RerouteFromEnd) { ed2.FromNode = newNode; ed2.FromSide = newSide; }
+                else { ed2.ToNode = newNode; ed2.ToSide = newSide; }
+                RefreshCanvas();
+            });
         SaveCanvas();
         RefreshCanvas();
     }
