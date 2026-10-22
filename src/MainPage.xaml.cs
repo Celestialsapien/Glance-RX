@@ -430,6 +430,7 @@ public sealed partial class MainPage : Page
         else if (e.Key == VirtualKey.Escape)
         {
             // 白板连线拖拽中按 Esc → 取消本次连线（松手落空同样会取消，Esc 只是更快的退出手感）。
+            // ⚠ 不接管"按住波浪键的待接态"：那是白板内部状态，取消由 GpuPageView 自己管（松开它 / 同卡再点 / 左键点空白）。
             if (GpuViewer.CancelCanvasConnection()) e.Handled = true;
         }
         else if (e.Key == VirtualKey.Delete &&

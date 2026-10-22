@@ -1071,7 +1071,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         e.Handled = true;
     }
 
-    private void Viewer_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    private void Viewer_PointerWheelChanged(object sender, PointerRoutedEventArgs e) => HandlePointerWheel(e);
+
+    /// <summary>捕获期兜底：拉线期间 this 持着指针捕获，wheel 被投到捕获元素（不在 Viewer 的冒泡路径上），挂 Viewer 的处理器收不到。
+    /// 只接管拉线 —— 卡片拖不出绑定页，拖动中的滚轮没有任何意义（用户裁定），其余手势与编辑框原生滚动一律不管。</summary>
+    private void Root_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        if (e.Handled) return;                       // 未捕获时已由 Viewer 路径处理，避免重复消费
+        if (!_isCanvasConnecting) return;
+        HandlePointerWheel(e);
+    }
+
+    private void HandlePointerWheel(PointerRoutedEventArgs e)
     {
         CancelPendingRestore(); // 用户滚轮（滚动/Ctrl缩放）优先于未落定的还原，防止回拽
         var props = e.GetCurrentPoint(Viewer).Properties;
@@ -1099,7 +1110,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
 
         // 白板：选中态 / 编辑态下指针停在"内容溢出的卡片"上 → 滚轮滚【卡片内容】而非翻页
-        if (CanvasInputActive &&
+        // （手势进行中一律让位：拖卡片时指针就在被拖卡上，滚内容会让"滚动翻页"失效；
+        //   触发键待接态同理必须让位 —— 它的全部意义就是"滚到另一页去点终点"，不能停在卡片里滚内容）
+        if (!AnyCanvasGestureActive && !_connArmActive && CanvasInputActive &&
             (e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) == 0 &&
             TryScrollCanvasByWheel(e.GetCurrentPoint(Viewer).Position, delta))
         {
@@ -1764,6 +1777,20 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         LineJoin = Microsoft.Graphics.Canvas.Geometry.CanvasLineJoin.Round,
     };
 
+    /// 虚线：按住波浪键两次点击建线的"待接"引导（与实线预览区分：尚未落到任何一次拖拽手势上）。
+    /// 【段长单位 = 线宽倍数，不是 DIP】：Win2D 把 CustomDashStyle 原样转交 D2D CreateStrokeStyle 的 dashArray，
+    /// D2D 该参数按 stroke width 的倍数解释（dashOffset 文档亦写 "in units of stroke width"）。
+    /// 内置 Dash 是 4 实 2 空，端帽又给每段两端各外扩 w/2 ⇒ 有效实段 5w、有效空隙只剩 1w；
+    /// 缩到线宽下限 0.75 DIP 时空隙不足 1px，抗锯齿一糊就成实线。
+    /// 故改 6 实 4 空：有效 7w 实 / 3w 空 —— 实段更长、空隙三倍于旧值，最小缩放下也数得清段数。
+    private static readonly Microsoft.Graphics.Canvas.Geometry.CanvasStrokeStyle DashStrokeStyle = new()
+    {
+        StartCap = Microsoft.Graphics.Canvas.Geometry.CanvasCapStyle.Round,
+        EndCap = Microsoft.Graphics.Canvas.Geometry.CanvasCapStyle.Round,
+        DashCap = Microsoft.Graphics.Canvas.Geometry.CanvasCapStyle.Round,
+        CustomDashStyle = new float[] { 6f, 4f },
+    };
+
     /// <summary>设置"页点坐标(DIP) → 屏幕"的变换矩阵。 【必须以绝对值覆盖，不可与旧变换复合】：同一会话/渲染目标内会连续绘制多页（每页各调一次）， 若写成 m * ds.Transform，第二页的矩阵会叠加第一页的矩阵 → 该页笔画被二次缩放/平移，</summary>
     private void ApplyPageTransform(CanvasDrawingSession ds, Rect dest, double z)
     {
@@ -2116,6 +2143,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 滚轮：逻辑处理器挂在 Viewer(ScrollViewer 自身) 上、且用 HandledEventsToo 订阅，
         // 保证必定接管（ScrollViewer 原生处理时会把路由事件标 Handled，普通订阅会被整段吞掉——
         Viewer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelChanged), true);
+        // 捕获期兜底：拉线时持指针捕获，wheel 随该指针改投到捕获元素 = this，挂在 Viewer 上的处理器根本收不到
+        // ⇒ 抬不起滚轮（跨视口连线时必须能翻页）。挂根、只在拉线手势里接管（见 Root_PointerWheelChanged）。
+        this.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Root_PointerWheelChanged), true);
+        // 按住波浪键两次点击建线：松开它 = 取消待接态。挂根上，只要焦点在白板里就能收到（KeyUp）。
+        this.AddHandler(UIElement.KeyUpEvent, new KeyEventHandler(Root_KeyUp), true);
         Spacer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelBlocker), true);
         // 编辑态【文本按下】通道：RichEditBox 会把 PointerPressed 标记 Handled ⇒ Viewer_PointerPressed 收不到。
         // ⚠ 边框控件（滚动条 / 四角 / 四边中点 / 四边中段）的按下【不在这里】：其命中带已被 SyncCanvasEditHitCarve
@@ -3169,11 +3201,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             ds.Transform = savedTransform;
         }
 
-        // ---- 拉线预览（顶层）：橡皮筋 + 吸附环，唯一压在卡片之上的"线"----
-        if (pages.Count > 0 && _isCanvasConnecting)
+        // ---- 拉线预览 / 触发键待接引导（顶层）：橡皮筋 + 吸附环，唯一压在卡片之上的"线"----
+        // 两者互斥：_isCanvasConnecting 是"按住拖"的重型手势，_connArmActive 是"点两下"的轻量待接态。
+        if (pages.Count > 0 && (_isCanvasConnecting || _connArmActive))
         {
             ds.Transform = Matrix3x2.Identity;
-            DrawCanvasConnecting(ds);
+            if (_isCanvasConnecting) DrawCanvasConnecting(ds);
+            else DrawCanvasConnArmGuide(ds);
             ds.Transform = savedTransform;
         }
     }
@@ -3607,6 +3641,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasScrollDragStartScrollY = node.Id == _canvasEditNodeId
             ? (_canvasEditScrollViewer?.VerticalOffset ?? 0)
             : GetCanvasScrollY(node.Id);
+    }
+
+    /// <summary>进入卡片拖动：一次写全基准（页局部起点 + 卡片原始位置供撤销）。</summary>
+    private void SeedCanvasDrag(CanvasNode node, int page, double px, double py)
+    {
+        _isCanvasDragging = true;
+        _canvasDragNode = node;
+        _canvasDragPage = page;
+        _canvasDragStartPx = px;
+        _canvasDragStartPy = py;
+        _canvasDragOrigX = node.X;
+        _canvasDragOrigY = node.Y;
     }
 
     /// 【编辑态边框控件的信号切割】把"编辑卡边框控件命中带"从编辑框的命中区里【挖掉】。
@@ -4557,14 +4603,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
         }
 
-        var a1 = _connFromAnchorScreen;
+        // 两端都按【当前视口】现场派生（见 TryGetCanvasConnOriginScreen / TryGetCanvasConnTargetScreen）：
+        // 滚轮翻页、键盘翻页、Ctrl+滚轮缩放、窗口尺寸变化之后，预览都自动贴在卡片上。
+        if (!TryGetCanvasConnOriginScreen(out var a1, out var beginNormal)) return;
         Vector2 a2;
         Vector2 endNormal;
-        bool hasTarget = _connTargetNodeId != null && _connTargetSide.Length > 0;
+        bool hasTarget = TryGetCanvasConnTargetScreen(_connCursorScreen, _connFromNodeId,
+            out var anchor, out var tgNormal);
         if (hasTarget)
         {
-            a2 = _connTargetAnchorScreen;
-            endNormal = _connTargetNormalScreen;
+            a2 = anchor;
+            endNormal = tgNormal;
         }
         else
         {
@@ -4574,52 +4623,110 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             endNormal = dl > 1e-3f ? d / dl : new Vector2(1, 0);
         }
 
-        float dist = Vector2.Distance(a1, a2);
-        float k = Math.Clamp(dist * 0.4f, 24f, 120f);
-        var c1 = a1 + _connFromNormalScreen * k;
-        var c2 = hasTarget ? a2 + endNormal * k : a2 - endNormal * k;
-
         // 动端一律画箭头：新建连线的默认样式就是单箭头（指向 to 端），拉出即带；
         // 改线则按"原线在该端的箭头样式"，无箭头的那端就不画。
         bool arrowAtMoving = reroute ? arrowAtMovingStyle : true;
-
-        // 端点收缩到箭头底边 + 向顶点延伸 seamOv 消缝（与 DrawCanvasEdges 同一几何约定）。
-        float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)CurrentZoom);
-        float seamOv = MathF.Max(1.5f, 0.15f * arrowLen);
-        Vector2 p1 = a1, p2 = a2;
-        if (arrowAtFixed)
-        {
-            var d = a1 - c1;
-            if (d.Length() > 1e-3f) p1 = a1 - (d / d.Length()) * arrowLen;
-        }
-        if (arrowAtMoving)
-        {
-            var d = a2 - c2;
-            if (d.Length() > 1e-3f) p2 = a2 - (d / d.Length()) * arrowLen;
-        }
-        Vector2 l1 = p1, l2 = p2;
-        if (arrowAtFixed)
-        {
-            var d = a1 - c1;
-            if (d.Length() > 1e-3f) l1 = p1 + (d / d.Length()) * seamOv;
-        }
-        if (arrowAtMoving)
-        {
-            var d = a2 - c2;
-            if (d.Length() > 1e-3f) l2 = p2 + (d / d.Length()) * seamOv;
-        }
-
-        using (var geo = BuildBezier(l1, c1, c2, l2))
-        {
-            if (geo != null) ds.DrawGeometry(geo, strokeColor, MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom));
-        }
-        if (arrowAtFixed) DrawArrowHead(ds, p1, a1, strokeColor);
-        if (arrowAtMoving) DrawArrowHead(ds, p2, a2, strokeColor);
+        DrawConnBezier(ds, a1, beginNormal, a2, hasTarget, endNormal,
+            arrowAtFixed, arrowAtMoving, strokeColor, null);
 
         // 接线指示：吸附目标时画 7px 圆环；动端【没有箭头】时补 3.5px 落点（有箭头时它会压住箭头，故只在无箭头端出现）。
         // 两者可同时存在（改线拖到卡片上：圆环 + 落点），松手收尾后一并消失。
         if (hasTarget) ds.DrawCircle(a2, 7f, strokeColor, 2f);
         if (!arrowAtMoving) ds.FillCircle(a2, 3.5f, strokeColor);
+    }
+
+    /// <summary>预览/引导共用的连线几何：两端按箭头收缩到三角底边、再向顶点延伸 seamOv 消缝（与 DrawCanvasEdges 同一约定）。 strokeStyle 传 null = 实线。</summary>
+    private void DrawConnBezier(CanvasDrawingSession ds, Vector2 a1, Vector2 beginNormal,
+        Vector2 a2, bool hasTarget, Vector2 endNormal,
+        bool arrowAtStart, bool arrowAtEnd, Windows.UI.Color color,
+        Microsoft.Graphics.Canvas.Geometry.CanvasStrokeStyle? strokeStyle)
+    {
+        float k = Math.Clamp(Vector2.Distance(a1, a2) * 0.4f, 24f, 120f);
+        var c1 = a1 + beginNormal * k;
+        var c2 = hasTarget ? a2 + endNormal * k : a2 - endNormal * k;
+
+        float arrowLen = MathF.Max(CanvasArrowMinLen, CanvasArrowLen * (float)CurrentZoom);
+        float seamOv = MathF.Max(1.5f, 0.15f * arrowLen);
+        Vector2 p1 = a1, p2 = a2;
+        if (arrowAtStart)
+        {
+            var d = a1 - c1;
+            if (d.Length() > 1e-3f) p1 = a1 - (d / d.Length()) * arrowLen;
+        }
+        if (arrowAtEnd)
+        {
+            var d = a2 - c2;
+            if (d.Length() > 1e-3f) p2 = a2 - (d / d.Length()) * arrowLen;
+        }
+        Vector2 l1 = p1, l2 = p2;
+        if (arrowAtStart)
+        {
+            var d = a1 - c1;
+            if (d.Length() > 1e-3f) l1 = p1 + (d / d.Length()) * seamOv;
+        }
+        if (arrowAtEnd)
+        {
+            var d = a2 - c2;
+            if (d.Length() > 1e-3f) l2 = p2 + (d / d.Length()) * seamOv;
+        }
+
+        float w = MathF.Max(CanvasEdgeMinWidth, CanvasEdgeStrokeWidth * (float)CurrentZoom);
+        using (var geo = BuildBezier(l1, c1, c2, l2))
+        {
+            if (geo != null)
+            {
+                if (strokeStyle == null) ds.DrawGeometry(geo, color, w);
+                else ds.DrawGeometry(geo, color, w, strokeStyle);
+            }
+        }
+        if (arrowAtStart) DrawArrowHead(ds, p1, a1, color);
+        if (arrowAtEnd) DrawArrowHead(ds, p2, a2, color);
+    }
+
+    /// <summary>按住波浪键两次点击建线的"待接"引导：源锚点 → 指针（或悬停到的目标卡该边），虚线 + 单箭头。 不画圆环/落点：这不是拖拽手势，只是提示"还差一次点击"。</summary>
+    private void DrawCanvasConnArmGuide(CanvasDrawingSession ds)
+    {
+        CanvasNode? src = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(_connArmNodeId ?? "", out src);
+        if (src == null || src.GlancePage < 0 || src.GlancePage >= _pages.Count) return;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return;
+
+        // 源边：波浪键+点拉线控件 = 指定该边；波浪键+点卡片本体 = 按指针方向自动选边（与落定后 AutoSide 同一算法）
+        string side = _connArmSide;
+        if (side.Length == 0)
+        {
+            var sPage = _pages[src.GlancePage];
+            double scx = sPage.LayoutRect.X + src.X + src.Width / 2.0;
+            double scy = sPage.LayoutRect.Y + src.Y + src.Height / 2.0;
+            double tcx = scx + 1, tcy = scy;
+            if (CanvasViewportToPage(_connArmCursorVp, out int tp, out double tpx, out double tpy) &&
+                tp >= 0 && tp < _pages.Count)
+            {
+                var tPage = _pages[tp];
+                tcx = tPage.LayoutRect.X + tpx;
+                tcy = tPage.LayoutRect.Y + tpy;
+            }
+            side = AutoSide(scx, scy, tcx, tcy, true);
+        }
+        if (!TryGetCanvasHandleScreen(src.Id, side, out var a1)) return;
+        var xf = MakePageXform(ComputePageDest(src.GlancePage, z, hOff, vOff), z);
+        var sn = SideNormal(side);
+        var beginNormal = xf.MapDirection(sn.X, sn.Y);
+
+        bool hasTarget = TryGetCanvasConnTargetScreen(_connArmCursorVp, src.Id, out var anchor, out var tgNormal);
+        Vector2 a2;
+        Vector2 endNormal;
+        if (hasTarget) { a2 = anchor; endNormal = tgNormal; }
+        else
+        {
+            a2 = new Vector2((float)_connArmCursorVp.X, (float)_connArmCursorVp.Y);
+            var d = a2 - a1;
+            float dl = d.Length();
+            endNormal = dl > 1e-3f ? d / dl : new Vector2(1, 0);
+        }
+        DrawConnBezier(ds, a1, beginNormal, a2, hasTarget, endNormal,
+            arrowAtStart: false, arrowAtEnd: true, _canvasAccentColor, DashStrokeStyle);
     }
 
     // =====================================================================
@@ -4658,13 +4765,29 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private bool _isCanvasConnecting;
     private string? _connFromNodeId;
     private string _connFromSide = "";
-    private Vector2 _connFromAnchorScreen;    // 源手柄屏幕坐标（视口 DIP）
-    private Vector2 _connFromNormalScreen;
-    private Point _connCursorScreen;
-    private string? _connTargetNodeId;
-    private string _connTargetSide = "";
-    private Vector2 _connTargetAnchorScreen;
-    private Vector2 _connTargetNormalScreen;
+    // 拉线的两端【不缓存屏幕坐标】：源手柄由 (node, side) + 当前视口现场派生，目标由指针位置现场命中
+    // ⇒ 滚轮/键盘翻页/缩放/窗口尺寸任何变化都自动跟着走（旧版缓存快照会导致"起点与卡片脱离"）。
+    private Point _connCursorScreen;          // 指针屏幕坐标（手势期间不随视口变化，故可缓存）
+
+    // ---- 按住 Tab 上方的波浪键（`~）+ 两次点击建线（armed 态【不算手势】：不捕获指针、不冻结指针、不阻塞悬停）----
+    // 触发键的两次迁移（2026-10-22 用户裁定）：
+    //   Alt → 系统修饰键，Alt+数字/Alt+退格 在输框里被系统当助记键吃掉（页码框输不进数字），Alt+Esc / Alt+Tab 本身就是系统命令；
+    //   Q   → 普通字母键，但在**输入框有焦点**时会被输入法/编辑框收走（且与"按住某键"的常规用法撞车）；
+    //   `~`（Tab 上方，VK_OEM_3 = 0xC0）→ 既不是系统修饰键、也不是字母 ⇒ 不触发系统快捷键、不参与输入法组字，
+    //   且白板画布本就不是文本输入上下文，键会正常送到本视图。
+    private const VirtualKey ConnArmTriggerKey = (VirtualKey)0xC0;   // VK_OEM_3
+    private bool _connArmActive;
+    private string? _connArmNodeId;
+    private string _connArmSide = "";         // "" = 起点落在卡片本体，边由终点方向自动决定
+    private Point _connArmCursorVp;           // 虚线引导的动端（随指针走，无需按住键）
+
+    /// 触发键当前是否物理按下。用【系统按键状态】而非 e.KeyModifiers：该键不是修饰键，
+    /// 且这个判据同时供 PointerMoved / 按下链两处使用（与 Ctrl/Shift 的既有写法同源）。
+    /// ⚠ VK_OEM_3 不在 `Windows.System.VirtualKey` 的具名成员里（WinRT 没暴露 OEM 键）⇒ 直接按 VK 码强转，
+    /// 投影层就是 int，`GetKeyStateForCurrentThread` 照常接受。
+    private static bool IsConnArmTriggerDown()
+        => (InputKeyboardSource.GetKeyStateForCurrentThread(ConnArmTriggerKey)
+            & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
 
     // ---- 连线"改线"手势：拖动已有连线改接它的某一端（复用 _isCanvasConnecting 的预览状态机）----
     private bool _canvasEdgePressPending;     // 按下在连线上、尚未判定单击(选中)还是拖动(改线)
@@ -5143,13 +5266,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _isCanvasConnecting = false;
         _connRerouteEdgeId = null;
         _connFromNodeId = null;
-        _connTargetNodeId = null;
-        _connTargetSide = "";
         _canvasEdgePressPending = false;
         _canvasEdgePressEdgeId = null;
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
+        CancelCanvasConnArm();      // 待接态不捕获指针 ⇒ 不会被 CaptureLost 兜到，必须显式清
         HideCanvasCardToolbar();
         HideCanvasEdgeToolbar();
         CollapseCanvasOverlayIfIdle();   // 选中/编辑都已清 ⇒ 整层浮层直接收
@@ -5165,13 +5287,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _isCanvasConnecting = false;
         _connRerouteEdgeId = null;
         _connFromNodeId = null;
-        _connTargetNodeId = null;
-        _connTargetSide = "";
         _canvasEdgePressPending = false;
         _canvasEdgePressEdgeId = null;
         _isCanvasScrollDragging = false;
         _canvasScrollDragNodeId = null;
         CancelCanvasResize();
+        CancelCanvasConnArm();      // 退出白板 ⇒ 待接态一并作废（同上：没有捕获可兜底）
         // 编辑态必须走 EndCanvasEdit 正式收尾：它会提交最后一段尚未入史的文字、收起文本菜单，
         // ⚠ 此前是直接 `_canvasEditNodeId = null` —— 编辑框折叠了但**焦点还留在它身上**，切到阅读/画笔模式后
         if (_canvasEditNodeId != null)
@@ -5301,47 +5422,51 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         LockCanvasCursor(CanvasIdcArrow, _canvasEditNodeId != null);
         _connFromNodeId = nodeId;
         _connFromSide = side;
-        _connTargetNodeId = null;
-        _connTargetSide = "";
         _connCursorScreen = vp;
-
-        CanvasNode? node = null;
-        lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
-        if (node != null && node.GlancePage >= 0 && node.GlancePage < _pages.Count)
-        {
-            GetViewState(out double z, out double hOff, out double vOff);
-            var xf = MakePageXform(ComputePageDest(node.GlancePage, z, hOff, vOff), z);
-            var a = SideAnchor(node, side);
-            _connFromAnchorScreen = xf.Map(a.X, a.Y);
-            var nrm = SideNormal(side);
-            _connFromNormalScreen = xf.MapDirection(nrm.X, nrm.Y);
-        }
-        UpdateCanvasConnecting(vp);
         InvalidateOverlayThrottled();
     }
 
     private void UpdateCanvasConnecting(Point vp)
     {
-        _connCursorScreen = vp;
-        _connTargetNodeId = null;
-        _connTargetSide = "";
-        var pages = _pages;
-        if (TryHitCanvasNode(vp, out var hit, out _, out _, out _) && hit != null &&
-            !string.Equals(hit.Id, _connFromNodeId, StringComparison.Ordinal))
-        {
-            _connTargetNodeId = hit.Id;
-            _connTargetSide = ComputeTargetSide(hit.Id, vp);
-            if (TryGetCanvasHandleScreen(hit.Id, _connTargetSide, out var anchor))
-                _connTargetAnchorScreen = anchor;
-            if (hit.GlancePage >= 0 && hit.GlancePage < pages.Count)
-            {
-                GetViewState(out double z, out double hOff, out double vOff);
-                var xf = MakePageXform(ComputePageDest(hit.GlancePage, z, hOff, vOff), z);
-                var nrm = SideNormal(_connTargetSide);
-                _connTargetNormalScreen = xf.MapDirection(nrm.X, nrm.Y);
-            }
-        }
+        _connCursorScreen = vp;   // 目标与源锚点都在绘制时按当前视口现场派生，这里只记指针位置
         InvalidateOverlayThrottled();
+    }
+
+    /// <summary>拉线固定端（源手柄）的屏幕锚点 + 法线：由 (node, side) + 当前视口现场派生，绝不缓存 —— 视口一变即自动跟随。</summary>
+    private bool TryGetCanvasConnOriginScreen(out Vector2 anchor, out Vector2 normal)
+    {
+        anchor = normal = default;
+        string? nodeId = _connFromNodeId;
+        if (string.IsNullOrEmpty(nodeId) || _connFromSide.Length == 0) return false;
+        CanvasNode? node = null;
+        lock (_canvasLock) _canvasIndex.TryGetValue(nodeId, out node);
+        if (node == null || node.GlancePage < 0 || node.GlancePage >= _pages.Count) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        var xf = MakePageXform(ComputePageDest(node.GlancePage, z, hOff, vOff), z);
+        var a = SideAnchor(node, _connFromSide);
+        anchor = xf.Map(a.X, a.Y);
+        var nrm = SideNormal(_connFromSide);
+        normal = xf.MapDirection(nrm.X, nrm.Y);
+        return true;
+    }
+
+    /// <summary>拉线动端在给定屏幕点命中的目标卡（排除源卡自身）：返回该边锚点 + 法线。同样按当前视口现场派生。</summary>
+    private bool TryGetCanvasConnTargetScreen(Point vp, string? excludeNodeId,
+        out Vector2 anchor, out Vector2 normal)
+    {
+        anchor = normal = default;
+        if (!TryHitCanvasNode(vp, out var hit, out _, out _, out _) || hit == null) return false;
+        if (excludeNodeId != null && string.Equals(hit.Id, excludeNodeId, StringComparison.Ordinal)) return false;
+        string side = ComputeTargetSide(hit.Id, vp);
+        if (!TryGetCanvasHandleScreen(hit.Id, side, out anchor)) return false;
+        if (hit.GlancePage < 0 || hit.GlancePage >= _pages.Count) return false;
+        GetViewState(out double z, out double hOff, out double vOff);
+        if (z <= 0) return false;
+        var xf = MakePageXform(ComputePageDest(hit.GlancePage, z, hOff, vOff), z);
+        var nrm = SideNormal(side);
+        normal = xf.MapDirection(nrm.X, nrm.Y);
+        return true;
     }
 
     public bool CancelCanvasConnection()
@@ -5351,11 +5476,85 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _connRerouteEdgeId = null;
         SyncCanvasOverlayNow();   // 取消连线 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
         _connFromNodeId = null;
-        _connTargetNodeId = null;
-        _connTargetSide = "";
         UnlockCanvasCursor();   // 连线结束 ⇒ 解锁光标（恢复框架默认）
         InvalidateOverlay();
         return true;
+    }
+
+    // ================= 按住波浪键两次点击建线（跨视口） =================
+
+    /// <summary>取消"待接"态（松开触发键 / 点空白 / 同卡再点 / 退出白板 都走这里）。 状态只活在触发键按住期间，故不存在"没人选终点还一直占着"的悬空态。 ⚠ 刻意【不】挂 Esc：它不是本机制的一部分，交给全局 Esc 处理（拉线取消、退出别的态）。</summary>
+    private void CancelCanvasConnArm()
+    {
+        if (!_connArmActive) return;
+        _connArmActive = false;
+        _connArmNodeId = null;
+        _connArmSide = "";
+        InvalidateOverlay();
+    }
+
+    private void ArmCanvasConn(string nodeId, string side, Point vp)
+    {
+        _connArmActive = true;
+        _connArmNodeId = nodeId;
+        _connArmSide = side ?? "";
+        _connArmCursorVp = vp;
+        InvalidateOverlay();
+    }
+
+    private void CompleteCanvasConnArm(string targetNodeId, string targetSide)
+    {
+        string? fromNode = _connArmNodeId;
+        string fromSide = _connArmSide;
+        CancelCanvasConnArm();
+        if (string.IsNullOrEmpty(fromNode)) return;
+        if (string.Equals(fromNode, targetNodeId, StringComparison.Ordinal)) return;
+        CanvasNodeConnectionRequested?.Invoke(this, new CanvasNodeEventArgs
+        {
+            NodeId = fromNode, FromSide = fromSide, TargetNodeId = targetNodeId, ToSide = targetSide
+        });
+    }
+
+    /// <summary>按住触发键（Tab 上方波浪键）时的点击：第一次选起点，第二次选终点。始/终都可以是"拉线控件"（指定边）或"卡片本体"（自动选边），可混用。 返回 true = 本次按下已被本机制消费（调用方直接 return）。</summary>
+    private bool TryHandleCanvasConnArmPress(Point vp, PointerRoutedEventArgs e)
+    {
+        // 只接管左键：右键必须留给"右键拖拽缩放"。
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return false;
+        bool armedKey = IsConnArmTriggerDown();
+        if (!armedKey)
+        {
+            // armed 但触发键已松（KeyUp 漏收时的兜底）⇒ 取消后【照常】处理这次点击，不吞掉 —— 用户这时要的是普通点击。
+            CancelCanvasConnArm();
+            return false;
+        }
+        StopSmoothZoom();
+        StopWheelScroll();
+        EnsureViewerFocus();   // 松键取消靠键盘事件判定 ⇒ 视口必须持有焦点
+        // 命中顺序与正常链一致：四边中点拉线控件（指定边）优先于卡片本体（自动边）
+        if (TryHitCanvasHandle(vp, out var hNode, out var hSide))
+        {
+            if (!_connArmActive) { ArmCanvasConn(hNode, hSide, vp); return true; }
+            if (string.Equals(hNode, _connArmNodeId, StringComparison.Ordinal)) { CancelCanvasConnArm(); return true; }
+            CompleteCanvasConnArm(hNode, hSide);
+            return true;
+        }
+        if (TryHitCanvasNode(vp, out var node, out _, out _, out _) && node != null)
+        {
+            if (!_connArmActive) { ArmCanvasConn(node.Id, "", vp); return true; }
+            if (string.Equals(node.Id, _connArmNodeId, StringComparison.Ordinal)) { CancelCanvasConnArm(); return true; }
+            // 终点边与预览同一套算法（指针最近的手柄）⇒ 预览看到吸在哪条边，落定就是那条边
+            CompleteCanvasConnArm(node.Id, ComputeTargetSide(node.Id, vp));
+            return true;
+        }
+        // 空白：armed 时取消；未 armed 时也消费掉 —— 触发键按住时不该顺手开始平移/选卡
+        CancelCanvasConnArm();
+        return true;
+    }
+
+    /// <summary>松开触发键（波浪键）⇒ 取消待接态。挂在根上（焦点在白板里即可收到）。 ⚠ OEM 键在 WinUI 里可能被映射成别的值，故 Key / OriginalKey 都认。</summary>
+    private void Root_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == ConnArmTriggerKey || e.OriginalKey == ConnArmTriggerKey) CancelCanvasConnArm();
     }
 
     /// <summary>开始"改线"：拖动已有连线时断开离指针更近的一端（等距则断终点 to），复用新建连线的预览状态机（固定端 → 指针）。 起手即取消全部选中（本线或别的卡片/线）：胶囊随选中态一起收起，拖动期间不再随动；完成后按指针位置重判悬浮态（见 CommitCanvasEdgeReroute）。</summary>
@@ -8297,6 +8496,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             // 处理是【依赖焦点】的 KeyDown 路由（必须穿过 MainPage 视觉树才可达）⇒ 首次打开带卡片的 PDF 时
             // ⚠ 编辑态【不】抢焦点：编辑框必须继续持有键盘焦点，插入光标才照常闪烁（DrawCanvasEditCaret 以
             if (_canvasEditNodeId == null) EnsureViewerFocus();
+            // 按住波浪键两次点击建线（跨视口）：命中/未命中都在机制内部决定是否消费，消费了就不进下面的拖拽命中链。
+            if (TryHandleCanvasConnArmPress(pt.Position, e)) { e.Handled = true; return; }
             // 滚动条优先：它在卡片内部、意图更明确；命中区仅滚动条矩形（±小容差），
             if (TryHitCanvasScrollBar(pt.Position, out var sbNode) && sbNode != null)
             {
@@ -8309,13 +8510,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                     // 直接用滚动条所属卡片自身作拖动对象（不再绕经 TryHitCanvasNode：选中卡片已置顶绘制，
                     if (CanvasViewportToPage(pt.Position, out int dPage, out double dPx, out double dPy))
                     {
-                        _isCanvasDragging = true;
-                        _canvasDragNode = sbNode;
-                        _canvasDragPage = dPage;
-                        _canvasDragStartPx = dPx;
-                        _canvasDragStartPy = dPy;
-                        _canvasDragOrigX = sbNode.X;
-                        _canvasDragOrigY = sbNode.Y;
+                        SeedCanvasDrag(sbNode, dPage, dPx, dPy);
                         // 指针位置就此冻结（拖动期间不再更新）⇒ 必须标记为"不可信"，
                         // 否则这个按下点会被当成活指针去探测手柄：卡片扫过它时凭空显出边缘控件（同 BeginCanvasScrollDrag）。
                         _canvasPointerValid = false;
@@ -8371,13 +8566,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 _canvasClickEditPending = wasSelected && _canvasEditNodeId == null;
                 _canvasClickEditStartVp = pt.Position;
                 SelectCanvasNode(hitNode.Id);
-                _isCanvasDragging = true;
-                _canvasDragNode = hitNode;
-                _canvasDragPage = hitPage;
-                _canvasDragStartPx = hitPx;
-                _canvasDragStartPy = hitPy;
-                _canvasDragOrigX = hitNode.X;
-                _canvasDragOrigY = hitNode.Y;
+                SeedCanvasDrag(hitNode, hitPage, hitPx, hitPy);
                 // 同上：位置冻结在按下点 ⇒ 置为不可信，禁止拿它探测手柄（否则卡片移动经过按下点会显出控件）。
                 _canvasPointerValid = false;
                 this.CapturePointer(e.Pointer);
@@ -8450,6 +8639,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void Viewer_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
         // 命中元素是滚动条(或其子部件)→视为 chrome，交还真实箭头；其余交给下方画笔逻辑。
+
+        // 触发键待接态：引导线动端始终跟手。本机制【不捕获指针】，下面各分支照常跑（仍可翻页、仍可悬停选目标）。
+        // 兜底自愈：触发键已松却没收到 KeyUp（焦点被别处抢走，例如点了左侧缩略图跳页）⇒ 立刻取消，
+        // 避免"一根虚线代表的状态"悬着不走。判据用【系统按键状态】，不依赖事件是否送到。
+        if (_connArmActive)
+        {
+            if (!IsConnArmTriggerDown())
+            {
+                CancelCanvasConnArm();
+            }
+            else
+            {
+                _connArmCursorVp = e.GetCurrentPoint(Viewer).Position;
+                InvalidateOverlayThrottled();
+            }
+        }
 
         // 白板模式：记录指针视口坐标（手柄"按接近度显形"依赖它），随后各分支照常处理。
         // ⚠ 手势进行中【不更新】：拖动滚动条 / 缩放 / 连线期间指针位置若跟着变，
@@ -8720,8 +8925,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 _isCanvasConnecting = false;
                 _connRerouteEdgeId = null;
                 _connFromNodeId = null;
-                _connTargetNodeId = null;
-                _connTargetSide = "";
                 this.ReleasePointerCapture(e.Pointer);
                 CommitCanvasEdgeReroute(rerouteId, detachFrom, fixedNode, rerouteDrop);
                 if (_canvasEditNodeId != null) CanvasEditBox.Focus(FocusState.Programmatic);
@@ -8734,12 +8937,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             var dropPos = e.GetCurrentPoint(Viewer).Position;
             _isCanvasConnecting = false;
             _connFromNodeId = null;
-            _connTargetNodeId = null;
-            _connTargetSide = "";
             SyncCanvasOverlayNow();   // 连线结束 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
             this.ReleasePointerCapture(e.Pointer);
             InvalidateOverlay();
-            // ⚠ 目标在【释放点当下重新判定】，不再依赖拖动期间累积的 _connTargetNodeId。
+            // ⚠ 目标在【释放点当下重新判定】（预览也是同一套现场派生，故两者必然一致）。
             bool onAnyCard = TryHitCanvasNode(dropPos, out var dropHit, out _, out _, out _) && dropHit != null;
             bool onOtherCard = onAnyCard && !string.Equals(dropHit!.Id, from, StringComparison.Ordinal);
             int dropPage = -1; double dpx = 0, dpy = 0;
@@ -8864,8 +9065,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _isCanvasConnecting = false;
             _connRerouteEdgeId = null;
             _connFromNodeId = null;
-            _connTargetNodeId = null;
-            _connTargetSide = "";
             InvalidateOverlay();
             SyncCanvasOverlayNow();   // 系统打断连线（失焦等）⇒ 恢复胶囊
         }
