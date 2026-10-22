@@ -155,6 +155,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private bool _canvasEditControlGesture;        // 本次按下命中【编辑卡】的边框控件 ⇒ 属控件交互而非"点卡外退出编辑"
     private bool _canvasPointerOnEditCard;         // 指针是否落在编辑卡上（编辑框通道置 true，其 Exited/卡外置 false）
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _ibeamScopeTimer;   // 25ms 作用域轮询（对齐画笔 _ringScopeTimer）
+    private bool _handInstalled;                  // 连线手型作用域是否已安装（对齐 _ibeamInstalled；变化才动资源）
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _handScopeTimer;   // 25ms 作用域轮询（对齐 _ibeamScopeTimer）
 
     private bool _isSmoothZooming;
     private double _zoomOmega = ZoomSpringOmega;
@@ -3611,8 +3613,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         if (_canvasEditNodeId == null || CanvasEditBox == null) return;
         if (AnyCanvasGestureActive) return;
-        bool onBand = ResolveEditHoverCursor(vp) != null;
+        // 角/边/滚动条带 → 挖除编辑框命中（其光标由 ProtectedCursor 经系统槽显示）；
+        // 拉线控件（四边中点圆形手柄）同样挖除：否则其卡片内半区被编辑框盖住 → 显示原生工字且吃掉按下、无法拉线。
+        bool onBand = ResolveEditHoverCursor(vp) != null || TryHitCanvasHandle(vp, out _, out _);
         if (CanvasEditBox.IsHitTestVisible != !onBand) CanvasEditBox.IsHitTestVisible = !onBand;
+        // 命中带内 = 指针在"控件"上而非文本上 ⇒ 工字作用域立即让出（单一真相源，避免挖除生效前的 1 帧工字↔手型互切）。
+        if (onBand) _canvasPointerOnEditCard = false;
         // 把命中区还回编辑框时，元素级光标同步回工字（否则会残留上一个控件带的 resize/箭头光标一帧）。
         if (!onBand) CanvasEditBox.OverrideCursor(CanvasIBeamCursor);
     }
@@ -4580,6 +4586,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             if (_canvasInputActive == value) return;
             _canvasInputActive = value;
             if (!value) ExitCanvasInteraction();
+            else EnterHandScope();   // 进入白板：启动连线手型作用域轮询（对齐编辑态 EnterIbeamScope）
         }
     }
     private bool _canvasInputActive;
@@ -5091,6 +5098,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void ExitCanvasInteraction()
     {
+        ExitHandScope();   // 停手型作用域轮询并卸载（对齐 ExitIbeamScope）
         _isCanvasDragging = false;
         _canvasDragNode = null;
         _canvasDragPage = -1;
@@ -5398,8 +5406,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (!_canvasCursorLocked) return;
         _canvasCursorLocked = false;
         CursorInterop.RestoreSystemCursors();
-        // SPI_SETCURSORS 已把箭头槽还原成真箭头 ⇒ 安装标志同步复位，工字作用域轮询下一拍（≤25ms）
+        // SPI_SETCURSORS 已把箭头槽还原成真箭头 ⇒ 安装标志同步复位，工字/手型作用域轮询下一拍（≤25ms）重新评估
         _ibeamInstalled = false;
+        _handInstalled = false;
     }
 
     /// 启动编辑态"卡内=工字"光标作用域（对齐画笔 EnterPenRingMode）：建 25ms 轮询并立刻评估一次。
@@ -5448,7 +5457,61 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 CursorInterop.OverrideSystemCursorTo(CursorInterop.IdcIbeam, keepIBeam: true);
             else
             {
-                _canvasCursorLocked = false;   // Restore 一次性还原全部槽 ⇒ 锁定标志同步复位（不变量：Restore 后必为未锁）
+                _canvasCursorLocked = false;   // Restore 一次性还原全部槽 ⇒ 锁定/作用域标志同步复位（不变量：Restore 后必为未锁/未装）
+                _handInstalled = false;
+                CursorInterop.RestoreSystemCursors();
+            }
+        }
+        catch { }
+    }
+
+    /// 启动白板连线"手型"光标作用域（对齐画笔 EnterPenRingMode / 编辑态 EnterIbeamScope）：建 25ms 轮询并立刻评估一次。
+    private void EnterHandScope()
+    {
+        if (_handScopeTimer == null)
+        {
+            _handScopeTimer = DispatcherQueue.CreateTimer();
+            _handScopeTimer.Interval = TimeSpan.FromMilliseconds(IbeamScopeIntervalMs);
+            _handScopeTimer.Tick += HandScopeTick;
+        }
+        try { _handScopeTimer.Stop(); _handScopeTimer.Start(); } catch { }
+        UpdateHandScope();
+    }
+
+    /// 停手型作用域轮询并卸载（对齐 ExitIbeamScope）。
+    private void ExitHandScope()
+    {
+        try { _handScopeTimer?.Stop(); } catch { }
+        SetHandInstalled(false);
+    }
+
+    private void HandScopeTick(object? sender, object e) => UpdateHandScope();
+
+    /// <summary>作用域判定（每 25ms 一拍，对齐画笔 UpdateRingScope / 编辑态 UpdateIbeamScope）： 白板交互态 + 指针在画布上 + 非手势 ⇒ 命中连线或卡片四边中点圆形拉线控件则装手型、否则卸下；其余一律卸下。 编辑态下只在连线/拉线控件上装手型（文本区命中带为 false，不装），卡片文本区仍走编辑框 I 形，互不覆盖。</summary>
+    private void UpdateHandScope()
+    {
+        // 手势进行中：手型作用域不介入（手势光标由 LockCanvasCursor 负责，避免覆盖）。
+        if (AnyCanvasGestureActive) return;
+        if (!_canvasInputActive || !_canvasPointerValid) { SetHandInstalled(false); return; }
+        // 命中任意连线，或命中卡片四边中点圆形拉线控件（命中带均与绘制同源）⇒ 手型出现 ⟺ 点击必选中/拉出连线（对齐 Obsidian）。
+        bool overLine = TryHitCanvasEdge(_canvasPointerPos, out _)
+            || TryHitCanvasHandle(_canvasPointerPos, out _, out _);
+        SetHandInstalled(overLine);
+    }
+
+    /// <summary>安装/卸下白板连线"手型"作用域（仅状态变化才动资源，幂等，对齐画笔 _ringInstalled / 编辑态 _ibeamInstalled）： 安装 = 把系统箭头槽替换为手型(IDC_HAND)副本（keepIBeam 只动箭头槽、不动 I 形槽，编辑文本仍走工字）； 卸下 = 还原全部系统光标槽。不变量：还原后任何光标锁定/作用域标志都必须复位。</summary>
+    private void SetHandInstalled(bool on)
+    {
+        if (on == _handInstalled) return;
+        _handInstalled = on;
+        try
+        {
+            if (on)
+                CursorInterop.OverrideSystemCursorTo(CursorInterop.IdcHand, keepIBeam: true);
+            else
+            {
+                _canvasCursorLocked = false;   // Restore 一次性还原全部槽 ⇒ 锁定/作用域标志同步复位（不变量）
+                _ibeamInstalled = false;
                 CursorInterop.RestoreSystemCursors();
             }
         }
@@ -7300,7 +7363,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private Microsoft.UI.Input.InputCursor? ResolveEditHoverCursor(Point p) => ResolveCanvasHoverCursor(p);
 
-    /// <summary>卡片"控件"悬停光标（编辑态与非编辑态共用）：在控件上给对应光标，文本区返回 null（= 控件默认 I 形）。 优先级：滚动条 &gt; 四角缩放(斜向) &gt; 四边中点连线(箭头) &gt; 四边中段单轴缩放(上下/左右)。</summary>
+    /// <summary>卡片"控件"悬停光标（编辑态与非编辑态共用）：在控件上给对应光标，文本区返回 null（= 控件默认 I 形）。 优先级：滚动条 &gt; 四角缩放(斜向) &gt; 四边中点连线(手型) &gt; 四边中段单轴缩放(上下/左右)。 注：四边中点圆形拉线控件返回 null —— 手型由手型作用域经系统箭头槽提供（与连线同源），不在此抢 ProtectedCursor。</summary>
     private Microsoft.UI.Input.InputCursor? ResolveCanvasHoverCursor(Point p)
     {
         // 胶囊叠层遮罩：悬停其上时不强加背后卡片的边框控件光标（卡片角/边缩放光标等），
@@ -7309,7 +7372,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (TryHitCanvasScrollBar(p, out var sb) && sb != null) return CanvasArrowCursor;
         if (TryHitCanvasCorner(p, out _, out var corner))
             return (corner == "tl" || corner == "br") ? CanvasResizeNwSeCursor : CanvasResizeNeSwCursor;
-        if (TryHitCanvasHandle(p, out _, out _)) return CanvasArrowCursor;
+        if (TryHitCanvasHandle(p, out _, out _)) return null;   // 圆形拉线控件：手型（与连线同源，走手型作用域系统槽，不抢 ProtectedCursor）
         if (TryHitCanvasEdge(p, out _, out var edge))
             return (edge == "top" || edge == "bottom") ? CanvasResizeNsCursor : CanvasResizeWeCursor;
         return null;
@@ -8322,6 +8385,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (CanvasInputActive && !_isRightZooming && !_isDragPanning && !canvasTextDragSelecting)
         {
             var hoverPos = e.GetCurrentPoint(Viewer).Position;
+            _canvasPointerPos = hoverPos;       // 供连线手型作用域 25ms 轮询判定（对齐编辑态 _canvasPointerPos 维护）
+            _canvasPointerValid = true;
             UpdateCanvasNodeHover(hoverPos);    // 先卡片悬停：下方连线悬浮的"拉线控件优先"判定依赖 _hoverCanvasNodeId
             UpdateCanvasEdgeHover(hoverPos);
             // 手柄（角/边中点/四边中段）悬停时改 Viewer 根光标，使"所有能使用边框控件的情境"

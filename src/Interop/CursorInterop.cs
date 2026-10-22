@@ -45,8 +45,10 @@ internal static class CursorInterop
     // 根因：WinUI3 框架在渲染/合成循环里【每帧直接 SetCursor】重设光标（MainPage 画笔圆环注释已坐实），
     private const int IDC_ARROW = 32512;
     private const int IDC_IBEAM = 32513;
+    private const int IDC_HAND = 32649;   // 链接选择手型（食指）
 
     public const int IdcIbeam = IDC_IBEAM;
+    public const int IdcHand = IDC_HAND;
 
     private const uint SPI_SETCURSORS = 0x0057;
 
