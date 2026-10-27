@@ -122,7 +122,6 @@ public sealed partial class MainPage : Page
     private bool _toolbarAlwaysVisible;
     private uint _totalPages = 0;
 
-    private readonly BookmarkStore _bookmarkStore = new();
     private readonly ObservableCollection<BookmarkViewModel> _bookmarks = new();
     private readonly ObservableCollection<OutlineItemViewModel> _outlineItems = new();
     private enum SidebarMode { Thumbnails, Bookmarks, Outline }
@@ -1075,7 +1074,7 @@ public sealed partial class MainPage : Page
         // 窗口几何由 MainWindow 填写（只有它持有 AppWindow）：普通状态取 AppWindow.Position/Size，
         if ((Application.Current as App)?.MainWindow is MainWindow mainWindow)
             mainWindow.CaptureWindowGeometry(data, _currentPdfPath);
-        ViewStateStore.Save(_currentPdfPath, data);
+        DocumentStore.SaveViewState(_currentPdfPath, data);
     }
 
     public void CleanupForExit()
@@ -1785,7 +1784,7 @@ public sealed partial class MainPage : Page
             SidebarSplitView.Visibility = Visibility.Visible;
             // 侧边栏开关状态随文件记忆（与阅读位置/缩放同一份记录，按 PDF 路径存）。
             // 必须在引擎初始化【之前】摆好：其后 InitializeAsync/GetPageCountAsync 有多个 await，
-            var savedVs = ViewStateStore.Load(_currentPdfPath);
+            var savedVs = DocumentStore.LoadViewState(_currentPdfPath);
             SidebarSplitView.IsPaneOpen = savedVs?.SidebarOpen == true;
             if (ToggleSidebarButton != null) ToggleSidebarButton.IsChecked = SidebarSplitView.IsPaneOpen;
             SetToolbarItemAppVisible(SaveButton, true);
@@ -2274,7 +2273,7 @@ public sealed partial class MainPage : Page
         try
         {
             var list = _bookmarks.Select(b => new PdfBookmark { PageIndex = b.PageIndex, DisplayName = b.DisplayName }).ToList();
-            await _bookmarkStore.SaveAsync(_currentPdfPath, list);
+            await DocumentStore.SaveBookmarksAsync(_currentPdfPath, list);
         }
         catch { /* best-effort persistence */ }
     }
@@ -2285,7 +2284,7 @@ public sealed partial class MainPage : Page
         if (string.IsNullOrEmpty(_currentPdfPath)) return;
         try
         {
-            var saved = await _bookmarkStore.LoadAsync(_currentPdfPath);
+            var saved = await DocumentStore.LoadBookmarksAsync(_currentPdfPath);
             foreach (var b in saved.OrderBy(x => x.PageIndex))
             {
                 string name = string.IsNullOrWhiteSpace(b.DisplayName)
@@ -3762,8 +3761,6 @@ public sealed partial class MainPage : Page
     private bool _pointerInPenCapsule;
     private bool _pointerInTitleBar;
     // 画笔模式下所有"非画布"的 chrome 区域标志：标题栏/工具栏/笔胶囊由各自 PointerEntered 维护，
-        private bool _pointerInBottomZoomPill;
-        private bool _pointerInSecondaryPill;
         private bool _pointerOverScrollBar;
 
         // 光标的"几何命中"判定用的指针位置（MainPage 坐标系，由 Root_PointerMoved 持续刷新）。
@@ -4015,17 +4012,12 @@ public sealed partial class MainPage : Page
         bool overToolbar = overToolbarRect &&
             (src != null) && (ReferenceEquals(src, TopToolbar) || IsDescendantOf(src, TopToolbar));
         bool overCapsule = (src != null) && (ReferenceEquals(src, PenOptionsCapsule) || IsDescendantOf(src, PenOptionsCapsule));
-        bool overZoom = (src != null) && (ReferenceEquals(src, BottomZoomPill) || IsDescendantOf(src, BottomZoomPill));
-        bool overSecondary = (src != null) && ((ReferenceEquals(src, SecondaryOpenPill) || IsDescendantOf(src, SecondaryOpenPill))
-                                            || (ReferenceEquals(src, SecondaryClosePill) || IsDescendantOf(src, SecondaryClosePill)));
         bool overScrollBar = IsInsideScrollBar(src);   // 命中元素在任一 ScrollBar(或其模板部件)内 → 视为滚动条区域
         // 右侧对比视图排除已改用 IsPointerOverCompareView() 的屏幕矩形判定（容器可见即整片右侧右半区恢复原生），
 
         // 工具栏归属：命中工具栏 + 实时光标在工具栏矩形内 → 建立；否则按【几何】收敛（指针已不在矩形内，
         _pointerInTopToolbar = overToolbar || overToolbarRect;
         _pointerInPenCapsule = overCapsule;
-        _pointerInBottomZoomPill = overZoom;
-        _pointerInSecondaryPill = overSecondary;
         _pointerOverScrollBar = overScrollBar;
 
         _lastPointerMoveMs = PointerMoveClock.ElapsedMilliseconds;

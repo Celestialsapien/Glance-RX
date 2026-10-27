@@ -38,9 +38,8 @@ internal static class AppPaths
 
     public static readonly string SettingsFilePath = Path.Combine(DataDirectory, "settings.json");
 
-    public static readonly string ViewStateFilePath = Path.Combine(DataDirectory, "GlanceViewStates.txt");
-
-    public static readonly string BookmarksFilePath = Path.Combine(DataDirectory, "bookmarks.json");
+    /// <summary>每份 PDF 的文档级数据（阅读位置/缩放/布局/旋转/侧边栏/窗口几何 + 书签），键 = PDF 完整路径。</summary>
+    public static readonly string DocumentsFilePath = Path.Combine(DataDirectory, "documents.json");
 
     /// <summary>静态构造里立即建目录：数据文件的写点分散在各 Store 里，不能等到第一次写入时才建； 崩溃日志同理（进程最早阶段就可能落盘）。</summary>
     static AppPaths()

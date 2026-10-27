@@ -758,7 +758,7 @@ public sealed partial class MainWindow : Window
             int h = defH;
             int state = WIN_STATE_NONE;
 
-            var vs = string.IsNullOrEmpty(pdfPath) ? null : GlanceRX.Services.ViewStateStore.Load(pdfPath);
+            var vs = string.IsNullOrEmpty(pdfPath) ? null : GlanceRX.Services.DocumentStore.LoadViewState(pdfPath);
             if (vs != null && vs.WindowState != WIN_STATE_NONE && vs.WindowWidth > 0 && vs.WindowHeight > 0)
             {
                 x = vs.WindowX;
@@ -814,7 +814,7 @@ public sealed partial class MainWindow : Window
             // 最小化时窗口矩形是 (-32000,-32000) 这类占位坐标，不能记账；沿用该 PDF 上一次记录
             if (IsIconic(hwnd))
             {
-                var prev = GlanceRX.Services.ViewStateStore.Load(pdfPath);
+                var prev = GlanceRX.Services.DocumentStore.LoadViewState(pdfPath);
                 if (prev == null) return;
                 data.WindowState = prev.WindowState;
                 data.WindowX = prev.WindowX;
