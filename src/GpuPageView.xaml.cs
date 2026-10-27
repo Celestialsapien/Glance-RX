@@ -1643,6 +1643,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         try { ScreenCanvas.Invalidate(); } catch { }
     }
 
+    /// <summary>只重绘合成结果：已烘好的笔迹层原样复用，不重新栅格化笔迹。
+    /// 白板卡片/连线/浮层的改动都不改变笔迹内容，走这条即可；走 InvalidateOverlay 会把整屏笔迹重画一遍。</summary>
+    private void InvalidateComposite()
+    {
+        try { ScreenCanvas.Invalidate(); } catch { }
+    }
+
     /// <summary>刷新页位图层与标注层（滚动/缩放/旋转/主题/尺寸等视口变化时用）。整层重建标注。 标注与页位图共用 ScreenCanvas 单交换链 → 双画布相位脱节不再存在。</summary>
     private void InvalidateBoth()
     {
@@ -3063,7 +3070,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 撤销/重做可能正好取消了选中 ⇒ 浮层按"空闲才收"的口径处理。
         CollapseCanvasOverlayIfIdle();
 
-        InvalidateOverlay();
+        InvalidateComposite();
         RequestCanvasOverlaySync();
     }
 
@@ -5041,7 +5048,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // （jsoncanvas 的 z 序 = nodes 数组顺序）。否则取消选中后 topId 失效，卡片会掉回出生层级。
         if (id != null)
             CanvasNodeBringToFrontRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });
-        InvalidateOverlay();
+        InvalidateComposite();
         SyncCanvasOverlayNow();
     }
 
@@ -5059,7 +5066,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HideCanvasEdgePickers();
         _selectedCanvasEdgeId = id;
         _selectedCanvasNodeId = null;
-        InvalidateOverlay();
+        InvalidateComposite();
         SyncCanvasOverlayNow();
     }
 
@@ -5069,7 +5076,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _selectedCanvasEdgeId = null;
         _hoverCanvasEdgeId = null;
         HideCanvasEdgePickers();
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     public bool DeleteSelectedCanvasEdge()
@@ -5082,7 +5089,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HideCanvasEdgeToolbar();
         CollapseCanvasOverlayIfIdle();
         CanvasEdgeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { EdgeId = id });
-        InvalidateOverlay();
+        InvalidateComposite();
         return true;
     }
 
@@ -5094,7 +5101,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HideCanvasCardToolbar();
         CollapseCanvasOverlayIfIdle();   // 两颗胶囊都收了才收整层浮层
         CanvasNodeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });
-        InvalidateOverlay();
+        InvalidateComposite();
         return true;
     }
 
@@ -5131,7 +5138,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _canvasEditTextLayoutKey = -1;
         StartCaretBlink();
         StartCanvasEditPoll();
-        InvalidateOverlay();
+        InvalidateComposite();
         DispatcherQueue.TryEnqueue(() =>
         {
             CanvasEditBox.Focus(FocusState.Programmatic);
@@ -5402,7 +5409,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 表现为白板模式下快捷键整体失效、字母键进入输入法。必须把焦点显式移回滚动宿主。
         RestoreViewerFocus();
         SyncCanvasOverlayNow();
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     private void RestoreViewerFocus()
@@ -5505,7 +5512,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         HideCanvasEdgeToolbar();
         CollapseCanvasOverlayIfIdle();   // 同上：两颗胶囊都收了才收整层浮层
         if (CanvasEditBox != null) CanvasEditBox.Visibility = Visibility.Collapsed;
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     /// <summary>视口坐标 → 命中卡片（页内坐标测试，取绘制顺序最上层者）+ 该页局部坐标。 命中顺序必须与绘制顺序一致：选中的卡片被置顶绘制（见 DrawWhiteboardLayer），故先判它， 否则点在与下层卡片重叠的区域会选到被盖住的那张。</summary>
@@ -5669,7 +5676,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         SyncCanvasOverlayNow();   // 取消连线 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
         _connFromNodeId = null;
         UnlockCanvasCursor();   // 连线结束 ⇒ 解锁光标（恢复框架默认）
-        InvalidateOverlay();
+        InvalidateComposite();
         return true;
     }
 
@@ -5682,7 +5689,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _connArmActive = false;
         _connArmNodeId = null;
         _connArmSide = "";
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     private void ArmCanvasConn(string nodeId, string side, Point vp)
@@ -5691,7 +5698,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _connArmNodeId = nodeId;
         _connArmSide = side ?? "";
         _connArmCursorVp = vp;
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     private void CompleteCanvasConnArm(string targetNodeId, string targetSide)
@@ -5794,7 +5801,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             string.Equals(hit.Id, fixedNode, StringComparison.Ordinal))
         {
             UpdateCanvasEdgeHover(dropPos);
-            InvalidateOverlay();
+            InvalidateComposite();
             return;
         }
         if (onCard && hit != null)
@@ -5808,7 +5815,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 ToSide = side
             });
             UpdateCanvasEdgeHover(dropPos);      // 完成后按当前指针位置重判悬浮态
-            InvalidateOverlay();
+            InvalidateComposite();
             return;
         }
         // 空白 → 删除整条连线（不新建卡片）。
@@ -5816,7 +5823,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _hoverCanvasEdgeId = null;
         CanvasEdgeDeleteRequested?.Invoke(this, new CanvasNodeEventArgs { EdgeId = edgeId });
         UpdateCanvasEdgeHover(dropPos);
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     private bool TryHitCanvasCorner(Point vp, out string nodeId, out string corner)
@@ -6259,7 +6266,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         SyncCanvasOverlayNow();   // 收起回窄态居中（若之前被钳制左移过，这里复原）
         ClearCanvasEdgeToolbarHoverIfMoved(oldLeft, sender as Button);
         RequestCapsuleHoverSyncAfterLayout();
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     /// <summary>颜色圆点：Tag = "#RRGGBB"，7 色一视同仁（首位灰也只是其中一色），选完即收起面板。</summary>
@@ -6278,7 +6285,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // ⚠ 传入的是圆点：圆点不归 ButtonVisualOverride 接管 ⇒ 不会触发任何冷处理（与卡片胶囊同理）。
         ClearCanvasEdgeToolbarHoverIfMoved(oldLeft, sender as Button);
         RequestCapsuleHoverSyncAfterLayout();
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     private void HideCanvasEdgePickers()
@@ -6381,7 +6388,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // ⚠ 传入的是圆点：圆点不归 ButtonVisualOverride 接管 ⇒ 不会触发任何冷处理，
         ClearCanvasToolbarHoverIfMoved(oldLeft, sender as Button);
         RequestCapsuleHoverSyncAfterLayout();
-        InvalidateOverlay();
+        InvalidateComposite();
     }
 
     /// <summary>展开二级颜色胶囊：颜色按钮保留（作二次点击收起开关），7 色圆点在它右侧展开。 量一次【展开态真实宽度】缓存起来，供定位时按真实宽度做右缘钳制（只在越界时左移，正常不位移）。</summary>
@@ -9296,7 +9303,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _connFromNodeId = null;
             SyncCanvasOverlayNow();   // 连线结束 ⇒ 恢复卡片悬浮胶囊（若仍有卡片选中）
             this.ReleasePointerCapture(e.Pointer);
-            InvalidateOverlay();
+            InvalidateComposite();
             // ⚠ 目标在【释放点当下重新判定】（预览也是同一套现场派生，故两者必然一致）。
             bool onAnyCard = TryHitCanvasNode(dropPos, out var dropHit, out _, out _, out _) && dropHit != null;
             bool onOtherCard = onAnyCard && !string.Equals(dropHit!.Id, from, StringComparison.Ordinal);
@@ -9422,7 +9429,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _isCanvasConnecting = false;
             _connRerouteEdgeId = null;
             _connFromNodeId = null;
-            InvalidateOverlay();
+            InvalidateComposite();
             SyncCanvasOverlayNow();   // 系统打断连线（失焦等）⇒ 恢复胶囊
         }
         // 白板卡片拖动被系统打断：位置已实时写回模型 → 照常发完成事件收尾（MainPage 据此入历史）。

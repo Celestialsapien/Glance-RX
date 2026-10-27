@@ -80,6 +80,15 @@ public sealed partial class MainPage : Page
 
     public bool HasUnsavedChanges { get; set; } = false;
 
+    // 未落盘改动的来源：PDF 侧（笔迹）与白板 JSON 各自独立。分开记是为了"只改了白板"时
+    // 完全跳过一次整份 PDF 重写——那是保存路径上最贵的动作。
+    private bool _annotationsDirty;
+    private bool _canvasDirty;
+    // 保存流程重入闸门：同一次按键可能被多个入口各处理一次（工具栏按钮 + 加速器 + 关窗流程），
+    // 而只读/加密文档的保存要弹"另存为"文件框 —— 两次并发就会同时冒出两个框。
+    // 后来者拿到的是正在跑的那个 Task：它们等同一个结果，而不是各自再写一遍文件。
+    private Task<bool>? _saveTask;
+
     // 批量加载（从磁盘读回）标注时临时抑制"脏标记 + 自动保存"：对象初始化器会触发 AnnotationViewModel
     // 否则从磁盘读回"已保存"的标注会被误判成未保存更改，导致即使本次没画、关闭也弹保存询问。
     internal static bool SuppressAnnotationDirty { get; set; }
@@ -133,6 +142,12 @@ public sealed partial class MainPage : Page
     private EditMode _currentMode = EditMode.Navigate;
     private bool _isDrawingHighlight = false;
     private AnnotationViewModel? _activeHighlight;
+    // 笔画抽稀：相邻采样点在屏幕上不足 StrokeMinScreenDip 就不再入点集。
+    // 阈值在落笔时按当前缩放折算成页局部点（一次笔画期间缩放不变），避免逐点换算。
+    private const double StrokeMinScreenDip = 1.0;
+    private double _strokeMinDistSq;
+    private double _strokeLastX;
+    private double _strokeLastY;
     // 画笔色板第 1 位 = 主题强调紫（Obsidian 紫）：浅色 #9873F7 / 深色 #A882FF，
     private const string AccentColorTag = "Accent";
 
@@ -1077,8 +1092,25 @@ public sealed partial class MainPage : Page
         DocumentStore.SaveViewState(_currentPdfPath, data);
     }
 
+    /// <summary>"不保存退出"：批注只写进 PDF 文件（文件即真相源），未保存的笔迹从未落盘，文件始终是 "上次保存态"。因此放弃未保存更改无需回滚任何数据——清空内存叠加层、复位脏标记即可， 下次打开自然读到已保存批注（加密/只读走另存为、普通可写走原地保存，行为一致）。</summary>
+    public void DiscardUnsavedOnExit()
+    {
+        try
+        {
+            foreach (var p in _pages) p.Annotations.Clear();
+        }
+        catch { }
+        // 白板同样丢弃：清掉脏标记后 CleanupForExit 的 FlushCanvas 不会再写盘。
+        _annotationsDirty = false;
+        _canvasDirty = false;
+        HasUnsavedChanges = false;
+    }
+
     public void CleanupForExit()
     {
+        // 退出前落白板；"不保存退出"已清掉脏标记，此处不会写。
+        FlushCanvas();
+
         // 退出前先保存阅读位置/缩放（此时 GpuViewer 仍存活，可安全读取视图状态）。
         SaveCurrentViewState();
 
@@ -1110,6 +1142,9 @@ public sealed partial class MainPage : Page
     public async Task<bool> SaveOriginalPdfSilentAsync(bool onExit = false)
     {
         if (string.IsNullOrEmpty(_currentPdfPath) || _pages.Count == 0) return false;
+
+        // 白板与 PDF 相互独立：先落白板（失败也继续，PDF 该写还是要写）。
+        FlushCanvas();
 
         // Cancel page rendering FIRST to release the semaphore and prevent deadlocks!
         if (_pdfRenderCts != null)
@@ -1191,6 +1226,7 @@ public sealed partial class MainPage : Page
                 {
                     page.RotationAngle = 0.0;
                 }
+                _annotationsDirty = false;
                 HasUnsavedChanges = false;
 
                 if (onExit)
@@ -1271,15 +1307,54 @@ public sealed partial class MainPage : Page
         }
     }
 
-    public async Task<bool> SaveOriginalPdfAsync(bool notify = true)
+    public Task<bool> SaveOriginalPdfAsync(bool notify = true, bool onExit = false)
     {
+        // 已有保存在跑：返回它，让本次调用等同一个结果。
+        // 不能直接 return true —— 关窗流程会把"true"当成"已落盘"随即强杀进程，
+        // 而那次写入（temp 覆盖原文件）可能正在半途，文件会被截断。
+        var running = _saveTask;
+        if (running != null) return running;
+
+        var task = RunSaveAsync(notify, onExit);
+        _saveTask = task;
+        return task;
+    }
+
+    private async Task<bool> RunSaveAsync(bool notify, bool onExit)
+    {
+        // 先让出一次：保证调用方已经把 Task 存进 _saveTask，finally 才可能清到正确的那一个
+        // （否则"只改白板"这种同步就能跑完的路径会在赋值之前就把字段清掉，之后永远残留）。
+        await Task.Yield();
+        try
+        {
+            return await SaveOriginalPdfCoreAsync(notify, onExit);
+        }
+        finally
+        {
+            _saveTask = null;
+        }
+    }
+
+    private async Task<bool> SaveOriginalPdfCoreAsync(bool notify, bool onExit)
+    {
+        // 只有白板改动：PDF 不需要重写，也不该因为文件只读/加密就把用户推进"另存为"。
+        if (!_annotationsDirty)
+        {
+            bool canvasSaved = FlushCanvas();
+            HasUnsavedChanges = !canvasSaved;
+            if (notify)
+                ShowSaveToast(GlanceRX.Services.LocalizationService.Get(canvasSaved ? "SaveToastSuccess" : "SaveToastFailed"),
+                              canvasSaved ? ToastIconKind.Success : ToastIconKind.Error);
+            return canvasSaved;
+        }
+
         // 路由依据"当前文档的原始文件是否可被覆盖"（_canOverwriteOriginal），而非是否带密码。
         if (!_canOverwriteOriginal)
         {
-            return await ExportPdfAsync(notify);
+            return await ExportPdfAsync(notify, onExit);
         }
 
-        bool success = await SaveOriginalPdfSilentAsync();
+        bool success = await SaveOriginalPdfSilentAsync(onExit);
         if (!success)
         {
             // 直接覆盖失败（目标被 OS 限制写入 / 只读 / 锁定等，典型如 Windows 受控文件夹访问
@@ -1299,7 +1374,7 @@ public sealed partial class MainPage : Page
                 var result = await dialog.ShowAsync();
                 if (result == ContentDialogResult.Primary)
                 {
-                    return await ExportPdfAsync(notify);
+                    return await ExportPdfAsync(notify, onExit);
                 }
                 if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveToastFailed"), ToastIconKind.Error);
                 return false;
@@ -1314,7 +1389,7 @@ public sealed partial class MainPage : Page
         return true;
     }
 
-    private async Task<bool> ExportPdfAsync(bool notify = true)
+    private async Task<bool> ExportPdfAsync(bool notify = true, bool onExit = false)
     {
         if (string.IsNullOrEmpty(_currentPdfPath) || _pages.Count == 0) return false;
         // 另存为流程全程（含系统 FileSavePicker 文件选择框、导出成功/失败提示）整个窗口恢复原生鼠标，
@@ -1392,7 +1467,18 @@ public sealed partial class MainPage : Page
             var exportService = new GlanceRX.Services.PdfExportService();
             await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, file.Path, savedList, pageRotations, _currentPdfPassword);
 
+            _annotationsDirty = false;
             HasUnsavedChanges = false;
+
+            // 退出流程：文件已导出，不再把引擎切到副本（进程随即结束），白板仍要跟到新文件名旁。
+            if (onExit)
+            {
+                _currentPdfPath = file.Path;
+                _canOverwriteOriginal = IsFileOverwritable(_currentPdfPath);
+                _currentPdfPassword = null;
+                CopyCanvasTo(_currentPdfPath);
+                return true;
+            }
 
             // 让"另存为"接管为活动文档：引擎切到导出副本（页面内容一致、旋转已写进文件，
             try
@@ -1405,6 +1491,7 @@ public sealed partial class MainPage : Page
                 GpuViewer.InvalidateOverlayThrottled();
 
                 _currentPdfPath = file.Path;
+                CopyCanvasTo(_currentPdfPath);
                 _canOverwriteOriginal = IsFileOverwritable(_currentPdfPath);
                 _currentPdfPassword = null;
                 UpdateWindowTitle(file.Name);
@@ -1767,8 +1854,11 @@ public sealed partial class MainPage : Page
 
             // 切换文档前，先保存旧 PDF 的阅读位置/缩放（此时 GpuViewer 仍显示旧文档）。
             SaveCurrentViewState();
+            FlushCanvas();
             _currentPdfPath = path;
             _canOverwriteOriginal = true; // 默认可覆盖；引擎初始化成功后按加密/只读重写
+            _annotationsDirty = false;
+            _canvasDirty = false;
             HasUnsavedChanges = false;
             _realizedSidebar.Clear();
             _thumbnailQueued.Clear(); // 换文档：丢弃旧文档的缩略图排队（旧任务经 _pdfRenderCts 取消后 Remove/Refill 幂等）
@@ -5155,6 +5245,26 @@ public sealed partial class MainPage : Page
 
     // ── GPU 路径标注处理器（坐标已由 GpuPageView 换算成页局部 PDF 点；
 
+    /// <summary>批注改动置脏：PDF 需要重写（笔迹只在保存时烘焙进文件）。与白板脏标记分开记。</summary>
+    internal void MarkAnnotationsDirty()
+    {
+        _annotationsDirty = true;
+        HasUnsavedChanges = true;
+    }
+
+    /// <summary>按当前缩放算定本笔的最小采样间距：屏幕 1 DIP 以内不再新增点。
+    /// 页局部点 → 屏幕 DIP 的系数是 z×96/72（与渲染侧 PageXform 同源），故 1 DIP = 0.75/z 个页局部点。</summary>
+    private void BeginStrokeSimplification(Point first)
+    {
+        double z = 1.0;
+        try { GpuViewer.GetCurrentViewState(out z, out _, out _, out _); } catch { }
+        if (!(z > 0) || double.IsInfinity(z)) z = 1.0;
+        double minPageDist = StrokeMinScreenDip * 0.75 / z;
+        _strokeMinDistSq = minPageDist * minPageDist;
+        _strokeLastX = first.X;
+        _strokeLastY = first.Y;
+    }
+
     private void GpuAnnotation_Pressed(object? sender, GpuAnnotationPointerArgs e)
     {
         if (_currentMode == EditMode.Navigate) return;
@@ -5162,7 +5272,7 @@ public sealed partial class MainPage : Page
         var pageVm = _pages[e.PageIndex];
         var point = new Point(e.X, e.Y);
 
-        HasUnsavedChanges = true;
+        MarkAnnotationsDirty();
 
         _isDrawingHighlight = true;
         _activeHighlight = new AnnotationViewModel
@@ -5172,6 +5282,7 @@ public sealed partial class MainPage : Page
             ColorHex = GetActiveColorHexWithOpacity(),
             Thickness = _activeThickness
         };
+        BeginStrokeSimplification(point);
         _activeHighlight.AppendPoint(point);
         pageVm.Annotations.Add(_activeHighlight);
         _annotationRedo.Clear();
@@ -5180,13 +5291,13 @@ public sealed partial class MainPage : Page
             undo: () =>
             {
                 pageVm.Annotations.Remove(created);
-                HasUnsavedChanges = true;
+                MarkAnnotationsDirty();
                 _ = SaveAnnotationsAsync();
             },
             redo: () =>
             {
                 if (!pageVm.Annotations.Contains(created)) pageVm.Annotations.Add(created);
-                HasUnsavedChanges = true;
+                MarkAnnotationsDirty();
                 _ = SaveAnnotationsAsync();
             }));
         GpuViewer.InvalidateOverlayThrottled();
@@ -5195,6 +5306,13 @@ public sealed partial class MainPage : Page
     private void GpuAnnotation_Moved(object? sender, GpuAnnotationPointerArgs e)
     {
         if (!_isDrawingHighlight || _activeHighlight == null) return;
+        // 抽稀：不足最小间距的采样点直接丢弃。笔画外形不受影响（阈值 ≈ 1 屏幕 DIP），
+        // 但点数决定保存时 /InkList 的体积与写盘耗时，高采样率设备上可省掉一半以上。
+        double dx = e.X - _strokeLastX;
+        double dy = e.Y - _strokeLastY;
+        if (dx * dx + dy * dy < _strokeMinDistSq) return;
+        _strokeLastX = e.X;
+        _strokeLastY = e.Y;
         // 用线程安全 AppendPoint：加锁并递增版本号 → 渲染侧缓存自动失效
         _activeHighlight.AppendPoint(new Point(e.X, e.Y));
         // 节流刷新：合并 1000Hz 鼠标高频事件，一帧最多重画一次（GPU 不再被打爆）
@@ -5206,6 +5324,11 @@ public sealed partial class MainPage : Page
         if (_isDrawingHighlight)
         {
             _isDrawingHighlight = false;
+
+            // 收笔点无条件补进点集（不受抽稀约束）：笔画必须终止在抬笔处，否则最后一小段被吃掉；
+            // 短促的一笔若只剩 1 个点，保存时会被 /Ink 的"≥2 点"判据丢掉。
+            if (_activeHighlight != null && _activeHighlight.Type == AnnotationType.Pen)
+                _activeHighlight.AppendPoint(new Point(e.X, e.Y));
 
             // Compute proper bounding box for pen strokes so that X/Y/Width/Height
             if (_activeHighlight != null && _activeHighlight.Type == AnnotationType.Pen)
@@ -5283,8 +5406,10 @@ public sealed partial class MainPage : Page
 
     private async void Save_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        await SaveOriginalPdfAsync();
+        // 必须【同步】置 Handled：放到 await 之后等于告诉框架这次按键没人认领，
+        // 同一次 Ctrl+S 会被再处理一遍 —— 只读/加密文档因此冒出两个"另存为"框。
         args.Handled = true;
+        await SaveOriginalPdfAsync();
     }
 
     private void Print_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -5435,13 +5560,14 @@ public sealed partial class MainPage : Page
         finally { SuppressAnnotationDirty = false; }
     }
 
-/// <summary>白板（Canvas 模式）：从 &lt;pdf&gt;.canvas 读取卡片与连线，保留模型供交互改写， 并把当前数组交给 GpuViewer 渲染。模型即唯一真相源，每次操作后由 SaveCanvas 立即落盘。</summary>
+/// <summary>白板（Canvas 模式）：从 &lt;pdf&gt;.canvas 读取卡片与连线，保留模型供交互改写， 并把当前数组交给 GpuViewer 渲染。内存模型是唯一真相源，交互只置脏、不落盘； 写入时机全在 FlushCanvas（显式保存 / 切换文档 / 退出保存）。</summary>
     private void LoadCanvasForCurrentDocument()
     {
         CanvasDoc? doc = null;
         try { doc = CanvasStore.Load(_currentPdfPath); }
         catch { }
         _canvasDoc = doc ?? new CanvasDoc();
+        _canvasDirty = false;
         GpuViewer.SetCanvasData(_canvasDoc.Nodes, _canvasDoc.Edges);
     }
 
@@ -5462,17 +5588,47 @@ public sealed partial class MainPage : Page
         GpuViewer?.SetCanvasData(_canvasDoc?.Nodes, _canvasDoc?.Edges);
     }
 
-    /// <summary>白板立即落盘（&lt;pdf&gt;.canvas 旁挂文件）。白板不写进 PDF，故不置 HasUnsavedChanges —— 退出时不会为此弹"保存 PDF"询问，避免误导。</summary>
-    private void SaveCanvas()
+    /// <summary>白板改动只置脏，不立即落盘：拖拽、点选、改色都是高频操作，
+    /// 逐次整份重写 JSON 会在 UI 线程上卡住交互。真正写入推迟到显式保存 / 切换文档 / 退出保存（FlushCanvas）。</summary>
+    private void MarkCanvasDirty()
     {
-        if (_canvasDoc == null || string.IsNullOrEmpty(_currentPdfPath)) return;
-        try { CanvasStore.Save(_currentPdfPath, _canvasDoc); } catch { }
+        _canvasDirty = true;
+        HasUnsavedChanges = true;
     }
 
+    /// <summary>把脏掉的白板写回当前 PDF 同名 .canvas。写失败保持脏标记，留给下一次保存重试。
+    /// 返回"白板已落盘"（无脏标记也算成功），仅供需要报告保存结果的调用方使用。</summary>
+    private bool FlushCanvas()
+    {
+        if (!_canvasDirty) return true;
+        if (_canvasDoc == null || string.IsNullOrEmpty(_currentPdfPath)) return false;
+        try
+        {
+            if (CanvasStore.Save(_currentPdfPath, _canvasDoc))
+            {
+                _canvasDirty = false;
+                return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    /// <summary>另存为后把白板跟到副本旁边：活动文档已指向新文件名，白板不能留在旧名字下。</summary>
+    private void CopyCanvasTo(string pdfPath)
+    {
+        if (_canvasDoc == null || string.IsNullOrEmpty(pdfPath)) return;
+        if (_canvasDoc.Nodes.Count == 0 && _canvasDoc.Edges.Count == 0) return;
+        try { if (CanvasStore.Save(pdfPath, _canvasDoc)) _canvasDirty = false; } catch { }
+    }
+
+    /// <summary>白板操作入撤销栈。两个方向都改模型 ⇒ 一律置脏，否则撤销后画面回退、磁盘仍停在新状态。</summary>
     private void PushCanvasHistory(Action undo, Action redo)
     {
         _annotationRedo.Clear();
-        _annotationHistory.Add(new EditorHistoryEntry(undo, redo));
+        _annotationHistory.Add(new EditorHistoryEntry(
+            undo: () => { undo(); MarkCanvasDirty(); },
+            redo: () => { redo(); MarkCanvasDirty(); }));
     }
 
     private static int _canvasIdSeq;
@@ -5497,7 +5653,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { node.X = ox; node.Y = oy; RefreshCanvas(); },
             redo: () => { node.X = nx; node.Y = ny; RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5511,7 +5667,7 @@ public sealed partial class MainPage : Page
         var node = nodes[i];
         nodes.RemoveAt(i);
         nodes.Add(node);
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5534,7 +5690,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { doc.Nodes.Remove(node); RefreshCanvas(); },
             redo: () => { if (!doc.Nodes.Contains(node)) doc.Nodes.Add(node); RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
         GpuViewer.SelectCanvasNode(node.Id);
         GpuViewer.BeginCanvasEdit(node.Id);
@@ -5574,7 +5730,7 @@ public sealed partial class MainPage : Page
                 foreach (var ed in removedEdges) doc.Edges.Remove(ed);
                 RefreshCanvas();
             });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5589,7 +5745,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { node.Text = oldText; RefreshCanvas(); },
             redo: () => { node.Text = newText; RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         GpuViewer.InvalidateOverlay();
     }
 
@@ -5624,7 +5780,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { doc.Edges.Remove(edge); RefreshCanvas(); },
             redo: () => { if (!doc.Edges.Contains(edge)) doc.Edges.Add(edge); RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5650,7 +5806,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { node.X = ox; node.Y = oy; node.Width = ow; node.Height = oh; RefreshCanvas(); },
             redo: () => { node.X = nx; node.Y = ny; node.Width = nw; node.Height = nh; RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5667,7 +5823,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { if (!doc.Edges.Contains(edge)) doc.Edges.Insert(Math.Min(idx, doc.Edges.Count), edge); RefreshCanvas(); },
             redo: () => { doc.Edges.Remove(edge); RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5701,7 +5857,7 @@ public sealed partial class MainPage : Page
         PushCanvasHistory(
             undo: () => { edge.FromEnd = oldFromEnd; edge.ToEnd = oldToEnd; edge.Color = oldColor; RefreshCanvas(); },
             redo: () => { edge.FromEnd = nFromEnd; edge.ToEnd = nToEnd; edge.Color = nColor; RefreshCanvas(); });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5737,7 +5893,7 @@ public sealed partial class MainPage : Page
                 else { ed2.ToNode = newNode; ed2.ToSide = newSide; }
                 RefreshCanvas();
             });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5754,7 +5910,7 @@ public sealed partial class MainPage : Page
             undo: () => { node.Color = oldColor; RefreshCanvas(); },
             redo: () => { node.Color = newColor; RefreshCanvas(); });
         node.Color = newColor;
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
     }
 
@@ -5801,7 +5957,7 @@ public sealed partial class MainPage : Page
                 if (edge != null && !doc.Edges.Contains(edge)) doc.Edges.Add(edge);
                 RefreshCanvas();
             });
-        SaveCanvas();
+        MarkCanvasDirty();
         RefreshCanvas();
         GpuViewer.SelectCanvasNode(node.Id);
         GpuViewer.BeginCanvasEdit(node.Id);
@@ -5823,17 +5979,6 @@ public sealed partial class MainPage : Page
         {
             return false;
         }
-    }
-
-    /// <summary>"不保存退出"：批注只写进 PDF 文件（文件即真相源），未保存的笔迹从未落盘，文件始终是 "上次保存态"。因此放弃未保存更改无需回滚任何数据——清空内存叠加层、复位脏标记即可， 下次打开自然读到已保存批注（加密/只读走另存为、普通可写走原地保存，行为一致）。</summary>
-    public void DiscardUnsavedOnExit()
-    {
-        try
-        {
-            foreach (var p in _pages) p.Annotations.Clear();
-        }
-        catch { }
-        HasUnsavedChanges = false;
     }
 
 }
@@ -6084,7 +6229,7 @@ public class AnnotationViewModel : INotifyPropertyChanged
                 {
                     if (!MainPage.SuppressAnnotationDirty && MainPage.Current != null)
                     {
-                        MainPage.Current.HasUnsavedChanges = true;
+                        MainPage.Current.MarkAnnotationsDirty();
                     }
                     if (!MainPage.SuppressAnnotationDirty)
                         _ = MainPage.Current?.SaveAnnotationsAsync();
@@ -6101,7 +6246,7 @@ public class AnnotationViewModel : INotifyPropertyChanged
                 {
                     if (!MainPage.SuppressAnnotationDirty && MainPage.Current != null)
                     {
-                        MainPage.Current.HasUnsavedChanges = true;
+                        MainPage.Current.MarkAnnotationsDirty();
                     }
                     if (!MainPage.SuppressAnnotationDirty)
                         _ = MainPage.Current?.SaveAnnotationsAsync();
@@ -6135,7 +6280,7 @@ public class AnnotationViewModel : INotifyPropertyChanged
                 {
                     if (!MainPage.SuppressAnnotationDirty && MainPage.Current != null)
                     {
-                        MainPage.Current.HasUnsavedChanges = true;
+                        MainPage.Current.MarkAnnotationsDirty();
                     }
                     if (!MainPage.SuppressAnnotationDirty)
                         _ = MainPage.Current?.SaveAnnotationsAsync();

@@ -31,6 +31,8 @@ namespace GlanceRX;
 public sealed partial class MainWindow : Window
 {
     private bool _isClosingConfirmed = false;
+    // 询问框是否正挂在前台：用于识别"对话框还在时又来一次关闭"，避免二次 ShowAsync 抛异常。
+    private bool _closeDialogOpen;
 
     /// <summary>该窗口是否应以最大化还原（来自 per-PDF 记忆）。真正的 Maximize 由 App.OnLaunched 在 Activate() 之后执行——ctor 内调 OverlappedPresenter.Maximize 会被 WinUI3 推迟到首帧之后 生效，</summary>
     internal bool ShouldRestoreMaximized { get; private set; }
@@ -135,6 +137,7 @@ public sealed partial class MainWindow : Window
 
         // 限制最小窗口尺寸（阈值由 MainPage 实测工具栏宽度 + A4 视口比例给出）。
         InstallMinSizeLimit();
+        InstallCloseSourceWatch();
 
         this.AppWindow.Closing += AppWindow_Closing;
         this.VisibilityChanged += MainWindow_VisibilityChanged;
@@ -481,6 +484,7 @@ public sealed partial class MainWindow : Window
         DisarmColdStartCloak();
         // 构造期若 HWND 尚未就绪会安装失败，此处重试一次（幂等）。
         InstallMinSizeLimit();
+        InstallCloseSourceWatch();
         // 揭盖时 MainPage 已完成首次布局：按实测下限顶一次窗口（恢复的旧几何可能小于新下限）。
         ClampWindowToMinSize();
     }
@@ -541,6 +545,24 @@ public sealed partial class MainWindow : Window
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo,
+        [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    private const int SW_RESTORE = 9;
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
@@ -607,6 +629,123 @@ public sealed partial class MainWindow : Window
     /// <summary>缓存的非客户区（边框）差量，物理像素。-1 = 尚未测得可信值。见 GetNonClientFramePx。</summary>
     private int _cachedFrameW = -1;
     private int _cachedFrameH = -1;
+
+    // ── 关闭来源判定 ────────────────────────────────────────────────────────
+    // AppWindow.Closing 不带发起方，只能靠窗口激活态反推"这次是谁要关"：
+    //   点标题栏 × / Alt+F4 / 系统菜单 → 关闭来自本窗口的输入，此刻本窗口就是激活窗口；
+    //   任务管理器「结束任务」/ taskkill → 也会投递 WM_CLOSE 甚至 SC_CLOSE，但此刻前台是
+    //   任务管理器/终端，本窗口必然【不是】激活窗口。
+    // ⛔ 不要用 WM_SYSCOMMAND/SC_CLOSE 当判据：外部强杀同样会发，两者在这一维上无法区分。
+    private const uint WM_NCLBUTTONDOWN = 0x00A1;
+    private const long HTCLOSE = 20;
+
+    /// <summary>关闭按钮的点击多久之内仍算"这次关闭由它引起"（毫秒）。在按钮上按下又拖离会留下
+    /// 一次没有后续 WM_CLOSE 的点击，过期即失效，避免它把后来的外部强杀误判成用户发起。</summary>
+    private const long CloseClickValidMs = 1000;
+
+    private SubclassProc? _closeSourceSubclassProc;
+    private bool _closeSourceInstalled;
+    /// <summary>最近一次按下标题栏关闭按钮的时间戳（<see cref="Environment.TickCount64"/>）。</summary>
+    private long _closeButtonClickTick;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetActiveWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    private void InstallCloseSourceWatch()
+    {
+        if (_closeSourceInstalled) return;
+        var hwnd = GetWindowHandleSafely();
+        if (hwnd == IntPtr.Zero) return;
+        _closeSourceSubclassProc = CloseSourceSubclassProc;
+        if (SetWindowSubclass(hwnd, _closeSourceSubclassProc, (IntPtr)2, IntPtr.Zero))
+            _closeSourceInstalled = true;
+    }
+
+    private IntPtr CloseSourceSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, IntPtr uIdSubclass, IntPtr dwRefData)
+    {
+        // 只认"按下标题栏关闭按钮"这一条能为用户发起背书；其余关闭一律交给激活态判断。
+        if (uMsg == WM_NCLBUTTONDOWN && (long)wParam == HTCLOSE)
+            _closeButtonClickTick = Environment.TickCount64;
+
+        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+    }
+
+    /// <summary>本窗口此刻是不是用户正在操作的那个窗口。外部工具（任务管理器、taskkill）动手时
+    /// 前台是它自己，本窗口拿不到激活态，据此可把它们与用户点 × 区分开。
+    /// 句柄取不到时返回 <c>true</c>（= 当用户发起，宁可多问一次也不误丢未保存的笔迹）。</summary>
+    private bool IsWindowActivated()
+    {
+        var hwnd = GetWindowHandleSafely();
+        if (hwnd == IntPtr.Zero) return true;
+        try
+        {
+            if (GetForegroundWindow() == hwnd) return true;
+            if (GetActiveWindow() == hwnd) return true;
+        }
+        catch { return true; }
+        return false;
+    }
+
+    /// <summary>前台窗口是否属于 shell（explorer.exe）。任务栏右键"关闭窗口"、缩略图上的 × 都是
+    /// explorer 代表用户发起的关闭，那一刻本窗口已不是前台，但关闭确实是用户要的。</summary>
+    private static bool IsShellForeground()
+    {
+        var fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return false;
+        uint pid;
+        GetWindowThreadProcessId(fg, out pid);
+        if (pid == 0) return false;
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById((int)pid);
+            return p.ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>把窗口抬到前台。任务栏右键"关闭窗口"、缩略图上的 × 都是用户发起的关闭，
+    /// 但那一刻前台还是任务栏 —— 询问框长在本窗口里，不把自己抬起来就等于"弹了也看不见、更没法选"。
+    /// 前台锁会拒绝非输入方的 SetForegroundWindow，故失败时挂到前台线程的输入队列上再试一次。</summary>
+    private void BringToForeground()
+    {
+        var hwnd = GetWindowHandleSafely();
+        if (hwnd == IntPtr.Zero) return;
+        try
+        {
+            // 最小化时 SetForegroundWindow 只会闪任务栏，先把窗口还原出来。
+            if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+            if (GetForegroundWindow() == hwnd) return;
+
+            Activate();
+            if (GetForegroundWindow() == hwnd) return;
+
+            SetForegroundWindow(hwnd);
+            if (GetForegroundWindow() == hwnd) return;
+
+            var fg = GetForegroundWindow();
+            uint targetThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
+            uint myThread = GetCurrentThreadId();
+            if (targetThread == 0 || targetThread == myThread) return;
+            if (!AttachThreadInput(myThread, targetThread, true)) return;
+            try
+            {
+                // 只抢前台、不 SetFocus：焦点交给随后弹出的对话框，抢到窗口本身会把
+                // XAML 内容里的键盘焦点清掉（选"取消"之后就打不了字、画不了线）。
+                SetForegroundWindow(hwnd);
+            }
+            finally
+            {
+                AttachThreadInput(myThread, targetThread, false);
+            }
+        }
+        catch { }
+    }
 
     private void InstallMinSizeLimit()
     {
@@ -945,20 +1084,49 @@ public sealed partial class MainWindow : Window
     private async void AppWindow_Closing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
     {
         if (_isClosingConfirmed) return;
+        if (RootFrame.Content is not MainPage mainPage) return;
 
-        if (RootFrame.Content is MainPage mainPage)
+        // 本次关闭是谁要关：点过 × 之后 1 秒内到来的关闭算它引起的；其余看窗口是否还有激活态。
+        // 外部强杀（任务管理器/taskkill）此刻前台是它自己，本窗口失去激活态 ⇒ 判为外部；
+        // 任务栏右键"关闭窗口"虽同样失去激活态，但前台是 explorer，仍算用户发起。
+        long sinceClick = Environment.TickCount64 - _closeButtonClickTick;
+        bool clickedClose = _closeButtonClickTick != 0 && sinceClick >= 0 && sinceClick <= CloseClickValidMs;
+        _closeButtonClickTick = 0;
+        bool activated = IsWindowActivated();
+        bool shellForeground = !activated && IsShellForeground();
+        bool userInitiated = clickedClose || activated || shellForeground;
+
+        args.Cancel = true;
+
+        // 询问框已经在前台时又来一次关闭：只可能来自外部（任务管理器重复发 WM_CLOSE）或用户再点一次 ×，
+        // 两种都是"现在就要关"。此时再弹一个 ContentDialog 会抛"同一时间只允许一个对话框"，
+        // 所以按"不保存直接退出"处理 —— 结果与系统等超时后强杀一致，但立刻生效，不必干等。
+        if (_closeDialogOpen)
         {
-            if (mainPage.HasUnsavedChanges)
-            {
-                args.Cancel = true;
-                _ = ShowCloseDialog(mainPage);
-            }
-            else
-            {
-                args.Cancel = true;
-                _isClosingConfirmed = true;
-                HideAndTerminate(mainPage);
-            }
+            _isClosingConfirmed = true;
+            mainPage.DiscardUnsavedOnExit();
+            HideAndTerminate(mainPage);
+            return;
+        }
+
+        if (!userInitiated)
+        {
+            // 外部发起的关闭（任务管理器"结束任务" / taskkill）：不弹询问，直接按"不保存直接退出"收尾。
+            // 弹窗只会挂在那里等系统超时强杀，既来不及选也留不下任何东西。
+            _isClosingConfirmed = true;
+            mainPage.DiscardUnsavedOnExit();
+            HideAndTerminate(mainPage);
+            return;
+        }
+
+        if (mainPage.HasUnsavedChanges)
+        {
+            _ = ShowCloseDialog(mainPage);
+        }
+        else
+        {
+            _isClosingConfirmed = true;
+            HideAndTerminate(mainPage);
         }
     }
 
@@ -977,6 +1145,10 @@ public sealed partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task ShowCloseDialog(MainPage mainPage)
     {
+        // 先把窗口抬到前台再来问：从任务栏右键"关闭窗口"/缩略图 × 发起的关闭，此刻前台还是任务栏，
+        // 询问框会长在一个背后窗口里 —— 用户既看不见也没法选。
+        BringToForeground();
+
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             Title = GlanceRX.Services.LocalizationService.Get("UnsavedChangesTitle"),
@@ -992,13 +1164,15 @@ public sealed partial class MainWindow : Window
 
         // 对话框为前台模态层：弹出期间整个窗口恢复原生鼠标（避免画笔圆环覆盖在对话框上）。
         mainPage.SuppressPenRing();
+        _closeDialogOpen = true;
         try
         {
             var result = await dialog.ShowAsync();
             if (result == Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary)
             {
                 // 使用正常保存流程（与 Ctrl+S 相同），等待完成后再退出。
-                bool saved = await mainPage.SaveOriginalPdfAsync(notify: false);
+                // onExit=true：进程随后终止，不必再重建渲染引擎（否则白烧一次 MuPDF 初始化 + 重排缩略图）。
+                bool saved = await mainPage.SaveOriginalPdfAsync(notify: false, onExit: true);
                 if (saved)
                 {
                     _isClosingConfirmed = true;
@@ -1008,7 +1182,8 @@ public sealed partial class MainWindow : Window
             }
             else if (result == Microsoft.UI.Xaml.Controls.ContentDialogResult.Secondary)
             {
-                // "不保存退出"统一处理：加密/只读文档清空 JSON 草稿；普通可写 PDF 把 JSON 叠加层
+                // "不保存退出"：批注只存活在内存叠加层，未落盘的笔迹从未写进文件；
+                // 清掉叠加层与脏标记即可，下次打开仍是上次保存态。
                 mainPage.DiscardUnsavedOnExit();
                 _isClosingConfirmed = true;
                 HideAndTerminate(mainPage);
@@ -1021,6 +1196,7 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
+            _closeDialogOpen = false;
             mainPage.ResumePenRing();
         }
     }
