@@ -142,12 +142,6 @@ public sealed partial class MainPage : Page
     private EditMode _currentMode = EditMode.Navigate;
     private bool _isDrawingHighlight = false;
     private AnnotationViewModel? _activeHighlight;
-    // 笔画抽稀：相邻采样点在屏幕上不足 StrokeMinScreenDip 就不再入点集。
-    // 阈值在落笔时按当前缩放折算成页局部点（一次笔画期间缩放不变），避免逐点换算。
-    private const double StrokeMinScreenDip = 1.0;
-    private double _strokeMinDistSq;
-    private double _strokeLastX;
-    private double _strokeLastY;
     // 画笔色板第 1 位 = 主题强调紫（Obsidian 紫）：浅色 #9873F7 / 深色 #A882FF，
     private const string AccentColorTag = "Accent";
 
@@ -1198,20 +1192,21 @@ public sealed partial class MainPage : Page
                 // Cancel background rendering task to avoid accessing native engine during/after cleanup
                 await CancelBackgroundRenderAsync();
 
-                // 保存不改变阅读位置：仅替换底层引擎句柄，
+                // 保存固定三步：① 释放引擎让出文件句柄 ② 写出带注解的副本 ③ 覆盖回原路径。
+                // 全程只换引擎句柄、不重载文档（不跑 TryInitialFit），阅读位置与缩放因此不被重置。
 
-                // 1. Clear resources to unlock original file BEFORE exporting (so PdfSharp can access it)
+                // ① 必须先释放：PdfSharp 要打开原文件做 Modify，引擎还握着句柄会被拒。
                 if (_pdfRenderService != null)
                 {
                     _pdfRenderService.Dispose();
                     _pdfRenderService = null;
                 }
 
+                // ② 写到临时文件：原文件此刻仍完好，写到一半失败也不会损坏它。
                 var exportService = new GlanceRX.Services.PdfExportService();
                 await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, tempFile, savedList, pageRotations, _currentPdfPassword);
 
-                // 3. Overwrite original file
-                // 否则 File.Copy 覆盖会抛 UnauthorizedAccessException(Access denied)。
+                // ③ 覆盖回原路径：只读属性会让 File.Copy 抛 UnauthorizedAccessException，先摘掉。
                 try
                 {
                     if ((System.IO.File.GetAttributes(_currentPdfPath) & System.IO.FileAttributes.ReadOnly) != 0)
@@ -1229,9 +1224,10 @@ public sealed partial class MainPage : Page
                 _annotationsDirty = false;
                 HasUnsavedChanges = false;
 
+                // 退出流程到此为止：文件已落盘，进程随即终止，下面"重建引擎 + 重排缩略图"
+                // 纯属白烧（MuPDF 初始化与本进程的 TerminateProcess 还容易撞出死锁）。
                 if (onExit)
                 {
-                    // Exit early without re-rendering or reloading PDF in memory to avoid shutdown deadlocks
                     return true;
                 }
 
@@ -5252,19 +5248,6 @@ public sealed partial class MainPage : Page
         HasUnsavedChanges = true;
     }
 
-    /// <summary>按当前缩放算定本笔的最小采样间距：屏幕 1 DIP 以内不再新增点。
-    /// 页局部点 → 屏幕 DIP 的系数是 z×96/72（与渲染侧 PageXform 同源），故 1 DIP = 0.75/z 个页局部点。</summary>
-    private void BeginStrokeSimplification(Point first)
-    {
-        double z = 1.0;
-        try { GpuViewer.GetCurrentViewState(out z, out _, out _, out _); } catch { }
-        if (!(z > 0) || double.IsInfinity(z)) z = 1.0;
-        double minPageDist = StrokeMinScreenDip * 0.75 / z;
-        _strokeMinDistSq = minPageDist * minPageDist;
-        _strokeLastX = first.X;
-        _strokeLastY = first.Y;
-    }
-
     private void GpuAnnotation_Pressed(object? sender, GpuAnnotationPointerArgs e)
     {
         if (_currentMode == EditMode.Navigate) return;
@@ -5282,7 +5265,6 @@ public sealed partial class MainPage : Page
             ColorHex = GetActiveColorHexWithOpacity(),
             Thickness = _activeThickness
         };
-        BeginStrokeSimplification(point);
         _activeHighlight.AppendPoint(point);
         pageVm.Annotations.Add(_activeHighlight);
         _annotationRedo.Clear();
@@ -5306,13 +5288,6 @@ public sealed partial class MainPage : Page
     private void GpuAnnotation_Moved(object? sender, GpuAnnotationPointerArgs e)
     {
         if (!_isDrawingHighlight || _activeHighlight == null) return;
-        // 抽稀：不足最小间距的采样点直接丢弃。笔画外形不受影响（阈值 ≈ 1 屏幕 DIP），
-        // 但点数决定保存时 /InkList 的体积与写盘耗时，高采样率设备上可省掉一半以上。
-        double dx = e.X - _strokeLastX;
-        double dy = e.Y - _strokeLastY;
-        if (dx * dx + dy * dy < _strokeMinDistSq) return;
-        _strokeLastX = e.X;
-        _strokeLastY = e.Y;
         // 用线程安全 AppendPoint：加锁并递增版本号 → 渲染侧缓存自动失效
         _activeHighlight.AppendPoint(new Point(e.X, e.Y));
         // 节流刷新：合并 1000Hz 鼠标高频事件，一帧最多重画一次（GPU 不再被打爆）
@@ -5325,8 +5300,8 @@ public sealed partial class MainPage : Page
         {
             _isDrawingHighlight = false;
 
-            // 收笔点无条件补进点集（不受抽稀约束）：笔画必须终止在抬笔处，否则最后一小段被吃掉；
-            // 短促的一笔若只剩 1 个点，保存时会被 /Ink 的"≥2 点"判据丢掉。
+            // 收笔点无条件补进点集：笔画必须终止在抬笔处；且"按下即抬"的短点若无补点就只剩
+            // 1 个点，保存时会被 /Ink 的"≥2 点"判据丢掉。
             if (_activeHighlight != null && _activeHighlight.Type == AnnotationType.Pen)
                 _activeHighlight.AppendPoint(new Point(e.X, e.Y));
 

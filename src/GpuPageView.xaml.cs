@@ -1676,6 +1676,12 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // ---- 已完成笔画累积层：一次性烘入离屏位图，绘画时只实时画"当前一笔" ----
     private Microsoft.Graphics.Canvas.CanvasRenderTarget? _annoLayer;
     private bool _annoLayerNeedsFullRebuild = true;
+    // 层里像素对应的视图参数。文档→屏幕是统一仿射 screen = pagePt·z + (center − offset)，
+    // 与页无关，所以存下 (z, center−offset) 就能把整层位图按任意新视图一次到位地重映射。
+    // _annoBaseZoom == 0 表示层里还没有可用像素（尚未烘焙过）。
+    private double _annoBaseZoom;
+    private double _annoBaseShiftX;
+    private double _annoBaseShiftY;
 
     /// <summary><summary> </summary></summary>
     public double PenThicknessPoints
@@ -1967,10 +1973,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _annoLayer?.Dispose();
             _annoLayer = new Microsoft.Graphics.Canvas.CanvasRenderTarget(ScreenCanvas, w, h);
             _annoLayerNeedsFullRebuild = true;
+            _annoBaseZoom = 0;   // 新层没有像素，动画期不能拿它做变换 blit
         }
     }
 
-    private void RebuildAnnoLayer(List<(GpuPageInfo Page, Rect Dest)> visible, double z)
+    private void RebuildAnnoLayer(List<(GpuPageInfo Page, Rect Dest)> visible, double z, double hOff, double vOff)
     {
         if (_annoLayer == null) return;
         using var lds = _annoLayer.CreateDrawingSession();
@@ -1989,12 +1996,28 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
         }
         _annoLayerNeedsFullRebuild = false;
+
+        // 记下这批像素对应的视图，供动画期"按新变换整体 blit"复用。
+        ComputeViewAnchor(z, out double cx, out double cy);
+        _annoBaseZoom = z;
+        _annoBaseShiftX = cx - hOff;
+        _annoBaseShiftY = cy - vOff;
     }
 
     /// <summary>增量：把"尚未超过已烘入点数的笔画"追加烘入累积层。 已完成的笔画再整段烘入一次；当前正在画的笔画只烘入【新增长的那一小段】， 从而每帧成本与笔画长度无关（长笔画不再每帧整体重建 → GPU 顶点负载骤降）。</summary>
-    private void BakeUnbakedStrokes(List<(GpuPageInfo Page, Rect Dest)> visible, double z)
+    private void BakeUnbakedStrokes(List<(GpuPageInfo Page, Rect Dest)> visible, double z, double hOff, double vOff)
     {
         if (_annoLayer == null) return;
+
+        // 层里像素必须与当前视图对应：视图变了却没被要求重烘时，增量烘入会把新笔画按新变换
+        // 画进旧变换的层里（整层错位）。宁可整层重烘一次。
+        ComputeViewAnchor(z, out double cx, out double cy);
+        if (_annoBaseZoom != z || _annoBaseShiftX != cx - hOff || _annoBaseShiftY != cy - vOff)
+        {
+            RebuildAnnoLayer(visible, z, hOff, vOff);
+            return;
+        }
+
         using var lds = _annoLayer.CreateDrawingSession();
         foreach (var (p, dest) in visible)
         {
@@ -2761,6 +2784,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _annoLayer?.Dispose();
         _annoLayer = null;
         _annoLayerNeedsFullRebuild = true;
+        _annoBaseZoom = 0;   // 层没了，动画期只能退回逐笔
         // 白板卡片的文本排版同样绑定该设备：全部作废，下一帧按需重建。
         foreach (var kv in _canvasTextCache)
             kv.Value.Layout?.Dispose();
@@ -8161,7 +8185,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var ds = args.DrawingSession;
         ds.Clear(_gapColor);
 
-        if (!ComputeVisiblePages(out double z, out var visible)) return;
+        if (!ComputeVisiblePages(out double z, out double hOff, out double vOff, out var visible)) return;
 
         // ---- RenderCache::Paint（1:1 RenderCache.cpp Paint）：每可见页跑一次目标层瓦片 BFS。
         // 只画与视口相交的瓦片；未命中 → 任意 zoom 同位瓦片替身（factor 缩放显示）；
@@ -8210,17 +8234,29 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // ---- 标注叠加：与页位图画在【同一交换链】（原子合成，消除双画布相位脱节的震动/闪光）。
         if (AnnotationsVisible && HasVisiblePenAnnotations(visible))
         {
-            if (IsViewAnimating)
+            if (IsViewAnimating || _isDragPanning)
             {
-                DrawAnnotationsOnCanvas(ds, z, visible);
+                // 视图在动：把累积层按"新变换 ∘ 旧变换⁻¹"整体 blit 一次，不再逐笔重画
+                //（逐笔重画要每帧对每条笔画做一次描边展开，成本与可见点数成正比）。
+                // 旋转下该映射不成立（每页绕自身中心转），退回逐笔。
+                EnsureAnnoLayer();
+                bool blitted = false;
+                if (_rotation == 0 && _annoLayer != null && _annoBaseZoom > 0)
+                {
+                    BlitAnnoLayerDuringMotion(ds, z, hOff, vOff, visible);
+                    // 层像素已与当前视图脱钩：停稳后必须整层重烘，否则会拿旧变换的像素贴新视图（整层错位）。
+                    _annoLayerNeedsFullRebuild = true;
+                    blitted = true;
+                }
+                if (!blitted) DrawAnnotationsOnCanvas(ds, z, visible);
             }
             else
             {
                 EnsureAnnoLayer();
                 if (_annoLayer != null)
                 {
-                    if (_annoLayerNeedsFullRebuild) RebuildAnnoLayer(visible, z);
-                    else BakeUnbakedStrokes(visible, z);
+                    if (_annoLayerNeedsFullRebuild) RebuildAnnoLayer(visible, z, hOff, vOff);
+                    else BakeUnbakedStrokes(visible, z, hOff, vOff);
                     ds.DrawImage(_annoLayer);
                 }
             }
@@ -8236,11 +8272,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             RequestCanvasOverlaySync();
     }
 
-    /// <summary>缩放/滚动动画是否进行中。此时标注【逐帧随变换改变】，累积层无收益； 且每帧走累积层 = 全视口渲染目标 Clear + 重画全部笔画 + DrawImage 整屏 blit， 双向全屏带宽会把标注渲染线程拖出 vsync，表现为标注相对平滑页位图滞后/闪光。</summary>
+    /// <summary>缩放/滚动动画是否进行中。此时标注【逐帧随变换改变】：累积层是按某一变换烘好的位图，
+    /// 原地 1:1 重用必然错位，每帧重烘又等于全视口 Clear + 重画全部笔画；所以这一帧改走
+    /// "整层按新变换重映射"（<see cref="BlitAnnoLayerDuringMotion"/>），只有映射不成立（旋转）
+    /// 或层里尚无像素时才逐笔重画。</summary>
     private bool IsViewAnimating =>
         _isSmoothZooming || _isWheelScrolling || _zoomAnimCommitting;
 
-    /// <summary>动画期快速路径：跳过 _annoLayer 渲染目标，直接把标注按当前变换画到画布会话。 每页复用缓存的 CanvasGeometry，仅 ApplyPageTransform + DrawGeometry，与页位图同帧上屏。</summary>
+    /// <summary>视图移动中的兜底路径：不用累积层，每页设一次【绝对】页变换后直接逐笔描边。
+    /// 整体重映射不成立（页面旋转：每页绕自身中心转）或层里尚无像素时走这条。
+    /// 每页复用缓存的 CanvasGeometry，仅 ApplyPageTransform + DrawGeometry，与页位图同帧上屏。</summary>
     private void DrawAnnotationsOnCanvas(CanvasDrawingSession ds, double z,
         List<(GpuPageInfo Page, Rect Dest)> visible)
     {
@@ -8263,23 +8304,110 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         ds.Transform = saved;
     }
 
-    private bool ComputeVisiblePages(out double z, out List<(GpuPageInfo Page, Rect Dest)> visible)
+    /// <summary>视图移动中（缩放/滚轮弹簧/拖拽平移）的笔迹路径：不重画，把累积层按
+    /// "新变换 ∘ 旧变换⁻¹" 整体 blit 一次。
+    /// 依据：文档→屏幕是统一仿射 screen = pagePt·z + (center − offset)，与页无关，
+    /// 因此任意两个视图之间存在同一个"缩放 + 平移"，可以一次性落到整层位图上；
+    /// 代价是缩放中笔迹随位图重采样发糊 —— 与页位图同等程度（页瓦片同样在重采样）。
+    /// 层覆盖不到的页（滚动中新露出的）与层里没烘进去的笔画（正在画的那一笔），仍逐笔补画，避免缺墨。</summary>
+    private void BlitAnnoLayerDuringMotion(CanvasDrawingSession ds, double z, double hOff, double vOff,
+        List<(GpuPageInfo Page, Rect Dest)> visible)
+    {
+        var layer = _annoLayer;
+        if (layer == null) return;
+
+        double scale = z / _annoBaseZoom;
+        ComputeViewAnchor(z, out double cx, out double cy);
+        float tx = (float)((cx - hOff) - scale * _annoBaseShiftX);
+        float ty = (float)((cy - vOff) - scale * _annoBaseShiftY);
+
+        var saved = ds.Transform;
+        try
+        {
+            // 行向量约定：v*(S*T) = 先缩放后平移
+            ds.Transform = Matrix3x2.CreateScale((float)scale) * Matrix3x2.CreateTranslation(tx, ty);
+            ds.DrawImage(layer);
+        }
+        finally
+        {
+            ds.Transform = saved;
+        }
+
+        // 层像素在这次变换之后覆盖的屏幕矩形：完全落在其中的页已由 blit 画好，只需补新笔画。
+        var covered = new Rect(tx, ty, layer.Size.Width * scale, layer.Size.Height * scale);
+
+        foreach (var (p, dest) in visible)
+        {
+            var annos = SafeAnnos(p.Index);
+            if (annos == null) continue;
+
+            bool pageCovered = ContainsRect(covered, dest);
+            bool any = !pageCovered;
+            if (pageCovered)
+            {
+                foreach (var a in annos)
+                {
+                    if (a.Type != AnnotationType.Pen) continue;
+                    var c = _annoGeoCache.GetValue(a, _ => new CachedAnnoGeometry());
+                    if (c.BakingPoints != a.GetPointsSnapshot().Length) { any = true; break; }
+                }
+            }
+            if (!any) continue;
+
+            ApplyPageTransform(ds, dest, z);
+            foreach (var a in annos)
+            {
+                if (a.Type != AnnotationType.Pen) continue;
+                if (pageCovered)
+                {
+                    var c = _annoGeoCache.GetValue(a, _ => new CachedAnnoGeometry());
+                    if (c.BakingPoints == a.GetPointsSnapshot().Length) continue;
+                }
+                DrawAnnotation(ds, a);
+            }
+        }
+
+        ds.Transform = saved;
+    }
+
+    /// <summary>outer 是否完全包含 inner（带 0.5 DIP 容差：页面刚好铺满视口时边界值不应判成"未覆盖"）。</summary>
+    private static bool ContainsRect(Rect outer, Rect inner)
+    {
+        const double eps = 0.5;
+        return inner.X >= outer.X - eps &&
+               inner.Y >= outer.Y - eps &&
+               inner.X + inner.Width <= outer.X + outer.Width + eps &&
+               inner.Y + inner.Height <= outer.Y + outer.Height + eps;
+    }
+
+    /// <summary>文档坐标 → 屏幕坐标的居中补偿量：内容小于视口时居中，否则为 0。
+    /// 可见页剔除与动画期的位图重映射必须共用这一份 —— 两处各算一遍必然漂移。
+    /// 取画布视口快照而非实时 Viewer.Viewport*：偏移与居中量必须同一时刻。</summary>
+    private void ComputeViewAnchor(double z, out double cx, out double cy)
+    {
+        double vpW = _vpW;
+        double vpH = _vpH;
+        double extentW = Spacer.Width * z;
+        double extentH = Spacer.Height * z;
+        cx = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
+        cy = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+    }
+
+    private bool ComputeVisiblePages(out double z, out double hOff, out double vOff,
+        out List<(GpuPageInfo Page, Rect Dest)> visible)
     {
         visible = new();
         var pages = _pages;
-        if (pages.Count == 0) { z = 0; return false; }
+        z = 0; hOff = 0; vOff = 0;
+        if (pages.Count == 0) return false;
 
-        GetViewState(out z, out double hOff, out double vOff);
+        GetViewState(out z, out hOff, out vOff);
         if (z <= 0) return false;
 
-        // 用画布视口快照而非实时 Viewer.Viewport*：偏移与居中量必须同一时刻（否则滚动条
         double vpW = _vpW;
         double vpH = _vpH;
 
-        double extentW = Spacer.Width * z;
-        double extentH = Spacer.Height * z;
-        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        ComputeViewAnchor(z, out double centerX, out double centerY);
 
         double topDoc = vOff / z;
         double bottomDoc = (vOff + vpH) / z;
