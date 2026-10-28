@@ -5052,7 +5052,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeColorChanged;
     /// <summary>从连线手柄拖到空白处：请求在该处新建卡片并与源节点连成一条线 （NodeId=源节点、FromSide=源出边、PageIndex/X/Y=落点页与已 clamp 的左上角）。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeCreateConnectedRequested;
-    /// <summary>选中卡片 = 请求提升到叠放顶层（jsoncanvas 无独立 z 字段，nodes 数组顺序即 z 序）。 MainPage 收到后重排模型数组并落盘 ⇒ 取消选中后层级保持，不再只是绘制期临时置顶。</summary>
+    /// <summary>选中卡片 = 请求提升到叠放顶层（jsoncanvas 无独立 z 字段，nodes 数组顺序即 z 序）。 MainPage 收到后重排模型数组并置脏（落盘统一在 FlushCanvas）⇒ 取消选中后层级保持，不再只是绘制期临时置顶。</summary>
     public event EventHandler<CanvasNodeEventArgs>? CanvasNodeBringToFrontRequested;
     /// <summary>编辑框内请求撤销（Ctrl+Z）：MainPage 统一走撤销栈，避免编辑框原生撤销与全局历史脱节。</summary>
     public event EventHandler? CanvasUndoRequested;
@@ -5068,7 +5068,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _selectedCanvasNodeId = id;
         _selectedCanvasEdgeId = null;
         HideCanvasEdgePickers();       // 选中卡片即收起连线胶囊的二级面板（胶囊本身随后由定位链路隐藏）
-        // 选中即置顶，且必须是【永久】的：这里只发请求，真正的重排与落盘由 MainPage 改模型数组完成
+        // 选中即置顶，且必须是【永久】的：这里只发请求，真正的重排与置脏由 MainPage 改模型数组完成
         // （jsoncanvas 的 z 序 = nodes 数组顺序）。否则取消选中后 topId 失效，卡片会掉回出生层级。
         if (id != null)
             CanvasNodeBringToFrontRequested?.Invoke(this, new CanvasNodeEventArgs { NodeId = id });

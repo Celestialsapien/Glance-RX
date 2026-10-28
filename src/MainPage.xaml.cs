@@ -5564,7 +5564,8 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>白板改动只置脏，不立即落盘：拖拽、点选、改色都是高频操作，
-    /// 逐次整份重写 JSON 会在 UI 线程上卡住交互。真正写入推迟到显式保存 / 切换文档 / 退出保存（FlushCanvas）。</summary>
+    /// 逐次整份重写 JSON 会在 UI 线程上卡住交互。真正写入推迟到显式保存 / 切换文档 / 退出保存（FlushCanvas），
+    /// 而那几处仍是 UI 线程同步整份重写（整份序列化 + tmp + Move，实测 800 卡 ≈ 9 ms），所以只在低频时刻做。</summary>
     private void MarkCanvasDirty()
     {
         _canvasDirty = true;
@@ -5632,7 +5633,7 @@ public sealed partial class MainPage : Page
         RefreshCanvas();
     }
 
-    /// <summary>选中卡片 = 提升到叠放顶层。jsoncanvas 无独立 z 字段，nodes 数组顺序即 z 序， 故"置顶"就是把该节点移到数组末尾。写回模型并落盘 ⇒ 取消选中后层级保持，不会掉回出生顺序。 不入撤销栈：选中是高频操作，入栈会淹没真正可撤销的编辑。</summary>
+    /// <summary>选中卡片 = 提升到叠放顶层。jsoncanvas 无独立 z 字段，nodes 数组顺序即 z 序， 故"置顶"就是把该节点移到数组末尾。写回模型并置脏（落盘在 FlushCanvas）⇒ 取消选中后层级保持，不会掉回出生顺序。 不入撤销栈：选中是高频操作，入栈会淹没真正可撤销的编辑。</summary>
     private void GpuCanvas_BringToFront(object? sender, CanvasNodeEventArgs e)
     {
         if (_canvasDoc == null) return;
