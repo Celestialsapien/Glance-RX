@@ -5535,7 +5535,7 @@ public sealed partial class MainPage : Page
         finally { SuppressAnnotationDirty = false; }
     }
 
-/// <summary>白板（Canvas 模式）：从 &lt;pdf&gt;.canvas 读取卡片与连线，保留模型供交互改写， 并把当前数组交给 GpuViewer 渲染。内存模型是唯一真相源，交互只置脏、不落盘； 写入时机全在 FlushCanvas（显式保存 / 切换文档 / 退出保存）。</summary>
+/// <summary>白板（Canvas 模式）：从 &lt;pdf&gt;.gcanvas 读取卡片与连线，保留模型供交互改写， 并把当前数组交给 GpuViewer 渲染。内存模型是唯一真相源，交互只置脏、不落盘； 写入时机全在 FlushCanvas（显式保存 / 切换文档 / 退出保存）。</summary>
     private void LoadCanvasForCurrentDocument()
     {
         CanvasDoc? doc = null;
@@ -5572,7 +5572,7 @@ public sealed partial class MainPage : Page
         HasUnsavedChanges = true;
     }
 
-    /// <summary>把脏掉的白板写回当前 PDF 同名 .canvas。写失败保持脏标记，留给下一次保存重试。
+    /// <summary>把脏掉的白板写回当前 PDF 同名的 .gcanvas。写失败保持脏标记，留给下一次保存重试。
     /// 返回"白板已落盘"（无脏标记也算成功），仅供需要报告保存结果的调用方使用。</summary>
     private bool FlushCanvas()
     {

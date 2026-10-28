@@ -4975,7 +4975,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private CanvasNode? _canvasEditNodeRef;
     private ScrollViewer? _canvasEditScrollViewer;
 
-    // 每张卡片的滚动偏移（页局部 PDF 点，0 = 顶部）。**仅内存态**（与 Obsidian 一致，不写进 .canvas）。
+    // 每张卡片的滚动偏移（页局部 PDF 点，0 = 顶部）。**仅内存态**，不写进 .gcanvas。
     // 非编辑态卡片由 Win2D 绘制、没有内建滚动，必须靠这个值把文字整体上移来表现滚动。
     private readonly Dictionary<string, double> _canvasScrollY = new(StringComparer.Ordinal);
 
