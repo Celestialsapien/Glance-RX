@@ -26,6 +26,168 @@
 
     <Page.Resources>
 
+        <!-- 资源管理器一行的状态配色。空白态 = 透明（露出面板底色）：
+             悬浮 = 比底色亮一档的灰，按下 = 比悬浮暗一档。
+             【选中态】两档：单选（普通点击选中的那一行）= 中性灰底，多选（Ctrl/Shift 选出的批）= 强调紫淡染。
+             【激活态】不占底色 —— 它是行首那条竖条（CanvasRowActiveBarBrush），与选中态互不遮挡：
+             "开着哪份画布"和"选中了哪几行"是两件事，会同时出现在同一行上。
+             深/浅两套具体色值由 UpdateSidebarBackground 按主题写进这几支画刷。 -->
+
+        <SolidColorBrush x:Key="CanvasRowHoverBrush" Color="#F2F2F2"/>
+
+        <SolidColorBrush x:Key="CanvasRowPressedBrush" Color="#E0E0E0"/>
+
+        <SolidColorBrush x:Key="CanvasRowSelectedBrush" Color="#FBFBFB"/>
+
+        <SolidColorBrush x:Key="CanvasRowMultiSelectBrush" Color="#D8D0ED"/>
+
+        <SolidColorBrush x:Key="CanvasRowActiveBarBrush" Color="#9873F7"/>
+
+        <!-- 行容器：ListViewItem 只当"一行"的载体，模板里什么都不画。
+             四种状态底色由行模板自己上 —— 框架的选中态改不动也改不准（文件夹抢高亮、悬浮吃掉选中色都是这么来的）。
+             行高固定 22；IsTabStop=False + 无焦点框 ⇒ 列表里没有任何能拿键盘焦点的元素，
+             于是不会出现"退出改名后一个白框还能上下移动"的问题。 -->
+
+        <Style x:Key="CanvasRowItemStyle" TargetType="ListViewItem">
+
+            <Setter Property="IsTabStop" Value="False"/>
+
+            <Setter Property="UseSystemFocusVisuals" Value="False"/>
+
+            <!-- 这三个必须显式归零：模板被整体替换后，容器高度仍受 ListViewItem 自身的最小高度约束
+                 （框架默认 32），会把 22 高的行内容撑到 32 —— 上下多出来的那几像素落在行内容之外，
+                 点上去没有任何行接收 ⇒ 表现为"行间死区、每行有效点击区域小"。 -->
+
+            <Setter Property="MinHeight" Value="0"/>
+
+            <Setter Property="Margin" Value="0"/>
+
+            <Setter Property="Padding" Value="0"/>
+
+            <Setter Property="Template">
+
+                <Setter.Value>
+
+                    <ControlTemplate TargetType="ListViewItem">
+
+                        <!-- 模板自包含：不留 Padding / 不画任何状态底色（底色在行模板的 Border 上）。
+                             高度交给内容自己（MinHeight=22），内容拉伸填满容器 ⇒ 命中面 = 整行，不留缝。 -->
+
+                        <Grid Background="Transparent">
+
+                            <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}"
+
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+
+                                              HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+
+                                              HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+
+                        </Grid>
+
+                    </ControlTemplate>
+
+                </Setter.Value>
+
+            </Setter>
+
+        </Style>
+
+        <!-- 资源管理器的一行：缩进 + 展开箭头 + 图标 + 名字。整行都是命中区 —— 根 Grid 的透明底色就是命中面
+             （子元素无背景时不参与命中测试，事件冒泡到这层；行底色 Border 可能是 null，指望不上它）。
+             点击动作在 PointerPressed 里做（不等 Released）：行集合可能因为展开/收起被重建，
+             等 Released 时容器已经不在了，表现就是"点一下没反应，动动鼠标再点才行"。 -->
+
+        <DataTemplate x:Key="CanvasRowTemplate" x:DataType="services:CanvasTreeNode">
+
+            <!-- MinHeight = 行高：容器不设固定高度，行高由这里唯一决定（改这一处就是改行高）。
+                 HorizontalAlignment/VerticalAlignment 显式 Stretch：透明根必须铺满容器，否则整行点不全。 -->
+
+            <Grid Background="Transparent" MinHeight="22"
+
+                  HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+
+                  PointerEntered="CanvasRow_PointerEntered" PointerExited="CanvasRow_PointerExited"
+
+                  PointerPressed="CanvasRow_PointerPressed" PointerReleased="CanvasRow_PointerReleased">
+
+                <Border Background="{x:Bind RowBackground, Mode=OneWay}"/>
+
+                <!-- 激活态：行首竖条（vscode 活动列表项的做法）。整行高度、贴左缘，
+                     与"选中底"互不遮挡 ⇒ 一行可以同时是"开着的"和"选中的"。 -->
+
+                <Border Width="3" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                        Background="{StaticResource CanvasRowActiveBarBrush}"
+                        Visibility="{x:Bind ActiveBarMark, Mode=OneWay}"/>
+
+                <Grid Margin="2,0,6,0" ColumnSpacing="4">
+
+                    <Grid.ColumnDefinitions>
+
+                        <ColumnDefinition Width="Auto"/>
+
+                        <ColumnDefinition Width="Auto"/>
+
+                        <ColumnDefinition Width="Auto"/>
+
+                        <ColumnDefinition Width="*"/>
+
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Column="0" Width="{x:Bind IndentWidth}"/>
+
+                    <!-- 箭头列宽固定 12：文件行不显示箭头，但列仍然占位，否则文件和文件夹的图标会错开。 -->
+
+                    <Grid Grid.Column="1" Width="12" VerticalAlignment="Center">
+
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" FontSize="10"
+
+                                  Glyph="{x:Bind ChevronGlyph, Mode=OneWay}" Visibility="{x:Bind ChevronMark}"/>
+
+                    </Grid>
+
+                    <Grid Grid.Column="2" VerticalAlignment="Center">
+
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE8B7;" FontSize="14"
+
+                                  Visibility="{x:Bind FolderIconMark}"/>
+
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;" FontSize="14"
+
+                                  Visibility="{x:Bind FileIconMark}"/>
+
+                    </Grid>
+
+                    <!-- 名字：平时文本，改名时换成行内输入框（与书签同一套控件）。输入框固定 20 高，
+                         行本身固定 22 ⇒ 进编辑不会把行撑高。
+                         HorizontalAlignment=Left：让 TextBlock 的宽度始终等于文本自然宽度。
+                         默认 Stretch 会把它拉成整列宽（列是 *，行被撑到"最宽一行"后短名字会被拉长），
+                         那样"新建后横向滚到看得见名字"就算不出真正的右端位置。 -->
+
+                    <TextBlock Grid.Column="3" Text="{x:Bind Name}" FontSize="12" VerticalAlignment="Center"
+                               HorizontalAlignment="Left"
+                               TextTrimming="CharacterEllipsis" Visibility="{x:Bind NameTextMark, Mode=OneWay}"/>
+
+                    <local:SelfDrawnTextBox Grid.Column="3" Height="20" FontSize="12" VerticalAlignment="Center"
+
+                                            CompactMode="True"
+
+                                            Text="{x:Bind RenameText, Mode=TwoWay}"
+
+                                            Visibility="{x:Bind IsRenaming, Mode=OneWay}"
+
+                                            Submitted="CanvasRowRename_Submitted"
+
+                                            Cancelled="CanvasRowRename_Cancelled"
+
+                                            CommitRequested="CanvasRowRename_CommitRequested"/>
+
+                </Grid>
+
+            </Grid>
+
+        </DataTemplate>
+
         <!-- 【共用】ToggleButton 视觉状态机接管样式 —— 已用于：顶部工具栏「阅读模式」按钮、
 
              侧边栏「缩略图 / 书签 / 大纲」三模式切换键（共 4 颗）。
@@ -695,6 +857,17 @@
                 <!-- Right Section: Rotate and Settings Menu -->
 
                 <StackPanel x:Name="TopRightPanel" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" HorizontalAlignment="Right">
+
+                    <!-- Canvas Library Panel Toggle Button：展开右侧画布库面板（符号 E90D 是左侧栏按钮 E90C 的左右镜像）。
+                         用 ToggleButton 与左侧栏按钮完全一致：按下态即面板展开态，代码侧翻 IsChecked 不翻 IsPaneOpen。 -->
+
+                    <ToggleButton x:Name="ToggleCanvasPanelButton" Click="ToggleCanvasPanel_Click" Padding="8,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
+
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE90D;"/>
+
+                    </ToggleButton>
+
+
 
                     <!-- Rotate Button -->
 
@@ -1630,9 +1803,78 @@
 
 
 
-            <!-- SplitView Content: Vertically virtualized list of PDF pages, completely transparent container -->
+            <!-- 右侧画布库面板。嵌套在左侧边栏的 Content 内：PanePlacement=Right 把 Pane 摆到右边，
+                 与左侧边栏互不干扰（左挤左、右挤右，PDF 视口在中间同步变窄）。
+                 同样用 DisplayMode=Inline ⇒ 无 light-dismiss 覆盖层，主视图全程可操作。 -->
 
-            <Grid x:Name="ViewerContainerGrid">
+            <SplitView x:Name="CanvasPanelSplitView" DisplayMode="Inline" PanePlacement="Right" IsPaneOpen="False" OpenPaneLength="220" Background="Transparent">
+
+                <SplitView.Pane>
+
+                    <!-- 顶部 Padding 由 C# 侧 UpdateSidebarTopInset() 按实测工具栏高度写入，理由同左侧：
+                         工具栏是 ZIndex=50 的浮层、恒盖在本面板之上，内容从 y=0 起排会被切掉标题行。 -->
+
+                    <!-- 底色由【代码后置】UpdateSidebarBackground() 按主题着色（与左侧面板同一套），
+                         此处 Background 仅作构造期首帧前的系统键兜底 —— 不要在此引用 App.xaml 自定义主题键。 -->
+
+                    <Grid x:Name="CanvasPanelRoot" Padding="0,14,0,0" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+
+                        <Grid.RowDefinitions>
+
+                            <RowDefinition Height="Auto"/>
+
+                            <RowDefinition Height="*"/>
+
+                        </Grid.RowDefinitions>
+
+                        <!-- 标题行。新建动作只走右键菜单（点空白处 / 点文件夹行），不在这里放按钮：
+                             标题栏按钮无从表达"建在哪个层级"，只能建在库根，和右键菜单是两套语义。 -->
+
+                        <Grid Grid.Row="0" Padding="14,0,10,8">
+
+                            <TextBlock x:Name="CanvasPanelHeaderText" FontSize="12" FontWeight="SemiBold"
+
+                                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+
+                                       VerticalAlignment="Center"/>
+
+                        </Grid>
+
+                        <!-- 资源管理器（vscode 式）：拍平成行的目录树，文件夹在前按名称排、缩进表达层级。
+                             单击文件夹行 = 展开/收起；单击画布行 = 立刻盖到当前文档上。
+                             右键走 ContextRequested —— 点到某一行给节点菜单，点空白给"新建/刷新"菜单。
+                             纵向滚动默认就有；横向也开（层级越深缩进越多、名字越长，220px 面板装不下）——
+                             横向滚动开启后，行的排布宽度 = max(可视宽, 最宽一行)，
+                             所以整行底色/命中面依然铺满可视区，不会缩成"只有名字那么宽"。
+                             "卡片超出本文档页数"的提示不在这里（那会让整块内容下移）：它是左下角胶囊栈里
+                             常驻的一格，与保存提示同一条入栈路径（见 SyncCanvasMissingToast）。 -->
+
+                        <ListView Grid.Row="1" x:Name="CanvasRowList" Background="Transparent" Margin="0,0,0,8"
+
+                                  IsTabStop="False" UseSystemFocusVisuals="False"
+
+                                  SelectionMode="None" IsItemClickEnabled="False"
+
+                                  ScrollViewer.HorizontalScrollMode="Enabled"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
+
+                                  ItemContainerStyle="{StaticResource CanvasRowItemStyle}"
+
+                                  ItemTemplate="{StaticResource CanvasRowTemplate}"
+
+                                  PointerPressed="CanvasRowList_PointerPressed"
+
+                                  ContextRequested="CanvasRowList_ContextRequested"/>
+
+                    </Grid>
+
+                </SplitView.Pane>
+
+
+
+                <!-- SplitView Content: Vertically virtualized list of PDF pages, completely transparent container -->
+
+                <Grid x:Name="ViewerContainerGrid">
 
                 <Grid.ColumnDefinitions>
 
@@ -1999,6 +2241,11 @@
 
 
 
+                <!-- 注：画布缺失提示不在这里单独占一块 —— 它是左下角胶囊栈里的常驻一格
+                     （SyncCanvasMissingToast → AddToastCapsule，与保存提示同一条入栈路径：
+                      同位次、同入场动画、同格距、同构造器；新提示会把它往上挤，提示走光它再落回最底格）。
+                     放进右侧列表会让整块内容下移，散落在角落单独摆又和胶囊体系对不上。 -->
+
                 <!-- 保存/书签提示胶囊栈（微信式堆叠）：
 
                      • 新动作在「标准位置」（左下角底边，Margin 12,10）生成新胶囊，旧胶囊整体上移一格；
@@ -2024,6 +2271,8 @@
                       Canvas.ZIndex="2000"/>
 
             </Grid>
+
+            </SplitView>
 
         </SplitView>
 
@@ -2138,6 +2387,14 @@
             </Border>
 
         </Grid>
+
+        <!-- 自绘右键菜单（画布库用）。挂在页面主可视树的最上层而不是弹层里：弹层是独立视觉树，
+             一弹就把焦点/光标语境切走 —— 框架菜单会莫名改鼠标光标、并让背后那一行丢掉悬浮态。
+             本控件全是非聚焦元素，与背后列表共用同一套主题画刷，位置与命中都在同一棵树内。
+             ⚠ 宿主【不能】设 Visibility=Collapsed：收起状态下它没有布局尺寸（ActualWidth=0），
+                既无法按边界给菜单摆位，坐标换算也不成立。收起由控件内部两层自己处理（都收起即无命中面）。 -->
+
+        <local:SelfDrawnContextMenu x:Name="CanvasContextMenu" Canvas.ZIndex="4000"/>
 
     </Grid>
 

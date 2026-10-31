@@ -198,6 +198,13 @@ public class ViewStateData
     /// <summary>退出时侧边栏（缩略图/书签/大纲）是否展开。重开同一 PDF 时按此状态打开。 缺字段时按 false（收起），与 SplitView 的 XAML 默认值一致。</summary>
     public bool SidebarOpen { get; set; }
 
+    /// <summary>上次盖在这个文档上的画布文件绝对路径（空 = 没盖）。这只是"上次用了哪份"的便利记忆，
+    /// 不是绑定关系：随时可换；画布被删/改名后这里指向的文件不存在 ⇒ 退回空画布，画布数据本身不受影响。</summary>
+    public string CanvasPath { get; set; } = "";
+
+    /// <summary>退出时右侧画布面板是否展开。与 SidebarOpen 同样语义：重开同一 PDF 时按此状态打开。缺字段按 false。</summary>
+    public bool CanvasPanelOpen { get; set; }
+
     /// <summary>保存时刻（UTC Unix 秒），用于诊断与未来按时间排序。</summary>
     public long SavedAtUtc { get; set; }
 

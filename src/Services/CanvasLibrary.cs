@@ -1,0 +1,385 @@
+// Glance-RX - a high-performance PDF reader
+// Copyright (C) 2026 Adrian
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.IO;
+
+namespace GlanceRX.Services;
+
+/// <summary>资源管理器树节点：一个文件夹，或一份画布。
+/// 只带列表要显示的信息，不含卡片数据 —— 库里有几百份画布时，解析全部 JSON 会把"打开面板"变成一次全库读取。</summary>
+public sealed class CanvasTreeNode : System.ComponentModel.INotifyPropertyChanged
+{
+    /// <summary>文件夹的目录路径 / 画布的文件路径。两者都唯一，也是右键菜单与打开的目标。</summary>
+    public string FullPath { get; init; } = "";
+
+    /// <summary>显示名：文件夹名，或画布文件名（不含扩展名）。子层级由树表达，名字里不再拼路径。</summary>
+    public string Name { get; init; } = "";
+
+    public bool IsFolder { get; init; }
+
+    /// <summary>层级深度（库根下的第一层 = 0）。列表是拍平的，缩进由这一层算出来。</summary>
+    public int Depth { get; init; }
+
+    /// <summary>左侧缩进宽度（每级 12px）。</summary>
+    public double IndentWidth => Depth * 12;
+
+    private Microsoft.UI.Xaml.Media.Brush? _rowBackground;
+
+    /// <summary>整行底色：空白 / 悬浮 / 按下 / 多选四种状态由界面写这一支 —— 不用框架的选中态：
+    /// 框架的选中语义只认一个"当前项"，文件夹行与画布行分不开，也改不动。
+    /// 注意这里【不含激活态】：激活改由行首竖条表达（见 IsActive），两种状态因此可以同时可见。</summary>
+    public Microsoft.UI.Xaml.Media.Brush? RowBackground
+    {
+        get => _rowBackground;
+        set
+        {
+            if (ReferenceEquals(_rowBackground, value)) return;
+            _rowBackground = value;
+            Raise(nameof(RowBackground));
+        }
+    }
+
+    private bool _isActive;
+
+    /// <summary>该行是不是"盖在 PDF 上的那份画布"（激活态）。由界面写 —— 与 RowBackground 同源，
+    /// 两者表达两件不同的事：激活 = 行首那条强调色竖条，选中 = 整行淡染底色。刻意用两种视觉，
+    /// 因为"开着哪份"和"勾中了哪几份"会同时存在，压成一种颜色就分不清了。</summary>
+    public bool IsActive
+    {
+        get => _isActive;
+        set
+        {
+            if (_isActive == value) return;
+            _isActive = value;
+            Raise(nameof(IsActive));
+            Raise(nameof(ActiveBarMark));
+        }
+    }
+
+    /// <summary>行首竖条的显隐（只有激活行显示）。避开转换器：WinUI 没有内置的 bool→Visibility。</summary>
+    public Microsoft.UI.Xaml.Visibility ActiveBarMark =>
+        _isActive ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    /// <summary>展开箭头（只有文件夹行有）。</summary>
+    public Microsoft.UI.Xaml.Visibility ChevronMark =>
+        IsFolder ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    /// <summary>展开箭头符号：展开时向下（E70D），收起时向右（E76C）。</summary>
+    public string ChevronGlyph => _isExpanded ? "\uE70D" : "\uE76C";
+
+    /// <summary>子节点（文件夹在前、再按名称，与 vscode 默认排序一致）。
+    /// 用 ObservableCollection 而不是 List：磁盘变动只对"受影响的那一层"做增删补丁，
+    /// 换成整表重建会把展开态、选中行和滚动位置全部打回原点。</summary>
+    public ObservableCollection<CanvasTreeNode> Children { get; } = new();
+
+    private bool _isExpanded;
+
+    /// <summary>展开态。点整行与点箭头都改这里，子行的显隐、箭头方向、_expandedCanvasFolders 都跟着它走 ——
+    /// 只有这一份真相，重建时按它恢复。</summary>
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (_isExpanded == value) return;
+            _isExpanded = value;
+            Raise(nameof(IsExpanded));
+            Raise(nameof(ChevronGlyph));
+        }
+    }
+
+    private bool _isRenaming;
+
+    /// <summary>该行正在行内改名：名字文本与输入框二选一显示（与书签同一套做法）。</summary>
+    public bool IsRenaming
+    {
+        get => _isRenaming;
+        set
+        {
+            if (_isRenaming == value) return;
+            _isRenaming = value;
+            Raise(nameof(IsRenaming));
+            Raise(nameof(NameTextMark));
+        }
+    }
+
+    /// <summary>名字文本的可见性（不在改名时显示）。避开 bool→Visibility 转换器：WinUI 没有内置的。</summary>
+    public Microsoft.UI.Xaml.Visibility NameTextMark =>
+        _isRenaming ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
+    private string _renameText = "";
+
+    /// <summary>行内输入框里的临时文本。回车/失焦才落盘，Esc 丢弃。</summary>
+    public string RenameText
+    {
+        get => _renameText;
+        set
+        {
+            string text = value ?? "";
+            if (string.Equals(_renameText, text, StringComparison.Ordinal)) return;
+            _renameText = text;
+            Raise(nameof(RenameText));
+        }
+    }
+
+    /// <summary>文件夹图标与文件图标二选一（同样避开转换器）。</summary>
+    public Microsoft.UI.Xaml.Visibility FolderIconMark =>
+        IsFolder ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    public Microsoft.UI.Xaml.Visibility FileIconMark =>
+        IsFolder ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
+    private void Raise(string name)
+        => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+}
+
+/// <summary>画布库：<see cref="AppPaths.CanvasDirectory"/> 下的全部 .gcanvas。
+/// 这里没有任何"画布属于谁"的概念 —— 画布只是库里的文件，用哪份由用户当场决定，
+/// 因此不存在改名/移动/复制导致对应关系失效的问题。</summary>
+internal static class CanvasLibrary
+{
+    public static string Root => AppPaths.CanvasDirectory;
+
+    /// <summary>建整棵树（供打开面板 / 换文档时用）。同层：文件夹在前、再按名称。</summary>
+    public static ObservableCollection<CanvasTreeNode> BuildTree(ICollection<string>? expanded = null)
+    {
+        var roots = new ObservableCollection<CanvasTreeNode>();
+        SyncChildren(roots, Root, expanded);
+        return roots;
+    }
+
+    /// <summary>把 <paramref name="dirPath"/> 的直接子项同步进 <paramref name="target"/>：删掉已不存在的、
+    /// 补上新出现的、按顺序就位，已经存在的节点【原样保留】（连同它的子节点与展开态）。
+    /// 这样外部改一个文件只让那一行变化，其余行与滚动位置都不动。
+    /// <paramref name="depth"/> = 新节点的层级深度（缩进用），调用方按目录在树里的位置给。</summary>
+    public static void SyncChildren(ObservableCollection<CanvasTreeNode> target, string dirPath,
+                                    ICollection<string>? expanded, int depth = 0)
+    {
+        List<DirEntry> desired;
+        try { desired = ScanChildren(dirPath); }
+        catch (Exception) { return; }   // 目录读不到：保留现状，比清空列表更接近真相
+
+        for (int i = target.Count - 1; i >= 0; i--)
+        {
+            if (IndexOf(desired, target[i].FullPath) < 0) target.RemoveAt(i);
+        }
+
+        for (int i = 0; i < desired.Count; i++)
+        {
+            if (i < target.Count && SamePath(target[i].FullPath, desired[i].Path)) continue;
+
+            int found = -1;
+            for (int j = i + 1; j < target.Count; j++)
+            {
+                if (SamePath(target[j].FullPath, desired[i].Path)) { found = j; break; }
+            }
+            if (found >= 0)
+            {
+                var existing = target[found];
+                target.RemoveAt(found);
+                target.Insert(i, existing);
+            }
+            else
+            {
+                target.Insert(i, MakeNode(desired[i], expanded, depth));
+            }
+        }
+    }
+
+    /// <summary>某个目录的直接子项（文件夹在前、再按名称）。**空文件夹也会列出来** —— 建了却看不见等于没建。</summary>
+    private static List<DirEntry> ScanChildren(string dirPath)
+    {
+        var list = new List<DirEntry>();
+        foreach (string dir in Directory.EnumerateDirectories(dirPath))
+            list.Add(new DirEntry(dir, Path.GetFileName(dir), true));
+        foreach (string file in Directory.EnumerateFiles(dirPath, "*" + CanvasStore.Extension))
+            list.Add(new DirEntry(file, Path.GetFileNameWithoutExtension(file), false));
+
+        list.Sort(static (a, b) =>
+        {
+            if (a.IsFolder != b.IsFolder) return a.IsFolder ? -1 : 1;
+            return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
+        });
+        return list;
+    }
+
+    private static CanvasTreeNode MakeNode(DirEntry entry, ICollection<string>? expanded, int depth)
+    {
+        var node = new CanvasTreeNode
+        {
+            FullPath = entry.Path,
+            Name = entry.Name,
+            IsFolder = entry.IsFolder,
+            Depth = depth,
+        };
+        if (!entry.IsFolder) return node;
+        if (expanded != null && expanded.Contains(entry.Path)) node.IsExpanded = true;
+        try
+        {
+            foreach (DirEntry child in ScanChildren(entry.Path))
+                node.Children.Add(MakeNode(child, expanded, depth + 1));
+        }
+        catch (Exception) { }
+        return node;
+    }
+
+    private static int IndexOf(List<DirEntry> list, string path)
+    {
+        for (int i = 0; i < list.Count; i++)
+            if (SamePath(list[i].Path, path)) return i;
+        return -1;
+    }
+
+    private static bool SamePath(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>一次扫描里的一行（只描述，不构造节点 —— 已存在的行不再重建）。</summary>
+    private readonly struct DirEntry
+    {
+        public DirEntry(string path, string name, bool isFolder)
+        {
+            Path = path;
+            Name = name;
+            IsFolder = isFolder;
+        }
+
+        public string Path { get; }
+        public string Name { get; }
+        public bool IsFolder { get; }
+    }
+
+    /// <summary>在库里挑一个还没被占用的画布路径：未命名.gcanvas / 未命名 (2).gcanvas / …
+    /// <paramref name="parentPath"/> 为 null = 库根。只挑路径不建文件 —— 用户可能只是想看一眼，不落空文件。</summary>
+    public static string NewCanvasPath(string baseName = "未命名", string? parentPath = null)
+    {
+        string dir = string.IsNullOrEmpty(parentPath) ? Root : parentPath!;
+        try { Directory.CreateDirectory(dir); } catch (Exception) { }
+        string candidate = Path.Combine(dir, baseName + CanvasStore.Extension);
+        for (int i = 2; File.Exists(candidate) && i < 10000; i++)
+            candidate = Path.Combine(dir, $"{baseName} ({i}){CanvasStore.Extension}");
+        return candidate;
+    }
+
+    /// <summary>建一份空白画布并落盘，返回文件路径；写失败返回 null。
+    /// 先落盘再交给界面：这样列表刷新能立刻看到它，也不会出现"内存里有一份、盘上没有"的悬空画布。</summary>
+    public static string? CreateEmpty(string? baseName = null, string? parentPath = null)
+    {
+        string path = NewCanvasPath(string.IsNullOrWhiteSpace(baseName) ? "未命名" : baseName!.Trim(), parentPath);
+        try
+        {
+            if (CanvasStore.SaveFile(path, new CanvasDoc())) return path;
+        }
+        catch (Exception) { }
+        return null;
+    }
+
+    // ---------------- 资源管理器操作（新建文件夹 / 重命名 / 删除） ----------------
+
+    /// <summary>在库里新建子文件夹，<paramref name="parentPath"/> 为 null = 库根。
+    /// 重名时自动加序号（新建文件夹 / 新建文件夹 (2)，与资源管理器一致）：新建不进入行内改名，
+    /// 名字当场就是最终的，所以更不能因为重名就失败一次。</summary>
+    public static string? CreateFolder(string? parentPath, string baseName)
+    {
+        string parent = string.IsNullOrEmpty(parentPath) ? Root : parentPath!;
+        if (!IsInsideRoot(parent) || !IsNameValid(baseName)) return null;
+        string name = baseName.Trim();
+
+        for (int i = 1; i < 10000; i++)
+        {
+            string path;
+            try { path = Path.Combine(parent, i == 1 ? name : $"{name} ({i})"); }
+            catch (Exception) { return null; }
+            if (Directory.Exists(path) || File.Exists(path)) continue;
+            try
+            {
+                Directory.CreateDirectory(path);
+                return path;
+            }
+            catch (Exception) { return null; }
+        }
+        return null;
+    }
+
+    /// <summary>改名（文件或文件夹）。返回新路径；名字非法 / 目标已存在 / 容器目录本身不可改名时返回 null。
+    /// 画布的扩展名由调用方补：用户敲 "笔记" 得到 笔记.gcanvas，敲 "笔记.gcanvas" 不会变成 笔记.gcanvas.gcanvas。</summary>
+    public static string? Rename(string path, bool isFolder, string? newName)
+    {
+        if (string.IsNullOrEmpty(path) || !IsInsideRoot(path)) return null;
+        if (string.Equals(path, Root, StringComparison.OrdinalIgnoreCase)) return null;   // 库根不可改名
+        if (!IsNameValid(newName)) return null;
+
+        string name = newName!.Trim();
+        if (!isFolder && !name.EndsWith(CanvasStore.Extension, StringComparison.OrdinalIgnoreCase))
+            name += CanvasStore.Extension;
+
+        string? parent = Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(parent)) return null;
+        string target = Path.Combine(parent, name);
+        if (string.Equals(target, path, StringComparison.OrdinalIgnoreCase)) return path;    // 名字没变
+        try
+        {
+            // 同层重名：文件和文件夹都算冲突（Windows 下本来就不允许同名共存）。
+            if (Directory.Exists(target) || File.Exists(target)) return null;
+            if (isFolder) Directory.Move(path, target);
+            else File.Move(path, target);
+            return target;
+        }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>删除（送回收站）。返回 false = 被拒绝/占用，调用方保留原状。</summary>
+    public static bool Delete(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !IsInsideRoot(path)) return false;
+        if (string.Equals(path, Root, StringComparison.OrdinalIgnoreCase)) return false;
+        return Interop.ShellFileOps.MoveToRecycleBin(path);
+    }
+
+    /// <summary>名字合法性：非空、不含路径分隔符与 Windows 非法字符、不是 . / ..、长度不超过 100。
+    /// 只校验名字本身 —— 路径由调用方给定，这里不做"从文本解析路径"的推断。</summary>
+    public static bool IsNameValid(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        string n = name.Trim();
+        if (n.Length > 100) return false;
+        if (n is "." or "..") return false;
+        foreach (char c in n)
+        {
+            if (c == Path.DirectorySeparatorChar || c == Path.AltDirectorySeparatorChar) return false;
+            if (Array.IndexOf(Path.GetInvalidFileNameChars(), c) >= 0) return false;
+        }
+        return true;
+    }
+
+    /// <summary>路径必须落在库根之内（含根自身）。用"根 + 分隔符"前缀比较，
+    /// 否则 D:\...\Canvases2 会被误判成 Canvases 里面。</summary>
+    public static bool IsInsideRoot(string path)
+    {
+        try
+        {
+            string root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar);
+            string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+            if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase)) return true;
+            return full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception) { return false; }
+    }
+}

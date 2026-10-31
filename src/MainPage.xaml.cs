@@ -206,11 +206,20 @@ public sealed partial class MainPage : Page
     {
         public Border Capsule = null!;
         public TranslateTransform Transform = null!;
-        public DispatcherTimer Timer = null!;
+        public DispatcherTimer? Timer;   // 常驻胶囊没有计时器（不会自己消失）
         public Storyboard? SlideSb;   // 进行中的位移动画，重定位前先停，避免同属性双动画冲突
         public int Pos;
+
+        /// <summary>常驻（不会自己消失、点了也不消失、不参与栈深淘汰）。画布缺失提示用。</summary>
+        public bool Sticky;
     }
     private readonly List<SaveToastItem> _saveToasts = new();
+
+    /// <summary>左下角那枚常驻的"画布有缺失"胶囊（null = 没有）。与普通提示同处 <see cref="_saveToasts"/> 栈里。</summary>
+    private SaveToastItem? _canvasMissingToast;
+
+    /// <summary>构造常驻胶囊时的主题（深/浅）。图标色是按主题算死的，换主题就得重建。</summary>
+    private bool _canvasMissingToastDark;
     private const int SaveToastMax = 5;          // 栈深上限：超出即强制淡出最旧一枚
     private const double SaveToastSlot = 50;
     private const double SaveToastSlideMs = 160;
@@ -357,11 +366,28 @@ public sealed partial class MainPage : Page
         SidebarSplitView.PaneOpening += (s, e) => QueueSidebarReanchor();
         SidebarSplitView.PaneClosing += (s, e) => QueueSidebarReanchor();
         SidebarSplitView.PaneOpened += (s, e) => UpdateSidebarTopInset();   // 展开后按实测工具栏高度让出顶部空间
+        // 右侧画布面板：同一套"不改变阅读位置"的重锚 + 顶部让位（两者共用 UpdateSidebarTopInset）。
+        CanvasPanelSplitView.PaneOpening += (s, e) => QueueSidebarReanchor();
+        CanvasPanelSplitView.PaneClosing += (s, e) => QueueSidebarReanchor();
+        CanvasPanelSplitView.PaneOpened += (s, e) => UpdateSidebarTopInset();
         // 主题切换（设置面板选择/跟随系统变化）时刷新画笔胶囊的选中提示色，
         this.ActualThemeChanged += (s, e) => RefreshPenOptionThemeHighlights();
         this.ActualThemeChanged += (s, e) => UpdateSidebarBackground();
         // 构造期首帧即上色（ActualThemeChanged 不保证首帧触发）；不依赖 XAML 主题键，规避主题切换错乱根因。
         UpdateSidebarBackground();
+        // 画布面板的静态文案在这里落一次；树内容随"打开文档"刷新（见 RefreshCanvasTree）。
+        if (CanvasPanelHeaderText != null) CanvasPanelHeaderText.Text = LocalizationService.Get("CanvasPanelTitle");
+        // 列表的数据源恒为 _canvasRows（拍平后的可见行）：增删都靠差分就地改这个集合，容器与滚动位置才保得住。
+        if (CanvasRowList != null) CanvasRowList.ItemsSource = _canvasRows;
+        // 展开状态跨会话恢复：先把上次离开时的展开集合装回来，第一次 BuildTree 就直接是那个样子。
+        foreach (string folder in _settingsService.CanvasExpandedFolders)
+        {
+            if (!string.IsNullOrWhiteSpace(folder)) _expandedCanvasFolders.Add(folder);
+        }
+        // 菜单关掉后清掉"为了菜单而保留的"悬浮态（菜单开着时故意不清，见 CanvasRow_PointerExited）。
+        if (CanvasContextMenu != null)
+            CanvasContextMenu.Closed += (s, e) => { _hoverCanvasNode = null; UpdateCanvasRowBackgrounds(); };
+        SetupCanvasWatcher();
     }
 
     // 侧边栏开关的重锚触发点：过渡起点事件之后排一个 Low 回合再重锚。
@@ -392,9 +418,48 @@ public sealed partial class MainPage : Page
         if (ThumbnailSidebarPanel == null) return;
         var isDark = ((Application.Current as App)?.MainWindow as MainWindow)?.IsDarkTheme
                      ?? (ActualTheme == ElementTheme.Dark);
-        ThumbnailSidebarPanel.Background = isDark
-            ? new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x2A, 0x2A, 0x2A))
-            : new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xEA, 0xEA, 0xEA));
+        var color = isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x2A, 0x2A, 0x2A)
+            : Windows.UI.Color.FromArgb(0xFF, 0xEA, 0xEA, 0xEA);
+        ThumbnailSidebarPanel.Background = new SolidColorBrush(color);
+        // 右侧画布面板用独立画刷实例（不共享）：共享同一实例在主题切换瞬间会让两个面板一起跳色。
+        if (CanvasPanelRoot != null) CanvasPanelRoot.Background = new SolidColorBrush(color);
+        // 资源管理器一行的底色。同一支画刷实例改 Color ⇒ 所有行同步跟随，不必重建树。
+        // 悬浮/按下：悬浮比面板底色亮一档，按下比悬浮暗一档。选中另有两档（单选灰 / 多选紫），见下。
+        _canvasRowHoverBrush = SetCanvasRowBrush("CanvasRowHoverBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x34, 0x34, 0x34)
+            : Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2));
+        _canvasRowPressedBrush = SetCanvasRowBrush("CanvasRowPressedBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x2E, 0x2E, 0x2E)
+            : Windows.UI.Color.FromArgb(0xFF, 0xE0, 0xE0, 0xE0));
+        // 激活态用行首竖条表达（不占底色）：强调紫与"多选淡染"是两套视觉，互不冒充。
+        // 竖条那支画刷由行模板用 {StaticResource} 直接引用，这里只改它的 Color，不需要缓存实例。
+        SetCanvasRowBrush("CanvasRowActiveBarBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0xA8, 0x82, 0xFF)
+            : Windows.UI.Color.FromArgb(0xFF, 0x98, 0x73, 0xF7));
+        // 单选底：普通点击选中的那一行。它只表达"这一行被选中"，不含激活态 ——
+        // 激活态走行首竖条，于是"点 A"会同时出现灰底（选中）与竖条（开着），两者互不顶替。
+        _canvasRowSelectedBrush = SetCanvasRowBrush("CanvasRowSelectedBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x3E, 0x3E, 0x42)
+            : Windows.UI.Color.FromArgb(0xFF, 0xFB, 0xFB, 0xFB));
+        // 多选底 = 强调紫（#A882FF / #9873F7）以约 22% 压到面板底色上，深色下再压暗一点：
+        // 直接铺满强调色会把行文字吃掉，这里的角色是"淡染",要和单选底的中性浅色一眼分得开。
+        _canvasRowMultiSelectBrush = SetCanvasRowBrush("CanvasRowMultiSelectBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x49, 0x40, 0x5F)
+            : Windows.UI.Color.FromArgb(0xFF, 0xD8, 0xD0, 0xED));
+        // 换色后所有行的底色引用不变（同一支实例），但要重算一次：选中/激活的判定要重新落到新实例上。
+        UpdateCanvasRowBackgrounds();
+        // 画布缺失胶囊的图标色是按主题算出来的（见 BuildToastCapsule），主题变了要按新主题重建一枚。
+        SyncCanvasMissingToast();
+    }
+
+    /// <summary>改资源里那支画刷的颜色并把它交回调用方缓存 —— 行底色每次都去 Resources 查一遍太浪费，
+    /// 而换主题只改 Color、不换实例，缓存因此不会失效。</summary>
+    private SolidColorBrush? SetCanvasRowBrush(string key, Windows.UI.Color color)
+    {
+        if (!Resources.TryGetValue(key, out object? value) || value is not SolidColorBrush brush) return null;
+        brush.Color = color;
+        return brush;
     }
 
     /// 工具栏内任意按钮点击后的焦点剥夺处理。
@@ -568,6 +633,8 @@ public sealed partial class MainPage : Page
 
         // 接管普通功能按钮（非选中态）的视觉输出 —— 仅推广点击光效、不改颜色，与 ToggleButton 同源。
         ToggleButtonVisualOverride.Attach(ToggleSidebarButton);
+        // 右侧画布面板按钮与左侧边栏按钮完全同源：同样的 hover / pressed 光效 + accent 紫选中态。
+        ToggleButtonVisualOverride.Attach(ToggleCanvasPanelButton);
         ButtonVisualOverride.Attach(PrevPageButton);
         ButtonVisualOverride.Attach(NextPageButton);
         ButtonVisualOverride.Attach(RotateButton);
@@ -1078,6 +1145,8 @@ public sealed partial class MainPage : Page
             LayoutMode = (int)GpuViewer.LayoutMode,
             Arrangement = (int)GpuViewer.Arrangement,
             SidebarOpen = SidebarSplitView.IsPaneOpen,
+            CanvasPath = _currentCanvasPath ?? "",
+            CanvasPanelOpen = CanvasPanelSplitView.IsPaneOpen,
             SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
         // 窗口几何由 MainWindow 填写（只有它持有 AppWindow）：普通状态取 AppWindow.Position/Size，
@@ -1104,6 +1173,9 @@ public sealed partial class MainPage : Page
     {
         // 退出前落白板；"不保存退出"已清掉脏标记，此处不会写。
         FlushCanvas();
+
+        // 目录监听必须在进程退出前释放：句柄不关会让可执行目录被占用。
+        DisposeCanvasWatcher();
 
         // 退出前先保存阅读位置/缩放（此时 GpuViewer 仍存活，可安全读取视图状态）。
         SaveCurrentViewState();
@@ -1466,13 +1538,13 @@ public sealed partial class MainPage : Page
             _annotationsDirty = false;
             HasUnsavedChanges = false;
 
-            // 退出流程：文件已导出，不再把引擎切到副本（进程随即结束），白板仍要跟到新文件名旁。
+            // 退出流程：文件已导出，不再把引擎切到副本（进程随即结束）。
+            // 画布是库里的独立文件、不跟文档改名，故这里无需任何搬运。
             if (onExit)
             {
                 _currentPdfPath = file.Path;
                 _canOverwriteOriginal = IsFileOverwritable(_currentPdfPath);
                 _currentPdfPassword = null;
-                CopyCanvasTo(_currentPdfPath);
                 return true;
             }
 
@@ -1487,7 +1559,6 @@ public sealed partial class MainPage : Page
                 GpuViewer.InvalidateOverlayThrottled();
 
                 _currentPdfPath = file.Path;
-                CopyCanvasTo(_currentPdfPath);
                 _canOverwriteOriginal = IsFileOverwritable(_currentPdfPath);
                 _currentPdfPassword = null;
                 UpdateWindowTitle(file.Name);
@@ -1873,6 +1944,19 @@ public sealed partial class MainPage : Page
             var savedVs = DocumentStore.LoadViewState(_currentPdfPath);
             SidebarSplitView.IsPaneOpen = savedVs?.SidebarOpen == true;
             if (ToggleSidebarButton != null) ToggleSidebarButton.IsChecked = SidebarSplitView.IsPaneOpen;
+            // 右侧画布面板的开关与打开的画布都随文档记忆（退出时由 SaveCurrentViewState 写入）。
+            CanvasPanelSplitView.IsPaneOpen = savedVs?.CanvasPanelOpen == true;
+            if (ToggleCanvasPanelButton != null) ToggleCanvasPanelButton.IsChecked = CanvasPanelSplitView.IsPaneOpen;
+            // 画布：恢复"上次盖在这份文档上的那一份"。文件已不存在（被删/改名/换了机器）⇒ 退回没盖画布，
+            // 画布库里的数据本身不受影响，去右侧面板重新选一份即可。
+            _currentCanvasPath = savedVs?.CanvasPath;
+            if (!string.IsNullOrEmpty(_currentCanvasPath) && !File.Exists(_currentCanvasPath))
+                _currentCanvasPath = null;
+            _canvasDirty = false;
+            RefreshCanvasTree();
+            // 面板的开关状态是按文档记的，这条路径（打开文档时直接展开）不会经过标题栏开关，
+            // 所以这里也要还原一次视口位置，否则"上次明明是开着面板关的"就总是回到左上角。
+            ApplySavedCanvasPanelScroll();
             SetToolbarItemAppVisible(SaveButton, true);
             if (PrintButton != null) SetToolbarItemAppVisible(PrintButton, true);
             if (SplitViewToggleButton != null) SetToolbarItemAppVisible(SplitViewToggleButton, true);
@@ -2558,6 +2642,17 @@ public sealed partial class MainPage : Page
 
             // 画笔模式圆环作用域由 SetSystemCursor + 窗口内/前台判定实现（见 UpdateRingScope），
 
+            // 关窗前把右侧面板的会话状态（展开的文件夹 + 视口位置）一次性写回设置。
+            // 用 AppWindow.Closing 而不是 Closed：那一刻窗口内容还在，能读到真实的滚动偏移；
+            // Closed 时视觉树可能已经拆解，读到的视口是 0，会把用户记住的位置抹成左上角。
+            try
+            {
+                mainWindow.AppWindow.Closing += (s, e) => SaveCanvasPanelStateAtExit(allowScroll: true);
+            }
+            catch { }
+            // 兜底：万一 Closing 没走到，也只补写"展开的文件夹"，偏移一律沿用上次存的值。
+            mainWindow.Closed += (s, e) => SaveCanvasPanelStateAtExit(allowScroll: false);
+
             // 兜底恢复原生光标：窗口关闭/进程终止/未处理异常/卸载任一路径触发即可（重复恢复无害）。
             mainWindow.Closed += (s, e) => RestoreNativeCursor();
             try
@@ -2585,18 +2680,41 @@ public sealed partial class MainPage : Page
         Error,
         Bookmark,  // StarFilled \uE735，#F2C200（与收藏按钮同符号同色）
         Remove,    // Delete \uE74D，中性灰（与书签模式垃圾桶按钮同符号；不用红，红色已被 Error 占用）
+        Warning,   // Warning \uE7BA，琥珀色：介于"成功"与"错误"之间的状态（如画布有缺失）
     }
 
     private void ShowSaveToast(string message, ToastIconKind kind)
     {
+        SaveToastItem item = AddToastCapsule(message, kind, sticky: false);
+        item.Capsule.Tapped += (s, e) => DismissToast(item, animate: true);
+
+        // 独立计时：2s 后自动淡出（自创建起算 → 最旧先到期）
+        item.Timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        var captured = item;
+        item.Timer.Tick += (s, e) => DismissToast(captured, animate: true);
+        item.Timer.Start();
+
+        // 栈深上限只数"会自己消失的"：常驻胶囊不计入、也永远不会被这条淘汰规则丢掉。
+        if (_saveToasts.Count(t => !t.Sticky) > SaveToastMax)
+        {
+            DismissToast(_saveToasts.First(t => !t.Sticky), animate: true);
+        }
+    }
+
+    /// <summary>把一枚胶囊推进左下角的胶囊栈：占住最底格（Pos=0），把已有的一律上推一格，
+    /// 并播放"从下方一格滑入 + 淡入"。返回值交给调用方决定它什么时候走、怎么走。
+    /// 常驻提示与普通提示共用这一条入栈路径 —— 位次、动画、格距、视觉全部同源。</summary>
+    private SaveToastItem AddToastCapsule(string message, ToastIconKind kind, bool sticky)
+    {
         var capsule = BuildToastCapsule(message, kind);
-        var tt = new TranslateTransform { Y = SaveToastSlot }; // 入场前先落在标准位置下方一格
+        // 基值 = 静止格位（0）：动画被停掉时只会停在格位上，不会弹回"下方一格"。
+        // 入场位移由动画的 From 提供。
+        var tt = new TranslateTransform();
         capsule.RenderTransform = tt;
         capsule.Opacity = 0;
         SaveToastStack.Children.Add(capsule);
 
-        var item = new SaveToastItem { Capsule = capsule, Transform = tt, Pos = 0 };
-        capsule.Tapped += (s, e) => DismissToast(item, animate: true);
+        var item = new SaveToastItem { Capsule = capsule, Transform = tt, Pos = 0, Sticky = sticky };
 
         foreach (var existing in _saveToasts)
         {
@@ -2611,7 +2729,7 @@ public sealed partial class MainPage : Page
         Storyboard.SetTargetProperty(op, "Opacity");
         var tr = new DoubleAnimation
         {
-            From = SaveToastSlot,
+            From = SaveToastSlot,   // 起点由动画提供，基值保持 0
             To = 0,
             Duration = TimeSpan.FromMilliseconds(SaveToastSlideMs),
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
@@ -2620,18 +2738,16 @@ public sealed partial class MainPage : Page
         Storyboard.SetTargetProperty(tr, "Y");
         enter.Children.Add(op);
         enter.Children.Add(tr);
+        // 入场结束后把基值对齐到静止态：此后任何 Stop/接替都停在格位上（透明度基值 0 会让胶囊整枚隐形）。
+        // 只在仍处于最底格时回写 Y —— 期间若被别的胶囊挤上去，Y 基值已由 SlideToastTo 接管。
+        enter.Completed += (s, e) =>
+        {
+            capsule.Opacity = 1;
+            if (item.Pos == 0) tt.Y = 0;
+        };
         enter.Begin();
 
-        // 独立计时：2s 后自动淡出（自创建起算 → 最旧先到期）
-        item.Timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        var captured = item;
-        item.Timer.Tick += (s, e) => DismissToast(captured, animate: true);
-        item.Timer.Start();
-
-        if (_saveToasts.Count > SaveToastMax)
-        {
-            DismissToast(_saveToasts[0], animate: true);
-        }
+        return item;
     }
 
     /// <summary>构造一枚与旧单枚胶囊视觉完全一致的提示胶囊（含图标档位 + 主题色）。 背景/边框必须用 XamlReader 加载，使 {ThemeResource} 按元素实际主题解析： 若用 Application.Current.Resources[key] 只会解析到 App.</summary>
@@ -2667,6 +2783,7 @@ public sealed partial class MainPage : Page
             ToastIconKind.Error => "\uE783",
             ToastIconKind.Bookmark => "\uE735",
             ToastIconKind.Remove => "\uE74D",
+            ToastIconKind.Warning => "\uE7BA",
             _ => "\uE73E",
         };
         icon.Foreground = new SolidColorBrush(kind switch
@@ -2678,6 +2795,9 @@ public sealed partial class MainPage : Page
             ToastIconKind.Remove => dark
                 ? Windows.UI.Color.FromArgb(0xFF, 0xB8, 0xB8, 0xB8)
                 : Windows.UI.Color.FromArgb(0xFF, 0x76, 0x76, 0x76),
+            ToastIconKind.Warning => dark
+                ? Windows.UI.Color.FromArgb(0xFF, 0xFC, 0xE1, 0x00)
+                : Windows.UI.Color.FromArgb(0xFF, 0x9D, 0x5D, 0x00),
             _ => dark
                 ? Windows.UI.Color.FromArgb(0xFF, 0x6B, 0xB7, 0x00)
                 : Windows.UI.Color.FromArgb(0xFF, 0x10, 0x7C, 0x10),
@@ -2690,16 +2810,26 @@ public sealed partial class MainPage : Page
         return capsule;
     }
 
-    /// <summary>将胶囊平滑移动到目标格位（Pos），重定位前先停掉进行中的同属性位移动画。</summary>
+    /// <summary>将胶囊平滑移动到目标格位（Pos）。
+    /// Stop() 会把 TranslateTransform.Y 立刻弹回基值 —— 所以必须【先读当前位、再停表】，
+    /// 并把基值钉在这个起点上；否则每次重定位都会从旧的基值重演一遍位移动画
+    /// （表现就是被顶上去的常驻胶囊，每次有人消失都先从"下方一格"飞起来再回到位）。
+    /// 位移只走一格，读到的起点与终点相同就直接返回，免得起一段零距离动画。</summary>
     private void SlideToastTo(SaveToastItem item, int newPos)
     {
+        double to = -newPos * SaveToastSlot;
+        double from = item.Transform.Y;   // 必须在停表之前读：停表后读到的是基值而非视觉位置
         item.Pos = newPos;
-        var to = -newPos * SaveToastSlot;
+
         item.SlideSb?.Stop();
+        item.SlideSb = null;
+        item.Transform.Y = from;          // 基值钉在起点：停表/被新动画接替都不跳位
+        if (Math.Abs(from - to) < 0.5) return;
+
         var sb = new Storyboard();
         var da = new DoubleAnimation
         {
-            From = item.Transform.Y,
+            From = from,
             To = to,
             Duration = TimeSpan.FromMilliseconds(SaveToastSlideMs),
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
@@ -2708,12 +2838,18 @@ public sealed partial class MainPage : Page
         Storyboard.SetTargetProperty(da, "Y");
         sb.Children.Add(da);
         item.SlideSb = sb;
+        sb.Completed += (s, e) =>
+        {
+            if (!ReferenceEquals(item.SlideSb, sb)) return;   // 已被下一次位移动画接管
+            item.SlideSb = null;
+            item.Transform.Y = to;        // 终点回写基值：后续任何 Stop 都停在终点
+        };
         sb.Begin();
     }
 
     private void DismissToast(SaveToastItem item, bool animate)
     {
-        item.Timer.Stop();
+        item.Timer?.Stop();
         if (!_saveToasts.Remove(item)) return;
 
         foreach (var other in _saveToasts)
@@ -3368,6 +3504,7 @@ public sealed partial class MainPage : Page
         if (IsPointerOverScrollBar()) return false;
         if (IsPointerOverCompareView()) return false;
         if (IsPointerOverThumbnailSidebar()) return false;
+        if (IsPointerOverCanvasPanel()) return false;
         if (IsPointerOverSettingsFlyout()) return false;
         return true;
     }
@@ -3580,6 +3717,40 @@ public sealed partial class MainPage : Page
             int top = (int)(origin.Y + tl.Y * scale);
             int right = (int)(origin.X + (tl.X + ThumbnailSidebarPanel.ActualWidth) * scale);
             int bottom = (int)(origin.Y + (tl.Y + ThumbnailSidebarPanel.ActualHeight) * scale);
+            return new RECT { Left = left, Top = top, Right = right, Bottom = bottom };
+        }
+        catch { return null; }
+    }
+
+    // 指针当前是否落在右侧画布面板（资源管理器）区域：那里是面板控件、不是涂画区，与左侧边栏同一处理 ——
+    // 画笔模式下在面板里一律用系统默认箭头，圆环只出现在真正能画的地方。
+    private bool IsPointerOverCanvasPanel()
+    {
+        if (CanvasPanelSplitView == null || CanvasPanelSplitView.Visibility != Visibility.Visible) return false;
+        if (!CanvasPanelSplitView.IsPaneOpen) return false;
+        RECT? r = GetCanvasPanelScreenRect();
+        if (r == null) return false;
+        if (!GetCursorPos(out POINT p)) return false;
+        return p.X >= r.Value.Left && p.X < r.Value.Right && p.Y >= r.Value.Top && p.Y < r.Value.Bottom;
+    }
+
+    // 右侧画布面板(CanvasPanelRoot)的屏幕矩形（物理像素）。算法与 GetThumbnailSidebarScreenRect 完全一致：
+    // TransformToVisual(null) 给的是有效像素，乘 RasterizationScale 才是物理像素，最后加上客户区在屏幕上的原点。
+    private RECT? GetCanvasPanelScreenRect()
+    {
+        try
+        {
+            if (CanvasPanelSplitView == null || CanvasPanelSplitView.Visibility != Visibility.Visible) return null;
+            if (CanvasPanelRoot == null) return null;
+            var transform = CanvasPanelRoot.TransformToVisual(null);
+            Windows.Foundation.Point tl = transform.TransformPoint(new Windows.Foundation.Point(0, 0));
+            double scale = this.XamlRoot?.RasterizationScale ?? 1.0;
+            POINT origin = new POINT { X = 0, Y = 0 };
+            if (!ClientToScreen(_hWnd, ref origin)) return null;
+            int left = (int)(origin.X + tl.X * scale);
+            int top = (int)(origin.Y + tl.Y * scale);
+            int right = (int)(origin.X + (tl.X + CanvasPanelRoot.ActualWidth) * scale);
+            int bottom = (int)(origin.Y + (tl.Y + CanvasPanelRoot.ActualHeight) * scale);
             return new RECT { Left = left, Top = top, Right = right, Bottom = bottom };
         }
         catch { return null; }
@@ -4246,7 +4417,7 @@ public sealed partial class MainPage : Page
 
     private FrameworkElement[] RightToolbarItems() => new FrameworkElement[]
     {
-        RotateButton, LayoutToggleButton, SplitViewToggleButton, SaveButton, PrintButton,
+        ToggleCanvasPanelButton, RotateButton, LayoutToggleButton, SplitViewToggleButton, SaveButton, PrintButton,
         SettingsButton, ToolbarMoreButton
     };
 
@@ -4270,7 +4441,7 @@ public sealed partial class MainPage : Page
 
         _toolbarOverflowCandidates = new FrameworkElement[]
         {
-            PrintButton, SaveButton, SplitViewToggleButton, LayoutToggleButton, RotateButton,
+            PrintButton, SaveButton, SplitViewToggleButton, LayoutToggleButton, ToggleCanvasPanelButton, RotateButton,
             NextPageButton, PrevPageButton,
             TotalPagesText, PageNumberInput, ToolbarModeSeparator, ToggleSidebarButton,
             CanvasModeButton, PenModeButton, ReadModeButton,
@@ -4280,7 +4451,7 @@ public sealed partial class MainPage : Page
         _toolbarMenuOrder = new FrameworkElement[]
         {
             ToggleSidebarButton, PrevPageButton, NextPageButton, ReadModeButton, PenModeButton,
-            CanvasModeButton, RotateButton, LayoutToggleButton, SplitViewToggleButton,
+            CanvasModeButton, ToggleCanvasPanelButton, RotateButton, LayoutToggleButton, SplitViewToggleButton,
             SaveButton, PrintButton, SettingsButton,
         };
 
@@ -4526,6 +4697,7 @@ public sealed partial class MainPage : Page
         if (el == NextPageButton) return "NextPage";
         if (el == PrevPageButton) return "PrevPage";
         if (el == ToggleSidebarButton) return "ToggleSidebar";
+        if (el == ToggleCanvasPanelButton) return "ToggleCanvasPanel";
         if (el == ReadModeButton) return "ReadMode";
         if (el == PenModeButton) return "PenMode";
         if (el == CanvasModeButton) return "CanvasMode";
@@ -4543,6 +4715,7 @@ public sealed partial class MainPage : Page
         if (el == NextPageButton) return FluentFontIcon("\uE70D");
         if (el == PrevPageButton) return FluentFontIcon("\uE70E");
         if (el == ToggleSidebarButton) return FluentFontIcon("\uE90C");
+        if (el == ToggleCanvasPanelButton) return FluentFontIcon("\uE90D");
         if (el == ReadModeButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Read);
         if (el == PenModeButton) return new SymbolIcon(Microsoft.UI.Xaml.Controls.Symbol.Edit);
         if (el == CanvasModeButton) return FluentFontIcon("\uECA5");
@@ -4576,6 +4749,7 @@ public sealed partial class MainPage : Page
         else if (el == NextPageButton) NextPage_Click(this, new RoutedEventArgs());
         else if (el == PrevPageButton) PrevPage_Click(this, new RoutedEventArgs());
         else if (el == ToggleSidebarButton) ToggleSidebar_Click(this, new RoutedEventArgs());
+        else if (el == ToggleCanvasPanelButton) ToggleCanvasPanel_Click(this, new RoutedEventArgs());
         else if (el == ReadModeButton) ReadMode_Click(this, new RoutedEventArgs());
         else if (el == PenModeButton) PenMode_Click(this, new RoutedEventArgs());
         else if (el == CanvasModeButton) CanvasMode_Click(this, new RoutedEventArgs());
@@ -4633,6 +4807,14 @@ public sealed partial class MainPage : Page
         var p = ThumbnailSidebarPanel.Padding;
         if (Math.Abs(p.Top - top) > 0.5)
             ThumbnailSidebarPanel.Padding = new Thickness(p.Left, top, p.Right, p.Bottom);
+
+        // 右侧画布面板同一个顶部让位量：两者都在 ZIndex=50 的工具栏之下，必须让开同一条带。
+        if (CanvasPanelRoot != null)
+        {
+            var cp = CanvasPanelRoot.Padding;
+            if (Math.Abs(cp.Top - top) > 0.5)
+                CanvasPanelRoot.Padding = new Thickness(cp.Left, top, cp.Right, cp.Bottom);
+        }
 
         UpdateCanvasViewportInsets();   // 顶栏高度变了 ⇒ 白板悬浮胶囊的安全区也要跟着变
     }
@@ -5535,15 +5717,39 @@ public sealed partial class MainPage : Page
         finally { SuppressAnnotationDirty = false; }
     }
 
-/// <summary>白板（Canvas 模式）：从 &lt;pdf&gt;.gcanvas 读取卡片与连线，保留模型供交互改写， 并把当前数组交给 GpuViewer 渲染。内存模型是唯一真相源，交互只置脏、不落盘； 写入时机全在 FlushCanvas（显式保存 / 切换文档 / 退出保存）。</summary>
+    /// <summary>当前盖在这个文档上的画布文件路径（空 = 没盖画布）。画布与 PDF 之间没有任何绑定关系，
+    /// 这只是"上次用了哪份"的记忆项：随时可在右侧面板换一份，画布被删/改名后指向失效就退回空。</summary>
+    private string? _currentCanvasPath;
+
+    /// <summary>画布库目录监听与它的防抖定时器（见 SetupCanvasWatcher）。
+    /// 定时器类型写全名：Windows.System 里也有一个 DispatcherQueueTimer，简写会 CS0104 二义。</summary>
+    private FileSystemWatcher? _canvasWatcher;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _canvasRefreshTimer;
+
+    /// <summary>白板（Canvas 模式）：从当前画布文件读取卡片与连线，保留模型供交互改写，并把当前数组交给 GpuViewer 渲染。
+    /// 内存模型是唯一真相源，交互只置脏、不落盘；写入时机全在 FlushCanvas（显式保存 / 切换文档 / 切换画布 / 退出保存）。</summary>
     private void LoadCanvasForCurrentDocument()
     {
         CanvasDoc? doc = null;
-        try { doc = CanvasStore.Load(_currentPdfPath); }
+        try { doc = CanvasStore.LoadFile(_currentCanvasPath); }
         catch { }
         _canvasDoc = doc ?? new CanvasDoc();
         _canvasDirty = false;
         GpuViewer.SetCanvasData(_canvasDoc.Nodes, _canvasDoc.Edges);
+        SyncCanvasMissingToast();
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>把某份画布盖到当前文档上（null = 撤掉画布）。同一份画布可以盖到任意文档，卡片的页归属
+    /// 永远按【当前文档】的页码解释。顺序不可反：先把旧画布写回它自己的文件再换指针，否则旧画布的最后一次编辑会丢。</summary>
+    private void ApplyCanvas(string? canvasPath)
+    {
+        string? next = string.IsNullOrEmpty(canvasPath) ? null : canvasPath;
+        if (string.Equals(_currentCanvasPath, next, StringComparison.OrdinalIgnoreCase)) return;
+        FlushCanvas();
+        _currentCanvasPath = next;
+        LoadCanvasForCurrentDocument();
+        SaveCurrentViewState();
     }
 
     // ---- 白板模型与交互（P2）：数据/历史留在 MainPage，GpuPageView 只发事件 ----
@@ -5572,17 +5778,26 @@ public sealed partial class MainPage : Page
         HasUnsavedChanges = true;
     }
 
-    /// <summary>把脏掉的白板写回当前 PDF 同名的 .gcanvas。写失败保持脏标记，留给下一次保存重试。
-    /// 返回"白板已落盘"（无脏标记也算成功），仅供需要报告保存结果的调用方使用。</summary>
+    /// <summary>把脏掉的白板写回【当前画布自己的文件】。写失败保持脏标记，留给下一次保存重试。
+    /// 当前没盖画布却已经有内容时先自动建一份再写：用户可能在没选画布的情况下就画了，
+    /// 直接丢弃等于把他的工作扔掉。返回"白板已落盘"（无脏标记也算成功）。</summary>
     private bool FlushCanvas()
     {
         if (!_canvasDirty) return true;
-        if (_canvasDoc == null || string.IsNullOrEmpty(_currentPdfPath)) return false;
+        if (_canvasDoc == null) return false;
+        if (string.IsNullOrEmpty(_currentCanvasPath))
+        {
+            string? created = CanvasLibrary.CreateEmpty();
+            if (created == null) return false;
+            _currentCanvasPath = created;
+            RefreshCanvasTree();
+        }
         try
         {
-            if (CanvasStore.Save(_currentPdfPath, _canvasDoc))
+            if (CanvasStore.SaveFile(_currentCanvasPath, _canvasDoc))
             {
                 _canvasDirty = false;
+                UpdateCanvasRowBackgrounds();
                 return true;
             }
         }
@@ -5590,12 +5805,900 @@ public sealed partial class MainPage : Page
         return false;
     }
 
-    /// <summary>另存为后把白板跟到副本旁边：活动文档已指向新文件名，白板不能留在旧名字下。</summary>
-    private void CopyCanvasTo(string pdfPath)
+    // ---------------- 右侧画布面板（画布库） ----------------
+
+    /// <summary>右侧画布面板开关。与左侧边栏同一套"不改变阅读位置"的处理：翻转前先冻结视口锚点，
+    /// 展开/收起后按新视口重锚 —— 否则面板进出时 PDF 会整体跳一下。</summary>
+    private void ToggleCanvasPanel_Click(object sender, RoutedEventArgs e)
     {
-        if (_canvasDoc == null || string.IsNullOrEmpty(pdfPath)) return;
-        if (_canvasDoc.Nodes.Count == 0 && _canvasDoc.Edges.Count == 0) return;
-        try { if (CanvasStore.Save(pdfPath, _canvasDoc)) _canvasDirty = false; } catch { }
+        // 欢迎页（未打开文档）时与左侧按钮一致：按钮可见但点击完全无效。
+        if (CanvasPanelSplitView == null || SidebarSplitView == null || SidebarSplitView.Visibility != Visibility.Visible)
+        {
+            if (ToggleCanvasPanelButton != null) ToggleCanvasPanelButton.IsChecked = CanvasPanelSplitView?.IsPaneOpen ?? false;
+            return;
+        }
+        GpuViewer?.CaptureHostResizeAnchor();
+        CanvasPanelSplitView.IsPaneOpen = !CanvasPanelSplitView.IsPaneOpen;
+        if (ToggleCanvasPanelButton != null) ToggleCanvasPanelButton.IsChecked = CanvasPanelSplitView.IsPaneOpen;
+        // 每次展开都重扫目录：用户可能在文件管理器里新建/删掉过画布，面板不该只显示启动时的快照。
+        if (CanvasPanelSplitView.IsPaneOpen)
+        {
+            RefreshCanvasTree();
+            // 展开后把上次退出时的视口位置放回去（横向纵向都算）。
+            // 只在"这次是打开动作"时做，磁盘监听之类的重扫不会把用户刚滚到的位置弹回去。
+            ApplySavedCanvasPanelScroll();
+        }
+    }
+
+    /// <summary>已展开的文件夹路径。展开是模型上的属性，重建/同步都按它恢复。</summary>
+    private readonly HashSet<string> _expandedCanvasFolders = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>根层节点（树）。整棵树只在"打开文档 / 展开面板"时重建，磁盘变动走 RefreshCanvasFolder 打补丁。</summary>
+    private ObservableCollection<CanvasTreeNode> _canvasRoots = new();
+
+    /// <summary>拍平后的可见行（展开的文件夹把子项摊进来）。列表只认这一份 —— 层级完全由我们自己算，
+    /// 不借框架的树控件，也就不存在"框架的选中态/焦点态"来抢高亮、抢键盘。</summary>
+    private readonly ObservableCollection<CanvasTreeNode> _canvasRows = new();
+
+    /// <summary>指针悬浮 / 按下的行。激活行由"当前画布路径"决定，三者互斥后统一上色。</summary>
+    private CanvasTreeNode? _hoverCanvasNode;
+    private CanvasTreeNode? _pressedCanvasNode;
+
+    /// <summary>多选集合（Ctrl 点选 / Shift 连选）。它是纯 UI 状态，不放模型里：
+    /// 行节点实例在增量同步中是复用的，所以按引用记就够，不必给节点加一个"选中"字段。
+    /// 语义上只表示"这一批行被勾中、批量操作作用于此"，与"哪份画布盖在 PDF 上"（激活行）互不替代。</summary>
+    private readonly HashSet<CanvasTreeNode> _selectedCanvasNodes = new();
+
+    /// <summary>连选的锚点：Shift+点击的起点。每次"普通点击 / Ctrl 点选"重定锚，
+    /// Shift 点击只挪范围不挪锚 —— 否则连按几次 Shift 会打滑（每次都从上一格重新起算）。</summary>
+    private CanvasTreeNode? _canvasSelectionAnchor;
+
+    /// <summary>当前选择是"普通点击选出的单个"还是"Ctrl/Shift 选出的批"。
+    /// 只影响底色：单个走中性灰底（与旧的选中态一致），成批走强调紫底。
+    /// 它不参与"哪些行被选中"的判定 —— 那个只有 _selectedCanvasNodes 一份真相。
+    /// 普通点击会把这一行真的放进集合，所以"点 A 再 Ctrl 点 B"天然包含 A，不需要额外的补录状态。</summary>
+    private bool _canvasSingleSelection;
+
+    private SolidColorBrush? _canvasRowHoverBrush;
+    private SolidColorBrush? _canvasRowPressedBrush;
+    private SolidColorBrush? _canvasRowSelectedBrush;
+    private SolidColorBrush? _canvasRowMultiSelectBrush;
+
+    /// <summary>整棵树重建（换文档、展开面板时用）。</summary>
+    private void RefreshCanvasTree()
+    {
+        if (CanvasRowList == null) return;
+        _canvasRoots = CanvasLibrary.BuildTree(_expandedCanvasFolders);
+        SyncCanvasRows();
+    }
+
+    /// <summary>把上次退出时的视口位置放回去（横向纵向都算）。
+    /// 面板刚展开时 SplitView 还在做展开动画、ListView 也还没落版 —— 此刻视口宽高是 0，
+    /// ChangeView 会被夹成 0，等于白还原，所以按 50ms 跨帧重试，等真的有了视口再滚。</summary>
+    private void ApplySavedCanvasPanelScroll()
+    {
+        if (CanvasRowList == null) return;
+        if (CanvasPanelSplitView is not { IsPaneOpen: true }) return;
+
+        double x = _settingsService.CanvasPanelScrollX;
+        double y = _settingsService.CanvasPanelScrollY;
+        if (x <= 0.5 && y <= 0.5) return;   // 本来就在左上角，没什么可还原
+
+        RetryOnTimer(() =>
+        {
+            if (CanvasRowList == null || CanvasPanelSplitView is not { IsPaneOpen: true }) return true;   // 面板都关了，放弃
+            CanvasRowList.UpdateLayout();
+            if (FindDescendantScrollViewer(CanvasRowList) is not { } sv ||
+                sv.ViewportWidth <= 0 || sv.ViewportHeight <= 0) return false;
+
+            // 光有视口不够：横向 extent 取决于虚拟化后已实例化的最宽一行，刚展开时还没长够，
+            // 这时 ChangeView 会被悄悄夹到当前最大值 —— 等到长够了再下结论，别把夹小的值当成已还原。
+            bool ready = sv.ScrollableWidth + 0.5 >= x && sv.ScrollableHeight + 0.5 >= y;
+            sv.ChangeView(x, y, null, disableAnimation: true);
+            return ready;
+        }, 20);
+    }
+
+    /// <summary>按 50ms 间隔重试，直到 <paramref name="attempt"/> 返回 true 或用尽次数（用尽时跑 onGiveUp）。
+    /// 必须跨帧重试：面板展开动画、虚拟化行的实例化都要等下一轮（甚至几十轮）布局之后才就绪，
+    /// 而往调度队列里排 Low 优先级仍然是"同一帧内"的事 —— 排几次都还是没就绪。</summary>
+    private void RetryOnTimer(Func<bool> attempt, int tries, Action? onGiveUp = null)
+    {
+        if (attempt()) return;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        timer.Tick += (s, e) =>
+        {
+            if (attempt()) { timer.Stop(); return; }
+            if (--tries > 0) return;
+            timer.Stop();
+            onGiveUp?.Invoke();
+        };
+        timer.Start();
+    }
+
+    /// <summary>退出时把右侧面板的会话状态（展开的文件夹 + 视口位置）一次性写回设置。
+    /// 平时一概不写盘：滚动是高频事件，逐次落盘只为记住"最终停在哪儿"，那是退出时才知道的事。
+    /// 取不到有效视口（面板没开 / 已拆解）就沿用上次存的偏移，绝不拿 0 把用户的位置抹掉。</summary>
+    private void SaveCanvasPanelStateAtExit(bool allowScroll)
+    {
+        double x = _settingsService.CanvasPanelScrollX;
+        double y = _settingsService.CanvasPanelScrollY;
+
+        if (allowScroll && CanvasPanelSplitView is { IsPaneOpen: true } && CanvasRowList != null &&
+            FindDescendantScrollViewer(CanvasRowList) is { } sv &&
+            sv.ViewportWidth > 0 && sv.ViewportHeight > 0)
+        {
+            x = sv.HorizontalOffset;
+            y = sv.VerticalOffset;
+        }
+
+        _settingsService.SaveCanvasPanelState(_expandedCanvasFolders, x, y);
+    }
+
+    /// <summary>只同步库里某一个目录这一层（磁盘变动用）：只增删变动的那几行，其余行、展开态、滚动位置都不动。
+    /// 找不到该目录（上级被整体删掉/改名）时退回整树重建。</summary>
+    private void RefreshCanvasFolder(string dirPath)
+    {
+        if (CanvasRowList == null) return;
+
+        ObservableCollection<CanvasTreeNode>? target;
+        int depth;
+        if (string.Equals(dirPath, CanvasLibrary.Root, StringComparison.OrdinalIgnoreCase))
+        {
+            target = _canvasRoots;
+            depth = 0;
+        }
+        else
+        {
+            var folder = FindCanvasFolder(_canvasRoots, dirPath);
+            target = folder?.Children;
+            depth = (folder?.Depth ?? 0) + 1;
+        }
+        if (target == null) { RefreshCanvasTree(); return; }
+
+        CanvasLibrary.SyncChildren(target, dirPath, _expandedCanvasFolders, depth);
+        SyncCanvasRows();
+    }
+
+    /// <summary>把树拍平成可见行并就地同步进列表（增删而非整体替换）：容器与滚动位置都保住。</summary>
+    private void SyncCanvasRows()
+    {
+        var desired = new List<CanvasTreeNode>();
+        FlattenCanvasRows(_canvasRoots, desired);
+
+        for (int i = _canvasRows.Count - 1; i >= 0; i--)
+        {
+            if (!desired.Contains(_canvasRows[i])) _canvasRows.RemoveAt(i);
+        }
+
+        for (int i = 0; i < desired.Count; i++)
+        {
+            if (i < _canvasRows.Count && ReferenceEquals(_canvasRows[i], desired[i])) continue;
+
+            int found = _canvasRows.IndexOf(desired[i]);
+            if (found >= 0) _canvasRows.Move(found, i);
+            else _canvasRows.Insert(i, desired[i]);
+        }
+
+        // 悬浮/按下的行若已经不在列表里（收起、删除），别把状态挂在它身上
+        if (_hoverCanvasNode != null && !_canvasRows.Contains(_hoverCanvasNode)) _hoverCanvasNode = null;
+        if (_pressedCanvasNode != null && !_canvasRows.Contains(_pressedCanvasNode)) _pressedCanvasNode = null;
+
+        // 选中集合同理：删除、改名（换路径 ⇒ 换节点实例）、收起父文件夹都会让旧节点从行集合里消失。
+        // 不剪枝的话集合会越攒越大，批量删除时还会去删一个已经不存在的路径。
+        if (_selectedCanvasNodes.Count > 0) _selectedCanvasNodes.RemoveWhere(n => !_canvasRows.Contains(n));
+        if (_canvasSelectionAnchor != null && !_canvasRows.Contains(_canvasSelectionAnchor))
+            _canvasSelectionAnchor = null;
+        if (_selectedCanvasNodes.Count == 0) _canvasSingleSelection = false;   // 空集合没有"单选/多选"可言
+
+        UpdateCanvasRowBackgrounds();
+    }
+
+    private static void FlattenCanvasRows(IEnumerable<CanvasTreeNode> nodes, List<CanvasTreeNode> into)
+    {
+        foreach (var n in nodes)
+        {
+            into.Add(n);
+            if (n.IsFolder && n.IsExpanded) FlattenCanvasRows(n.Children, into);
+        }
+    }
+
+    /// <summary>行的两种状态分开表达，各自只走一条通道：
+    /// · 激活（= 盖在 PDF 上的那份）→ 行首强调色竖条，由 <see cref="CanvasTreeNode.IsActive"/> 单独驱动；
+    /// · 选中（= 可以被批量操作的那几行）→ 整行底色：单选一行为中性灰（与旧选中态一致），成批为强调紫。
+    /// 底色只表达选中、不表达激活，所以"点 A"能同时给出灰底（选中）与竖条（开着），两件事各自可见。
+    /// 底色优先级：选中 &gt; 按下 &gt; 悬浮，空白 = 透明。</summary>
+    private void UpdateCanvasRowBackgrounds()
+    {
+        foreach (var row in _canvasRows)
+        {
+            row.IsActive = IsActiveCanvas(row);
+            row.RowBackground =
+                _selectedCanvasNodes.Contains(row)
+                    ? (_canvasSingleSelection ? _canvasRowSelectedBrush : _canvasRowMultiSelectBrush)
+                : ReferenceEquals(row, _pressedCanvasNode) ? _canvasRowPressedBrush
+                : ReferenceEquals(row, _hoverCanvasNode) ? _canvasRowHoverBrush
+                : null;
+        }
+    }
+
+    private bool IsActiveCanvas(CanvasTreeNode row)
+        => !row.IsFolder
+           && !string.IsNullOrEmpty(_currentCanvasPath)
+           && string.Equals(row.FullPath, _currentCanvasPath, StringComparison.OrdinalIgnoreCase);
+
+    private static CanvasTreeNode? FindCanvasFolder(IEnumerable<CanvasTreeNode> nodes, string path)
+    {
+        foreach (var n in nodes)
+        {
+            if (!n.IsFolder) continue;
+            if (string.Equals(n.FullPath, path, StringComparison.OrdinalIgnoreCase)) return n;
+            var hit = FindCanvasFolder(n.Children, path);
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
+    /// <summary>画布里有卡片的页码超出本文档页数时，在左下角胶囊栈里常驻一枚"画布有缺失"。
+    /// 那些卡片既不绘制也点不到 —— 静默吞掉会让用户以为卡片丢了；但提示不能进右侧列表（会把整块内容推下去）。
+    /// 它走的是与保存提示【完全相同】的入栈路径（AddToastCapsule：同位次、同入场动画、同格距、同构造器），
+    /// 只是 Sticky —— 不计时、点了不消失、不参与栈深淘汰；新提示进来把它往上挤一格，提示走光它再落回最底格。</summary>
+    private void SyncCanvasMissingToast()
+    {
+        if (SaveToastStack == null) return;
+
+        int pages = (int)_totalPages;   // _totalPages 是 uint（引擎返回无符号），这里只用于比较
+        bool missing = false;
+        if (_canvasDoc != null && pages > 0)
+        {
+            foreach (var n in _canvasDoc.Nodes)
+            {
+                if (n.GlancePage >= pages) { missing = true; break; }
+            }
+        }
+
+        bool dark = this.ActualTheme == ElementTheme.Dark;
+        // 换主题要重建这一枚：图标色是构造时按主题算死的（底板/描边是 ThemeResource，会自动跟随）。
+        if (_canvasMissingToast != null && _canvasMissingToastDark != dark)
+        {
+            SaveToastItem stale = _canvasMissingToast;
+            _canvasMissingToast = null;
+            DismissToast(stale, animate: false);
+        }
+
+        if (missing && _canvasMissingToast == null)
+        {
+            _canvasMissingToast = AddToastCapsule(
+                LocalizationService.Get("CanvasMissing"), ToastIconKind.Warning, sticky: true);
+            _canvasMissingToastDark = dark;
+        }
+        else if (!missing && _canvasMissingToast != null)
+        {
+            SaveToastItem gone = _canvasMissingToast;
+            _canvasMissingToast = null;
+            DismissToast(gone, animate: true);
+        }
+    }
+
+    /// <summary>整行按下：点文件夹 = 展开/收起（可反复点），点画布 = 立刻盖上。
+    /// 动作放在按下而不是抬起 —— 展开/收起会重建行集合，等抬起时容器可能已经不在了（表现为"点一下没反应"）。
+    /// 带 Ctrl / Shift 时只改多选、不执行行本身的主动作：否则连选几下会把画布来回换、把文件夹开开关关。</summary>
+    private void CanvasRow_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        // 只认左键：右键也要走 PointerPressed，不挡的话右键菜单一弹就把文件夹收起来/把画布切走。
+        if (!e.GetCurrentPoint(null).Properties.IsLeftButtonPressed) return;
+        if (RowNodeOf(sender) is not { } node || node.IsRenaming) return;
+
+        _pressedCanvasNode = node;
+        UpdateCanvasRowBackgrounds();
+
+        bool ctrl = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control);
+        bool shift = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift);
+
+        if (ctrl || shift)
+        {
+            // Shift 优先：Ctrl+Shift 是"把这一整段并进已有选择"，只有 Ctrl 才是点选切换。
+            if (shift) ExtendCanvasSelection(node, add: ctrl);
+            else ToggleCanvasSelection(node);
+            return;
+        }
+
+        SelectOnlyCanvasNode(node);
+
+        if (node.IsFolder)
+        {
+            node.IsExpanded = !node.IsExpanded;
+            if (node.IsExpanded) _expandedCanvasFolders.Add(node.FullPath);
+            else _expandedCanvasFolders.Remove(node.FullPath);
+            SyncCanvasRows();
+        }
+        else ApplyCanvas(node.FullPath);
+    }
+
+    /// <summary>普通点击：把选择重置成"只有这一行"，并用中性灰底标出来（不是紫底 —— 紫底留给成批选择）。
+    /// 因为激活态走行首竖条、不占底色，普通点击可以放心地选中自己。
+    /// 这一行真的进了 _selectedCanvasNodes，所以紧接着 Ctrl 点另一行时它天然被包含。</summary>
+    private void SelectOnlyCanvasNode(CanvasTreeNode node)
+    {
+        _canvasSelectionAnchor = node;
+        _canvasSingleSelection = true;
+        _selectedCanvasNodes.Clear();
+        _selectedCanvasNodes.Add(node);
+        UpdateCanvasRowBackgrounds();
+    }
+
+    private void ClearCanvasSelection()
+    {
+        _canvasSelectionAnchor = null;
+        _canvasSingleSelection = false;
+        _selectedCanvasNodes.Clear();
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>Ctrl+点击：点谁勾谁，其余不动；再点一次取消。锚点跟着挪到这一行。
+    /// 一按 Ctrl 就退出"单选"档，整批改用紫底 —— 于是"点 A、Ctrl 点 B"两行都是紫的，
+    /// 与"点 A 之后点过空白"（集合已空，只会选中 B）区分得开。
+    /// 特例：灰底的那一行本来就"选中着"，Ctrl 点它是想把它并进多选（第一时间变紫），
+    /// 不是想取消它 —— 所以这一次只切档、不动成员；再点一次才真的取消。</summary>
+    private void ToggleCanvasSelection(CanvasTreeNode node)
+    {
+        if (_canvasSingleSelection && _selectedCanvasNodes.Count == 1 && _selectedCanvasNodes.Contains(node))
+        {
+            _canvasSingleSelection = false;
+            _canvasSelectionAnchor = node;
+            UpdateCanvasRowBackgrounds();
+            return;
+        }
+
+        _canvasSingleSelection = false;
+        if (!_selectedCanvasNodes.Remove(node)) _selectedCanvasNodes.Add(node);
+        _canvasSelectionAnchor = node;
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>Shift+点击：从锚点连选到这一行（按【可见行】顺序 —— 收起的文件夹里的行不参与，
+    /// 因为用户根本看不见它们）。Ctrl+Shift = 并进已有选择，单 Shift = 替换。
+    /// 锚点不动，连按几次 Shift 只会伸缩同一段范围。</summary>
+    private void ExtendCanvasSelection(CanvasTreeNode node, bool add)
+    {
+        int to = _canvasRows.IndexOf(node);
+        int from = _canvasSelectionAnchor != null ? _canvasRows.IndexOf(_canvasSelectionAnchor) : -1;
+        if (to < 0) return;
+
+        _canvasSingleSelection = false;
+        if (!add) _selectedCanvasNodes.Clear();
+
+        if (from < 0)   // 没有锚点（或锚点所在的行已不在列表里）：退化成"只勾这一行"
+        {
+            _selectedCanvasNodes.Add(node);
+            _canvasSelectionAnchor = node;
+            UpdateCanvasRowBackgrounds();
+            return;
+        }
+
+        for (int i = Math.Min(from, to); i <= Math.Max(from, to); i++) _selectedCanvasNodes.Add(_canvasRows[i]);
+        UpdateCanvasRowBackgrounds();
+    }
+
+    private void CanvasRow_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_pressedCanvasNode == null) return;
+        _pressedCanvasNode = null;
+        UpdateCanvasRowBackgrounds();
+    }
+
+    private void CanvasRow_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (RowNodeOf(sender) is not { } node) return;
+        _hoverCanvasNode = node;
+        UpdateCanvasRowBackgrounds();
+    }
+
+    private void CanvasRow_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (RowNodeOf(sender) is not { } node) return;
+        // 右键菜单盖在行上时框架会补送一次 PointerExited（指针的命中目标换成了菜单）：
+        // 菜单开着期间保持悬浮态不动，否则"右键弹菜单 → 背后那行立刻掉色"（用户报告过）。
+        if (CanvasContextMenu is { IsOpen: true }) return;
+        if (ReferenceEquals(_hoverCanvasNode, node)) _hoverCanvasNode = null;
+        if (ReferenceEquals(_pressedCanvasNode, node)) _pressedCanvasNode = null;
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>右键入口：点到某一行 → 节点菜单；点空白 → 库级菜单（新建画布/文件夹、刷新、在资源管理器中显示）。
+    /// 菜单是自绘的（见 SelfDrawnContextMenu），每次按被点的节点现场构造条目。
+    /// 坐标一律按【页面】坐标系取：菜单宿主的坐标换算交给控件自己做，不在这里拼。</summary>
+    private void CanvasRowList_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        CanvasTreeNode? node = FindRowNode(args.OriginalSource as DependencyObject);
+
+        // 坐标优先取"右键按下时的指针位置"：那是 e.GetCurrentPoint(this) 直接给出的页面坐标，
+        // 不经任何视觉变换，也就不会被某个元素的布局/尺寸判定带偏（菜单落点只由指针坐标决定）。
+        Point pagePt;
+        if (_hasCanvasRightPress) pagePt = _canvasRightPressPoint;
+        else if (!args.TryGetPosition(this, out pagePt)) return;   // 无指针来源且取不到坐标：不弹，绝不拿 (0,0) 兜底
+
+        CanvasContextMenu.ShowAt(this, pagePt, BuildCanvasMenuRows(node));
+        args.Handled = true;
+    }
+
+    /// <summary>记下这次按下是不是右键、以及指针在【页面】坐标系里的位置。
+    /// 每次按下都刷新（不做"记住上一次右键"）：触摸长按 / 笔杆键这类"按下时才不是右键"的来源
+    /// 必须在这一次就判掉，否则会拿上一次的旧坐标去摆菜单。
+    /// 顺带处理"点空白处 = 放弃这次选择"：行的 PointerPressed 先跑（冒泡到此仍能往上找到那一行），
+    /// 所以只有真点到空白/滚动条之外的地方才会清。清的时候连锚点一起清 —— 否则下一次 Ctrl 点选
+    /// 会拿一个"早就作废"的锚点去补录，表现就是"点过空白之后 Ctrl 点 B 却连 A 一起选中"。</summary>
+    private void CanvasRowList_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        PointerPoint pt = e.GetCurrentPoint(this);
+        _canvasRightPressPoint = pt.Position;
+        _hasCanvasRightPress = pt.Properties.IsRightButtonPressed;
+
+        if (!pt.Properties.IsLeftButtonPressed) return;
+        if (FindRowNode(e.OriginalSource as DependencyObject) != null) return;
+        if (IsInCanvasScrollBar(e.OriginalSource as DependencyObject)) return;
+        ClearCanvasSelection();
+    }
+
+    /// <summary>事件源是否落在滚动条上（拖滚动条不该被当成"点了空白处"）。</summary>
+    private static bool IsInCanvasScrollBar(DependencyObject? source)
+    {
+        for (var d = source; d != null; d = VisualTreeHelper.GetParent(d))
+        {
+            if (d is ScrollBar) return true;
+            if (d is ListViewItem) return false;
+        }
+        return false;
+    }
+
+    /// <summary>最近一次按下（在画布列表上）的指针位置与"是否为右键"。页面坐标系，
+    /// 供 ContextRequested 摆菜单用 —— 那是唯一不经视觉变换的坐标来源。</summary>
+    private Point _canvasRightPressPoint;
+    private bool _hasCanvasRightPress;
+
+    /// <summary>从事件源往上找所在的行；不在任何行上（=点的是空白处）返回 null。</summary>
+    private static CanvasTreeNode? FindRowNode(DependencyObject? source)
+    {
+        for (var d = source; d != null; d = VisualTreeHelper.GetParent(d))
+        {
+            if (d is ListViewItem { Content: CanvasTreeNode node }) return node;
+        }
+        return null;
+    }
+
+    /// <summary>菜单按被点的节点现场构造 —— 文件夹能"在里面新建"，文件只能改自己，写死一份会变成一堆禁用项。
+    /// 被点的行属于当前多选时切成"批量菜单"：改名/打开路径这些只对单行有意义的条目全部收起来，
+    /// 只留对整个选择集合成立的动作（目前是删除）。右键本身不动选择集合：点在某行上不代表要改选。 </summary>
+    private List<SelfDrawnMenuRow> BuildCanvasMenuRows(CanvasTreeNode? node)
+    {
+        var rows = new List<SelfDrawnMenuRow>();
+
+        if (node == null)
+        {
+            rows.Add(MenuRow("CanvasNewCanvas", "\uE710", () => CreateCanvasIn(null)));
+            rows.Add(MenuRow("CanvasNewFolder", "\uE8F4", () => CreateFolderIn(null)));
+            rows.Add(SelfDrawnMenuRow.Separator());
+            rows.Add(MenuRow("CanvasRefresh", "\uE72C", RefreshCanvasTree));
+            rows.Add(MenuRow("CanvasReveal", "\uE8B7", () => ShellFileOps.RevealInExplorer(CanvasLibrary.Root, true)));
+            return rows;
+        }
+
+        if (IsCanvasMultiSelection(node))
+        {
+            rows.Add(MenuRowText(
+                string.Format(LocalizationService.Get("CanvasDeleteItems"), _selectedCanvasNodes.Count),
+                "\uE74D", DeleteSelectedCanvases));
+            return rows;
+        }
+
+        if (node.IsFolder)
+        {
+            rows.Add(MenuRow("CanvasNewCanvas", "\uE710", () => CreateCanvasIn(node.FullPath)));
+            rows.Add(MenuRow("CanvasNewFolder", "\uE8F4", () => CreateFolderIn(node.FullPath)));
+            rows.Add(SelfDrawnMenuRow.Separator());
+        }
+
+        rows.Add(MenuRow("CanvasRename", "\uE8AC", () => StartCanvasRename(node)));
+        rows.Add(MenuRow("CanvasDelete", "\uE74D", () => DeleteCanvasNode(node)));
+        rows.Add(SelfDrawnMenuRow.Separator());
+        rows.Add(MenuRow("CanvasReveal", "\uE8B7", () => ShellFileOps.RevealInExplorer(node.FullPath, node.IsFolder)));
+
+        if (!node.IsFolder)
+            rows.Add(MenuRow("CanvasCopyPath", "\uE8C8", () => CopyCanvasPath(node)));
+
+        return rows;
+    }
+
+    /// <summary>被点的行是否属于"两个以上"的多选。只勾了一行时仍走单行菜单 ——
+    /// 单项操作（改名、复制路径）在只有一行时更顺手。</summary>
+    private bool IsCanvasMultiSelection(CanvasTreeNode node)
+        => _selectedCanvasNodes.Count >= 2 && _selectedCanvasNodes.Contains(node);
+
+    private static SelfDrawnMenuRow MenuRow(string textKey, string glyph, Action action)
+        => new() { Text = LocalizationService.Get(textKey), Glyph = glyph, Invoke = action };
+
+    private static SelfDrawnMenuRow MenuRowText(string text, string glyph, Action action)
+        => new() { Text = text, Glyph = glyph, Invoke = action };
+
+    /// <summary>在指定目录（null = 库根）里新建一份空画布：**只让它在对应层级出现，不激活**。
+    /// 建完就盖上会把正在用的那份挤掉 —— 用户往往是先建好再决定何时切过去，
+    /// 新建这个动作本身不该有"切换画布"的副作用。只刷新这一层，不重建整棵树。</summary>
+    private void CreateCanvasIn(string? parentDir)
+    {
+        string? created = CanvasLibrary.CreateEmpty(null, parentDir);
+        if (created == null)
+        {
+            ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
+            return;
+        }
+        ExpandCanvasFolder(parentDir);
+        RefreshCanvasFolder(parentDir ?? CanvasLibrary.Root);
+        ScrollCanvasRowIntoView(created);
+    }
+
+    /// <summary>在指定目录（null = 库根）里新建一个文件夹并展开这一层。
+    /// 不进入行内改名：与"新建画布"保持一致，点完就完事，改名一律走右键菜单 ——
+    /// 两种新建共用一条心智模型，不因为一个是文件一个是文件夹就分叉。</summary>
+    private void CreateFolderIn(string? parentDir)
+    {
+        string? created = CanvasLibrary.CreateFolder(parentDir, LocalizationService.Get("CanvasUntitledFolder"));
+        if (created == null)
+        {
+            ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
+            return;
+        }
+        ExpandCanvasFolder(parentDir);
+        RefreshCanvasFolder(parentDir ?? CanvasLibrary.Root);
+        ScrollCanvasRowIntoView(created);
+    }
+
+    /// <summary>把刚建出来的那一行带进可见范围，**横向也要带**：层级深时缩进把名字推到视口右侧之外，
+    /// 只调 ScrollIntoView 只能纵向对准，名字依旧看不见。
+    /// 纵向：ScrollIntoView（不需要行容器，立刻生效）。
+    /// 横向：必须拿到行容器与名字文本才能算出"右端超出视口多少"，而容器是虚拟化的、
+    /// 新建后要等下一轮布局才生成 —— 所以交给 RevealCanvasRowName 按帧重试。
+    /// 只滚视口：不动选择、更不动激活。</summary>
+    private void ScrollCanvasRowIntoView(string fullPath)
+    {
+        if (CanvasRowList == null) return;
+
+        CanvasTreeNode? target = null;
+        foreach (var row in _canvasRows)
+        {
+            if (!string.Equals(row.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) continue;
+            target = row;
+            break;
+        }
+        if (target == null) return;   // 父层被收起等情况：这一行根本不在可见行集合里
+
+        CanvasRowList.ScrollIntoView(target);
+        RevealCanvasRowName(target, 15);
+    }
+
+    /// <summary>等这一行的容器真的实例化出来，再把名字横向滚进视口。
+    /// 两道等待必须分开：容器要跨调度帧（ContainerFromItem 对刚插入的行常返回 null），
+    /// 布局要跨真实帧（容器有了，但行的宽度与 ScrollViewer 的横向 extent 还是旧值）——
+    /// 同一个布局轮次里排多少次队列都还是同一份旧布局，所以第二道用定时器。</summary>
+    private void RevealCanvasRowName(CanvasTreeNode row, int left)
+    {
+        if (CanvasRowList == null) return;
+        CanvasRowList.UpdateLayout();
+
+        if (CanvasRowList.ContainerFromItem(row) is not ListViewItem container)
+        {
+            if (left <= 0) return;
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => RevealCanvasRowName(row, left - 1));
+            return;
+        }
+        RetryOnTimer(() => TryRevealName(container, row), 20);
+    }
+
+    /// <summary>横向滚到"名字整体可见"，返回 true 表示已经盖棺（滚到位或本来就不必滚）。
+    /// 自己算偏移而不靠 StartBringIntoView：后者是"最近边对齐"语义 —— 目标只露一条边就算完成，
+    /// 实测只挪几像素。也不能把目标值 clamp 到当前 ScrollableWidth：新行刚插进来时 extent 还是旧值，
+    /// clamp 会把"该滚 300px"截成"滚 5px"，这正是"只滚一点点"的成因。
+    /// 位置一律在**内容坐标系**里算：TransformToVisual 给出的是视口坐标（已扣掉当前偏移），
+    /// 加回 HorizontalOffset 才是与 ScrollableWidth 同系的量。</summary>
+    private bool TryRevealName(ListViewItem container, CanvasTreeNode row)
+    {
+        if (CanvasRowList == null) return true;
+        if (FindDescendantScrollViewer(CanvasRowList) is not { } sv) return true;
+
+        CanvasRowList.UpdateLayout();
+        if (sv.ViewportWidth <= 0) return false;   // 还没落版，量不出宽度
+
+        // 按文本内容认领名字那一格：行模板里还有 FontIcon（内部也可能挂 TextBlock）与行内改名框，
+        // 只按类型取第一个会取错对象，算出来的右端位置毫无意义。
+        if (FindFirstDescendant<TextBlock>(container,
+                t => t.Visibility == Visibility.Visible && t.Text == row.Name) is not { } nameText) return false;
+        if (nameText.ActualWidth <= 0) return false;
+
+        const double pad = 8;   // 名字与视口右缘留一点缝，贴边看着像被切
+        double left = nameText.TransformToVisual(sv).TransformPoint(new Point(0, 0)).X + sv.HorizontalOffset;
+        double width = nameText.ActualWidth;
+        double viewportRight = sv.HorizontalOffset + sv.ViewportWidth;
+
+        double target;
+        if (width + pad >= sv.ViewportWidth) target = left - pad;                    // 比视口还宽：对齐开头
+        else if (left - pad < sv.HorizontalOffset) target = left - pad;              // 左端被切（含滚过头）
+        else if (left + width + pad > viewportRight) target = left + width + pad - sv.ViewportWidth;
+        else return true;                                                           // 已完整可见
+        if (target < 0) target = 0;
+
+        // 目标超出现有 extent 时照样下发（ScrollViewer 自己会夹到最大值），先把能露的露出来；
+        // 返回 false 让下一帧带着长出来的 extent 再来一次，直到真的到位。
+        bool reached = target <= sv.ScrollableWidth + 0.5;
+        if (Math.Abs(target - sv.HorizontalOffset) > 0.5)
+            sv.ChangeView(target, null, null, disableAnimation: true);
+        return reached;
+    }
+
+    /// <summary>可视树里第一个满足条件的指定类型元素（深度优先，含自己）。</summary>
+    private static T? FindFirstDescendant<T>(DependencyObject? root, Func<T, bool> match) where T : DependencyObject
+    {
+        if (root == null) return null;
+        if (root is T hit && match(hit)) return hit;
+        int n;
+        try { n = VisualTreeHelper.GetChildrenCount(root); } catch { return null; }
+        for (int i = 0; i < n; i++)
+        {
+            if (FindFirstDescendant(VisualTreeHelper.GetChild(root, i), match) is { } deep) return deep;
+        }
+        return null;
+    }
+
+    /// <summary>把容器目录展开，让新建出来的行当场可见。展开集合只管"重建时"的初始态，
+    /// 已经存在的节点要直接改 IsExpanded 才动得了 —— 增量同步会原样保留旧节点。</summary>
+    private void ExpandCanvasFolder(string? dirPath)
+    {
+        if (string.IsNullOrEmpty(dirPath)) return;
+        _expandedCanvasFolders.Add(dirPath!);
+        if (FindCanvasFolder(_canvasRoots, dirPath!) is { } node) node.IsExpanded = true;
+    }
+
+    /// <summary>进入行内改名：同一时刻只允许一行在改，顺手把别的行收掉。
+    /// 改名不动高亮 —— 高亮只表达"盖在 PDF 上的那份画布"，和编辑哪个名字无关。</summary>
+    private void StartCanvasRename(CanvasTreeNode node)
+    {
+        foreach (var other in EnumerateCanvasNodes(_canvasRoots))
+        {
+            if (!ReferenceEquals(other, node) && other.IsRenaming) other.IsRenaming = false;
+        }
+        node.RenameText = node.Name;
+        node.IsRenaming = true;
+    }
+
+    private static IEnumerable<CanvasTreeNode> EnumerateCanvasNodes(IEnumerable<CanvasTreeNode> nodes)
+    {
+        foreach (var n in nodes)
+        {
+            yield return n;
+            if (!n.IsFolder) continue;
+            foreach (var child in EnumerateCanvasNodes(n.Children)) yield return child;
+        }
+    }
+
+    private void CanvasRowRename_Submitted(object sender, RoutedEventArgs e) => CommitRowRename(sender);
+    private void CanvasRowRename_CommitRequested(object sender, RoutedEventArgs e) => CommitRowRename(sender);
+
+    private void CanvasRowRename_Cancelled(object sender, RoutedEventArgs e)
+    {
+        if (RowNodeOf(sender) is not { } node) return;
+        node.IsRenaming = false;
+    }
+
+    /// <summary>提交行内改名。名字没变 / 只是空白 ⇒ 当取消处理；改名成功后把"当前画布"指针一起搬到新路径，
+    /// 否则画布明明还在、程序却认为上次那份不见了。</summary>
+    private void CommitRowRename(object sender)
+    {
+        if (RowNodeOf(sender) is not { } node || !node.IsRenaming) return;
+        node.IsRenaming = false;
+
+        string text = node.RenameText.Trim();
+        if (text.Length == 0 || string.Equals(text, node.Name, StringComparison.Ordinal)) return;
+
+        string? renamed = CanvasLibrary.Rename(node.FullPath, node.IsFolder, text);
+        if (renamed == null)
+        {
+            ShowSaveToast(LocalizationService.Get("CanvasNameTaken"), ToastIconKind.Error);
+            return;
+        }
+        if (string.Equals(renamed, node.FullPath, StringComparison.OrdinalIgnoreCase)) return;
+
+        string oldPath = node.FullPath;
+        RemapCanvasPath(oldPath, renamed);
+        RefreshCanvasFolder(Path.GetDirectoryName(oldPath) ?? CanvasLibrary.Root);
+    }
+
+    private static CanvasTreeNode? RowNodeOf(object sender)
+        => sender is FrameworkElement { DataContext: CanvasTreeNode node } ? node : null;
+
+    /// <summary>删除：直接进回收站，不弹确认 —— 回收站本身可撤销，多一个确认框只是多一步。
+    /// 删的正是当前盖着的画布（或它所在文件夹）时，先把画布卸掉再删：
+    /// 否则删完指针还指着一个不存在的文件，下一次落盘会凭空再造一份出来。</summary>
+    private void DeleteCanvasNode(CanvasTreeNode node)
+    {
+        bool holdsCurrent = !string.IsNullOrEmpty(_currentCanvasPath) && IsSameOrUnder(_currentCanvasPath!, node.FullPath);
+        if (holdsCurrent)
+        {
+            _canvasDirty = false;   // 文件马上要进回收站，把内存里的改动再写一遍没有意义
+            ApplyCanvas(null);
+        }
+
+        string? parentDir = Path.GetDirectoryName(node.FullPath);
+        if (!CanvasLibrary.Delete(node.FullPath))
+        {
+            ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
+            return;
+        }
+        _expandedCanvasFolders.RemoveWhere(p => IsSameOrUnder(p, node.FullPath));
+        RefreshCanvasFolder(parentDir ?? CanvasLibrary.Root);
+    }
+
+    /// <summary>批量删除当前多选。与单行删除同一套规则：进回收站、不弹确认。
+    /// 只删"最外层"——选中的文件夹已经把它下面的勾选项包含在内，逐个删的话第二次必然找不到路径。
+    /// 命中"正盖着的那份画布（或它的上层文件夹）"时先卸画布：否则删完指针还指着不存在的文件，
+    /// 下一次落盘会凭空再造一份出来。</summary>
+    private void DeleteSelectedCanvases()
+    {
+        var targets = _selectedCanvasNodes
+            .Where(n => !_selectedCanvasNodes.Any(o => !ReferenceEquals(o, n) && IsSameOrUnder(n.FullPath, o.FullPath)))
+            .ToList();
+        if (targets.Count == 0) return;
+
+        if (!string.IsNullOrEmpty(_currentCanvasPath) &&
+            targets.Any(t => IsSameOrUnder(_currentCanvasPath!, t.FullPath)))
+        {
+            _canvasDirty = false;
+            ApplyCanvas(null);
+        }
+
+        // 每一层只需刷新一次：同一目录下删掉多项时，逐项重扫既慢又会让列表抖好几下。
+        var parents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool failed = false;
+        foreach (var node in targets)
+        {
+            string? parentDir = Path.GetDirectoryName(node.FullPath);
+            if (!CanvasLibrary.Delete(node.FullPath)) { failed = true; continue; }
+            _expandedCanvasFolders.RemoveWhere(p => IsSameOrUnder(p, node.FullPath));
+            if (parentDir != null) parents.Add(parentDir);
+        }
+
+        // 先清选择再刷新：别让被删掉的节点还留在选择集合里（SyncCanvasRows 虽然会剪枝，
+        // 但那是"不在行集合里"的兜底，这里主动收干净更直白）。
+        ClearCanvasSelection();
+        foreach (string dir in parents) RefreshCanvasFolder(dir);
+
+        if (failed) ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
+    }
+
+    private void CopyCanvasPath(CanvasTreeNode node)
+    {
+        try
+        {
+            var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+            package.SetText(node.FullPath);
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>改名/移动后，把保存在内存里的旧路径（当前画布 + 已展开文件夹）整体换到新路径前缀。</summary>
+    private void RemapCanvasPath(string oldPath, string newPath)
+    {
+        if (!string.IsNullOrEmpty(_currentCanvasPath) && IsSameOrUnder(_currentCanvasPath!, oldPath))
+            _currentCanvasPath = newPath + _currentCanvasPath![oldPath.Length..];
+
+        var moved = _expandedCanvasFolders.Where(p => IsSameOrUnder(p, oldPath)).ToList();
+        foreach (string p in moved)
+        {
+            _expandedCanvasFolders.Remove(p);
+            _expandedCanvasFolders.Add(newPath + p[oldPath.Length..]);
+        }
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>path 是否就是 prefix，或位于 prefix 之下。比较要带上分隔符，
+    /// 否则 "…\Canvases2\a.gcanvas" 会被当成 "…\Canvases" 的子项。</summary>
+    private static bool IsSameOrUnder(string path, string prefix)
+    {
+        if (string.Equals(path, prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        return path.StartsWith(prefix.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                               StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>画布库目录监听：在文件管理器里新建/改名/删除后，面板不必等用户开关一次才更新。
+    /// 事件在后台线程到达，一律转投 UI 线程；一次保存会连发 Changed/Created/Renamed 多条，
+    /// 故串一个 400ms 的单次定时器做防抖 —— 逐条刷新会把列表抖成残影。
+    /// 目录读不到 / 网络盘不支持时静默放弃：功能退化成"展开面板时才刷新"，不影响使用。</summary>
+    private void SetupCanvasWatcher()
+    {
+        if (_canvasWatcher != null) return;
+        try
+        {
+            _canvasRefreshTimer = DispatcherQueue.CreateTimer();
+            _canvasRefreshTimer.Interval = TimeSpan.FromMilliseconds(400);
+            _canvasRefreshTimer.IsRepeating = false;
+            _canvasRefreshTimer.Tick += (s, e) => FlushCanvasRefreshQueue();
+
+            // Filter 用 "*" 而不是 "*.gcanvas"：Filter 只按名字匹配、不看类型，
+            // 用扩展名过滤会把"新建/改名/删除文件夹"整个漏掉。真正关心的路径在 QueueCanvasRefresh 里判。
+            var watcher = new FileSystemWatcher(CanvasLibrary.Root, "*")
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
+            };
+            FileSystemEventHandler onFile = (s, e) => QueueCanvasRefresh(e.FullPath);
+            RenamedEventHandler onRename = (s, e) =>
+            {
+                QueueCanvasRefresh(e.OldFullPath);   // 旧的一行要消失
+                QueueCanvasRefresh(e.FullPath);      // 新的一行要出现
+            };
+            watcher.Created += onFile;
+            watcher.Changed += onFile;
+            watcher.Deleted += onFile;
+            watcher.Renamed += onRename;
+            watcher.EnableRaisingEvents = true;
+            _canvasWatcher = watcher;
+        }
+        catch (Exception)
+        {
+            _canvasWatcher = null;
+        }
+    }
+
+    /// <summary>待刷新的目录。同一批事件里若多次落到同一层，合并成一次。</summary>
+    private readonly HashSet<string> _pendingCanvasDirs = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>后台线程入口：先判"这条路径关不关心"，再切到 UI 线程排队。
+    /// 关心的 = 画布文件（.gcanvas），或没有扩展名的条目（文件夹）。临时文件等一律忽略。</summary>
+    private void QueueCanvasRefresh(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return;
+
+        bool relevant;
+        string? dir;
+        try
+        {
+            relevant = path!.EndsWith(CanvasStore.Extension, StringComparison.OrdinalIgnoreCase)
+                       || !Path.HasExtension(path);
+            dir = Path.GetDirectoryName(path);
+        }
+        catch (Exception) { return; }
+        if (!relevant || string.IsNullOrEmpty(dir)) return;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            // 面板收起时不刷新：展开动作本身就会重新枚举（见 ToggleCanvasPanel_Click）。
+            if (CanvasPanelSplitView?.IsPaneOpen != true) return;
+            _pendingCanvasDirs.Add(dir!);
+            _canvasRefreshTimer?.Stop();
+            _canvasRefreshTimer?.Start();   // 重复 Start = 重新计时 ⇒ 连续事件只在最后一次之后刷一次
+        });
+    }
+
+    /// <summary>定时器到点：只同步受影响的那一层目录（在树里就地打补丁），不动其它行、不丢展开态。</summary>
+    private void FlushCanvasRefreshQueue()
+    {
+        if (_pendingCanvasDirs.Count == 0) { RefreshCanvasTree(); return; }
+
+        var dirs = _pendingCanvasDirs.ToArray();
+        _pendingCanvasDirs.Clear();
+        foreach (string dir in dirs)
+        {
+            if (!CanvasLibrary.IsInsideRoot(dir)) { RefreshCanvasTree(); return; }
+            RefreshCanvasFolder(dir);
+        }
+    }
+
+    private void DisposeCanvasWatcher()
+    {
+        try { _canvasWatcher?.Dispose(); } catch { }
+        _canvasWatcher = null;
+        try { _canvasRefreshTimer?.Stop(); } catch { }
+        _canvasRefreshTimer = null;
+        _pendingCanvasDirs.Clear();
     }
 
     /// <summary>白板操作入撤销栈。两个方向都改模型 ⇒ 一律置脏，否则撤销后画面回退、磁盘仍停在新状态。</summary>

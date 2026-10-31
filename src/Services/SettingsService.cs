@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
@@ -65,6 +66,50 @@ public class SettingsService
         }
     }
 
+    /// <summary>资源管理器里被展开的文件夹（绝对路径）。跨会话记住 —— 下次打开应用，库还摊成离开时的样子。</summary>
+    public IReadOnlyList<string> CanvasExpandedFolders => _data.CanvasExpandedFolders;
+
+    /// <summary>右侧资源管理器的视口位置（横向 / 纵向偏移）。存在这里而不是 documents.json：
+    /// 画布库是全局的一份，不跟任何 PDF 绑定 —— 同一棵目录树换个文档打开，能看到的行一模一样，
+    /// 按文档存会把同一份"滚到哪儿了"复制 N 份，切换文档时还会互相覆盖。</summary>
+    public double CanvasPanelScrollX => _data.CanvasPanelScrollX;
+
+    public double CanvasPanelScrollY => _data.CanvasPanelScrollY;
+
+    /// <summary>一次性写回右侧面板的会话状态：展开的文件夹 + 视口位置。
+    /// 只在退出时调用一次 —— 面板滚动是高频事件，平时一概不落盘，
+    /// 要记住的本来也只是"最终停在哪儿"。内容没变就不写文件。
+    /// 亚像素抖动不值得落盘，位移小于半像素直接当没变。</summary>
+    public void SaveCanvasPanelState(IEnumerable<string> folders, double scrollX, double scrollY)
+    {
+        var list = new List<string>();
+        foreach (string p in folders)
+        {
+            if (!string.IsNullOrWhiteSpace(p)) list.Add(p);
+        }
+
+        bool changed = !SamePaths(list, _data.CanvasExpandedFolders)
+                       || Math.Abs(_data.CanvasPanelScrollX - scrollX) >= 0.5
+                       || Math.Abs(_data.CanvasPanelScrollY - scrollY) >= 0.5;
+        if (!changed) return;
+
+        _data.CanvasExpandedFolders = list;
+        _data.CanvasPanelScrollX = scrollX;
+        _data.CanvasPanelScrollY = scrollY;
+        Save();
+    }
+
+    private static bool SamePaths(List<string> a, IReadOnlyList<string> b)
+    {
+        if (a.Count != b.Count) return false;
+        var set = new HashSet<string>(b, StringComparer.OrdinalIgnoreCase);
+        foreach (string p in a)
+        {
+            if (!set.Contains(p)) return false;
+        }
+        return true;
+    }
+
     public void Load()
     {
         try
@@ -75,6 +120,7 @@ public class SettingsService
             if (data != null)
             {
                 _data = data;
+                _data.CanvasExpandedFolders ??= new();   // 设置文件里写成 null 时的兜底
             }
         }
         catch { }
@@ -85,7 +131,11 @@ public class SettingsService
         try
         {
             string json = JsonSerializer.Serialize(_data, JsonOptions);
-            File.WriteAllText(SettingsFilePath, json);
+            // 先写临时文件再原子替换：展开状态是"点一下就存"，写入频率高，
+            // 直接覆盖原文件时若进程正好退出，会留下半截 JSON —— 下次启动连主题都会一起丢。
+            string tmp = SettingsFilePath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, SettingsFilePath, overwrite: true);
         }
         catch { }
     }
@@ -95,5 +145,13 @@ public class SettingsService
         public string AppTheme { get; set; } = "Default";
 
         public bool ToolbarAlwaysVisible { get; set; }
+
+        /// <summary>资源管理器里已展开的文件夹路径。旧设置文件没有这一项 ⇒ 反序列化后即为空列表。</summary>
+        public List<string> CanvasExpandedFolders { get; set; } = new();
+
+        /// <summary>右侧资源管理器的视口位置（像素）。旧设置文件没有这两项 ⇒ 默认 0 = 停在左上角。</summary>
+        public double CanvasPanelScrollX { get; set; }
+
+        public double CanvasPanelScrollY { get; set; }
     }
 }

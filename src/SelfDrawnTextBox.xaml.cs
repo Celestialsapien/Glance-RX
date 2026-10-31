@@ -91,6 +91,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
         });
         UpdateMetrics();
         RebuildAdvances();
+        ApplyCompactMode();   // 默认非紧凑 = XAML 里的 4,6,4,6；显式调一次避免依赖"谁先设值"的顺序
     }
 
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(
@@ -145,6 +146,23 @@ public sealed partial class SelfDrawnTextBox : UserControl
         get => (bool)(GetValue(DigitsOnlyProperty) ?? false);
         set => SetValue(DigitsOnlyProperty, value);
     }
+
+    public static readonly DependencyProperty CompactModeProperty = DependencyProperty.Register(
+        nameof(CompactMode), typeof(bool), typeof(SelfDrawnTextBox), new PropertyMetadata(false, OnCompactModeChanged));
+
+    /// <summary>紧凑模式：去掉文本区上下各 6px 的留白，整控件高度 ≈ 行高 + 描边。
+    /// 供"行高固定 22px 的列表内改名"用 —— 默认留白会把行撑高一截，进编辑时列表会跳一下。</summary>
+    public bool CompactMode
+    {
+        get => (bool)(GetValue(CompactModeProperty) ?? false);
+        set => SetValue(CompactModeProperty, value);
+    }
+
+    private static void OnCompactModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        => (d as SelfDrawnTextBox)?.ApplyCompactMode();
+
+    private void ApplyCompactMode()
+        => TextArea.Margin = CompactMode ? new Thickness(4, 0, 4, 0) : new Thickness(4, 6, 4, 6);
 
     private static void OnDigitsOnlyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {

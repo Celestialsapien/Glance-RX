@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SelfDrawnContextMenu —— 自绘右键菜单（承载在页面主可视树里，不是弹层）。
+
+  为什么不用 MenuFlyout：它是独立弹层（Popup），一弹出就把指针/焦点语境切到另一个视觉树
+    · 鼠标光标会被弹层重新判定（用户报告"总是莫名其妙改变鼠标光标"）；
+    · 背后那一行收不到正常的指针消息，悬浮态当场失效（用户报告"背后行的悬浮态失效"）。
+  自绘版从根上去掉这两件事：所有元素都是普通 XAML 元素，与背后列表同处一棵树、同一套主题画刷。
+
+  刻意全程【非聚焦】：每一行是 Grid 而不是 Button（Button 按下会拿焦点），只走 PointerPressed。
+  注：本应用的键盘焦点基本被剥夺（Tab 遍历、按钮焦点都关掉了），所以【不做 Esc 关闭】——
+      收不到键盘事件是常态，做了也一半灵一半不灵。关闭只有三种：点外部、滚轮、选中条目。
+
+  宿主约定：本控件常驻页面根 Grid（不 Collapsed，否则没有布局尺寸），
+  开关靠内部两层 Visibility 切换 —— 都收起时根 Grid 无可命中面，等价于不存在。
+-->
+<UserControl
+    x:Class="GlanceRX.SelfDrawnContextMenu"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:GlanceRX"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    IsTabStop="False"
+    HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+
+    <UserControl.Resources>
+
+        <!-- 普通条目：左边图标、右边文本，整行可点。悬停底色是单独一层 Border，
+             Opacity 由行数据（HoverOpacity）驱动 —— 与白板卡片菜单同一套写法，不新造颜色。
+             行高 28：12 号字单行 + 上下各 8，比系统菜单（32）紧一档，与资源管理器行的密度一致。 -->
+
+        <DataTemplate x:Key="MenuRowTemplate" x:DataType="local:SelfDrawnMenuRow">
+
+            <Grid Height="28" Background="Transparent"
+
+                  PointerEntered="Row_PointerEntered" PointerExited="Row_PointerExited"
+
+                  PointerPressed="Row_PointerPressed">
+
+                <Border Background="{ThemeResource MenuFlyoutItemBackgroundPointerOver}" CornerRadius="4"
+
+                        Opacity="{x:Bind HoverOpacity, Mode=OneWay}" IsHitTestVisible="False"/>
+
+                <Grid Margin="10,0,14,0" ColumnSpacing="10">
+
+                    <Grid.ColumnDefinitions>
+
+                        <ColumnDefinition Width="Auto"/>
+
+                        <ColumnDefinition Width="*"/>
+
+                    </Grid.ColumnDefinitions>
+
+                    <FontIcon Grid.Column="0" FontFamily="{ThemeResource SymbolThemeFontFamily}"
+
+                              Glyph="{x:Bind Glyph}" FontSize="14" VerticalAlignment="Center"/>
+
+                    <TextBlock Grid.Column="1" Text="{x:Bind Text}" FontSize="12" VerticalAlignment="Center"
+
+                               TextTrimming="CharacterEllipsis"/>
+
+                </Grid>
+
+            </Grid>
+
+        </DataTemplate>
+
+        <!-- 分隔线：与条目同宽，只是高度 1。 -->
+
+        <DataTemplate x:Key="MenuSeparatorTemplate" x:DataType="local:SelfDrawnMenuRow">
+
+            <Border Height="1" Margin="8,5" Opacity="0.6"
+
+                    Background="{ThemeResource CardStrokeColorDefaultBrush}"/>
+
+        </DataTemplate>
+
+    </UserControl.Resources>
+
+    <!-- 根 Grid 必须铺满整页：接住层靠它给尺寸，否则点在菜单以外的地方关不掉菜单。
+         （UserControl 的内容 Grid 按 Stretch 填满控件槽位，与 GpuPageView 的根 Grid 同一写法。） -->
+
+    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+
+        <!-- 外部点击接住层：整页透明面，按下即关闭（菜单打开期间第一下点击按惯例只做"关掉"）。
+             Visibility 与面板一起切换 —— 收起时它不存在，绝不挡 PDF 的点击。 -->
+        <Border x:Name="Catcher" Background="Transparent" Visibility="Collapsed"
+                PointerPressed="Catcher_PointerPressed" PointerWheelChanged="Catcher_PointerWheelChanged"/>
+
+        <!-- 摆位层：Canvas 的子元素按"自然尺寸"布局、用 Left/Top 绝对定位 ⇒ 位置只由坐标决定，
+             不受对齐/边距/父级槽宽影响（用 Margin + 对齐摆位时，一旦容器尺寸判定不对，
+             菜单会被内收到窗口左边）。 -->
+        <Canvas x:Name="Layer">
+
+            <Border x:Name="Panel" Visibility="Collapsed"
+                    Background="{ThemeResource FlyoutPresenterBackground}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="4"
+                    MinWidth="188"
+                    local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="18">
+
+                <StackPanel x:Name="ItemsHost"/>
+
+            </Border>
+
+        </Canvas>
+
+    </Grid>
+
+</UserControl>

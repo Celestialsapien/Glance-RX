@@ -41,6 +41,10 @@ internal static class AppPaths
     /// <summary>每份 PDF 的文档级数据（阅读位置/缩放/布局/旋转/侧边栏/窗口几何 + 书签），键 = PDF 完整路径。</summary>
     public static readonly string DocumentsFilePath = Path.Combine(DataDirectory, "documents.json");
 
+    /// <summary>画布库根目录。所有 .gcanvas 集中放这里（允许任意层子目录），与任何 PDF 都不绑定；
+    /// 同一份画布可以盖到任意文档上，所以路径里不出现 PDF 名字。</summary>
+    public static readonly string CanvasDirectory = Path.Combine(DataDirectory, "Canvases");
+
     /// <summary>静态构造里立即建目录：数据文件的写点分散在各 Store 里，不能等到第一次写入时才建； 崩溃日志同理（进程最早阶段就可能落盘）。</summary>
     static AppPaths()
     {
@@ -48,6 +52,7 @@ internal static class AppPaths
         {
             Directory.CreateDirectory(DataDirectory);
             Directory.CreateDirectory(CrashDirectory);
+            Directory.CreateDirectory(CanvasDirectory);
         }
         catch { /* 可移植版下目录不可建时静默沿用旧行为 */ }
     }

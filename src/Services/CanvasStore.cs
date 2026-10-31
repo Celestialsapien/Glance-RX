@@ -79,8 +79,9 @@ public sealed class CanvasFormatMark
     [JsonPropertyName("format")] public int Format { get; set; } = CurrentFormat;
 }
 
-/// <summary>白板数据的磁盘存取。主路径与 PDF 同目录同名、扩展名 .gcanvas；目录只读/无权限时回退到
-/// GlanceData/Canvases 下（便携版约束：绝不写 C 盘 AppData）。
+/// <summary>画布文件的磁盘存取。每份画布都是库里的独立文件（<see cref="AppPaths.CanvasDirectory"/> 之下，
+/// 允许任意层子目录），与任何 PDF 都不绑定：同一份画布可以盖到任意文档上，
+/// 所以读写都要显式给出【画布自己的路径】——这里没有任何"由 PDF 路径推出画布路径"的推导。
 /// 为何不用 .canvas：那是 Obsidian Canvas 的扩展名，同名 PDF 旁的笔记会被误当白板加载并整份重写，
 /// 而 Obsidian 反过来也会丢掉本程序的 glancePage 字段（卡片全变无归属 ⇒ 白板看起来整块消失）。</summary>
 public static class CanvasStore
@@ -92,28 +93,15 @@ public static class CanvasStore
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    /// <summary>白板文件扩展名。刻意不用 .canvas —— 那是 Obsidian 的扩展名，会让两家的文件在同目录互相踩。</summary>
+    /// <summary>画布文件扩展名。刻意不用 .canvas —— 那是 Obsidian 的扩展名，会让两家的文件在同目录互相踩。</summary>
     public const string Extension = ".gcanvas";
 
-    public static string GetPrimaryPath(string pdfPath) => Path.ChangeExtension(pdfPath, Extension);
-
-    /// <summary>回退路径：GlanceData/Canvases 下按完整路径散列命名，避免同名 PDF 相撞。</summary>
-    public static string GetFallbackPath(string pdfPath)
-    {
-        string dir = Path.Combine(AppPaths.DataDirectory, "Canvases");
-        string name = Path.GetFileNameWithoutExtension(pdfPath) ?? "canvas";
-        foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
-        int hash = StringComparer.OrdinalIgnoreCase.GetHashCode(pdfPath);
-        return Path.Combine(dir, $"{name}.{hash:X8}{Extension}");
-    }
-
-    /// <summary>读取白板。主路径优先，其次回退路径；文件不存在、解析失败、或没有 glance 格式标记
+    /// <summary>读取一份画布。文件不存在、解析失败、或没有 glance 格式标记
     /// （= 不是本程序写的）都返回 null。</summary>
-    public static CanvasDoc? Load(string pdfPath)
+    public static CanvasDoc? LoadFile(string? canvasPath)
     {
-        if (string.IsNullOrEmpty(pdfPath)) return null;
-        var doc = TryLoadFile(GetPrimaryPath(pdfPath));
-        return doc ?? TryLoadFile(GetFallbackPath(pdfPath));
+        if (string.IsNullOrEmpty(canvasPath)) return null;
+        return TryLoadFile(canvasPath!);
     }
 
     private static CanvasDoc? TryLoadFile(string path)
@@ -147,14 +135,13 @@ public static class CanvasStore
         return parsed != null && parsed.Format <= CanvasFormatMark.CurrentFormat;
     }
 
-    /// <summary>保存白板。先写主路径，失败（只读目录/无权限/目标被别人的文件占着）再落回退路径。
-    /// 返回实际写入成功。</summary>
-    public static bool Save(string pdfPath, CanvasDoc doc)
+    /// <summary>写回一份画布。先写临时文件再原子替换；目标文件已存在但不是本程序写的
+    /// （没有格式标记）就拒绝覆盖，返回 false —— 调用方据此保留脏标记，绝不毁掉别人的文件。</summary>
+    public static bool SaveFile(string? canvasPath, CanvasDoc doc)
     {
-        if (string.IsNullOrEmpty(pdfPath) || doc == null) return false;
+        if (string.IsNullOrEmpty(canvasPath) || doc == null) return false;
         doc.Glance ??= new CanvasFormatMark();   // 本程序写的文件必须带标记
-        if (TrySaveFile(GetPrimaryPath(pdfPath), doc)) return true;
-        return TrySaveFile(GetFallbackPath(pdfPath), doc);
+        return TrySaveFile(canvasPath!, doc);
     }
 
     private static bool TrySaveFile(string path, CanvasDoc doc)
@@ -163,7 +150,7 @@ public static class CanvasStore
         {
             string? dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            // 目标已存在却没有我们的格式标记 ⇒ 不是本程序的文件，绝不覆盖（改由调用方落回退路径）。
+            // 目标已存在却没有我们的格式标记 ⇒ 不是本程序的文件，绝不覆盖（返回 false，调用方保留脏标记）。
             if (File.Exists(path) && !HasFormatMarkOnDisk(path)) return false;
             // 先写临时文件再原子替换，避免写入中途崩溃留下半截 JSON。
             string tmp = path + ".tmp";

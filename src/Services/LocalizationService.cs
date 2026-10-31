@@ -193,7 +193,21 @@ namespace GlanceRX.Services
                 ["BookmarkAddedToast"] = "Marcador agregado",
                 ["BookmarkRemovedToast"] = "Marcador eliminado",
                 ["BookmarkPagePlaceholder"] = "Página {0}",
-                ["NoOutline"] = "Este documento no tiene contenido."
+                ["NoOutline"] = "Este documento no tiene contenido.",
+                ["CanvasPanelTitle"] = "Lienzos",
+                ["ToggleCanvasPanel"] = "Panel de lienzos",
+                ["CanvasMissing"] = "Faltan elementos del lienzo",
+                ["CanvasNewCanvas"] = "Nuevo lienzo",
+                ["CanvasNewFolder"] = "Nueva carpeta",
+                ["CanvasUntitledFolder"] = "Nueva carpeta",
+                ["CanvasRename"] = "Cambiar nombre",
+                ["CanvasDelete"] = "Eliminar",
+                ["CanvasDeleteItems"] = "Eliminar {0} elementos",
+                ["CanvasRefresh"] = "Actualizar",
+                ["CanvasReveal"] = "Mostrar en el Explorador",
+                ["CanvasCopyPath"] = "Copiar ruta",
+                ["CanvasNameTaken"] = "El nombre no es válido o ya existe un elemento con ese nombre.",
+                ["CanvasOpFailed"] = "No se pudo completar la operación."
             },
             ["zh"] = new()
             {
@@ -322,7 +336,21 @@ namespace GlanceRX.Services
                 ["BookmarkAddedToast"] = "收藏成功",
                 ["BookmarkRemovedToast"] = "已移除",
                 ["BookmarkPagePlaceholder"] = "第 {0} 页",
-                ["NoOutline"] = "此文档没有大纲。"
+                ["NoOutline"] = "此文档没有大纲。",
+                ["CanvasPanelTitle"] = "画布",
+                ["ToggleCanvasPanel"] = "画布面板",
+                ["CanvasMissing"] = "画布有缺失",
+                ["CanvasNewCanvas"] = "新建画布",
+                ["CanvasNewFolder"] = "新建文件夹",
+                ["CanvasUntitledFolder"] = "新建文件夹",
+                ["CanvasRename"] = "重命名",
+                ["CanvasDelete"] = "删除",
+                ["CanvasDeleteItems"] = "删除 {0} 项",
+                ["CanvasRefresh"] = "刷新",
+                ["CanvasReveal"] = "在文件资源管理器中显示",
+                ["CanvasCopyPath"] = "复制路径",
+                ["CanvasNameTaken"] = "名称无效，或同层已有同名项。",
+                ["CanvasOpFailed"] = "操作失败。"
             },
             ["en"] = new()
             {
@@ -451,7 +479,21 @@ namespace GlanceRX.Services
                 ["BookmarkAddedToast"] = "Bookmark added",
                 ["BookmarkRemovedToast"] = "Bookmark removed",
                 ["BookmarkPagePlaceholder"] = "Page {0}",
-                ["NoOutline"] = "This document has no outline."
+                ["NoOutline"] = "This document has no outline.",
+                ["CanvasPanelTitle"] = "Canvases",
+                ["ToggleCanvasPanel"] = "Canvas panel",
+                ["CanvasMissing"] = "Canvas has missing items",
+                ["CanvasNewCanvas"] = "New canvas",
+                ["CanvasNewFolder"] = "New folder",
+                ["CanvasUntitledFolder"] = "New folder",
+                ["CanvasRename"] = "Rename",
+                ["CanvasDelete"] = "Delete",
+                ["CanvasDeleteItems"] = "Delete {0} items",
+                ["CanvasRefresh"] = "Refresh",
+                ["CanvasReveal"] = "Reveal in File Explorer",
+                ["CanvasCopyPath"] = "Copy path",
+                ["CanvasNameTaken"] = "That name is invalid, or an item with that name already exists.",
+                ["CanvasOpFailed"] = "The operation could not be completed."
             }
         };
 
