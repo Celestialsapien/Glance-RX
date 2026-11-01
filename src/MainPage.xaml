@@ -41,6 +41,20 @@
 
         <SolidColorBrush x:Key="CanvasRowMultiSelectBrush" Color="#D8D0ED"/>
 
+        <!-- 侧栏 / 面板的文字色，按"离背景的亮度差"分四档，深淡两套由 UpdateSidebarBackground 写。
+             一律不用默认前景色：WinUI 深色档的默认文字是纯白 #FFFFFF，整列文件名铺开时刺眼。
+             阶梯（高 → 低）：激活行名字 > 列表项名称 > 非激活行名字 > 标题/页码这类附属信息。
+             画布行的名字、箭头、图标三处都绑 CanvasTreeNode.NameBrush，
+             所以"激活"在整行上同时生效，不依赖缩进多深 —— 行首那条竖条在深层级时离名字太远。 -->
+
+        <SolidColorBrush x:Key="SidebarTextBrush" Color="#202026"/>
+
+        <SolidColorBrush x:Key="SidebarTextMutedBrush" Color="#6B6B74"/>
+
+        <SolidColorBrush x:Key="CanvasRowTextBrush" Color="#60606A"/>
+
+        <SolidColorBrush x:Key="CanvasRowTextActiveBrush" Color="#0A0A0E"/>
+
         <SolidColorBrush x:Key="CanvasRowActiveBarBrush" Color="#9873F7"/>
 
         <!-- 行容器：ListViewItem 只当"一行"的载体，模板里什么都不画。
@@ -114,9 +128,11 @@
                 <Border Background="{x:Bind RowBackground, Mode=OneWay}"/>
 
                 <!-- 激活态：行首竖条（vscode 活动列表项的做法）。整行高度、贴左缘，
-                     与"选中底"互不遮挡 ⇒ 一行可以同时是"开着的"和"选中的"。 -->
+                     与"选中底"互不遮挡 ⇒ 一行可以同时是"开着的"和"选中的"。
+                     只做左边一条：右缘在横向滚动后不再贴着可视区右边，画出来会像"虚线框"，
+                     而且与"多选紫底"叠在一起分不清哪个是激活。 -->
 
-                <Border Width="3" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                <Border Width="4" HorizontalAlignment="Left" VerticalAlignment="Stretch"
                         Background="{StaticResource CanvasRowActiveBarBrush}"
                         Visibility="{x:Bind ActiveBarMark, Mode=OneWay}"/>
 
@@ -136,12 +152,14 @@
 
                     <Border Grid.Column="0" Width="{x:Bind IndentWidth}"/>
 
-                    <!-- 箭头列宽固定 12：文件行不显示箭头，但列仍然占位，否则文件和文件夹的图标会错开。 -->
+                    <!-- 箭头列宽固定 12：文件行不显示箭头，但列仍然占位，否则文件和文件夹的图标会错开。
+                         箭头与图标的前景色一律绑 NameBrush：FontIcon 不继承 TextBlock 的前景色，
+                         漏掉就永远是主题默认的白，整行亮度被图标拉平，名字上的亮度差等于白做。 -->
 
                     <Grid Grid.Column="1" Width="12" VerticalAlignment="Center">
 
                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" FontSize="10"
-
+                                  Foreground="{x:Bind NameBrush, Mode=OneWay}"
                                   Glyph="{x:Bind ChevronGlyph, Mode=OneWay}" Visibility="{x:Bind ChevronMark}"/>
 
                     </Grid>
@@ -149,11 +167,11 @@
                     <Grid Grid.Column="2" VerticalAlignment="Center">
 
                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE8B7;" FontSize="14"
-
+                                  Foreground="{x:Bind NameBrush, Mode=OneWay}"
                                   Visibility="{x:Bind FolderIconMark}"/>
 
-                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;" FontSize="14"
-
+                        <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="{x:Bind FileGlyph, Mode=OneWay}" FontSize="14"
+                                  Foreground="{x:Bind NameBrush, Mode=OneWay}"
                                   Visibility="{x:Bind FileIconMark}"/>
 
                     </Grid>
@@ -166,6 +184,7 @@
 
                     <TextBlock Grid.Column="3" Text="{x:Bind Name}" FontSize="12" VerticalAlignment="Center"
                                HorizontalAlignment="Left"
+                               Foreground="{x:Bind NameBrush, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" Visibility="{x:Bind NameTextMark, Mode=OneWay}"/>
 
                     <local:SelfDrawnTextBox Grid.Column="3" Height="20" FontSize="12" VerticalAlignment="Center"
@@ -1573,7 +1592,7 @@
 
                     <Grid Grid.Row="1" Margin="16,12,16,6">
 
-                        <TextBlock x:Name="SidebarHeaderText" Text="Miniaturas" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="SidebarHeaderText" Text="Miniaturas" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SidebarTextMutedBrush}" VerticalAlignment="Center"/>
 
                     </Grid>
 
@@ -1621,7 +1640,8 @@
 
                                         </Border>
 
-                                        <TextBlock Grid.Column="1" Text="{x:Bind PageNumberText, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" FontWeight="Medium"/>
+                                        <TextBlock Grid.Column="1" Text="{x:Bind PageNumberText, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" FontWeight="Medium"
+                                                   Foreground="{StaticResource SidebarTextMutedBrush}"/>
 
                                     </Grid>
 
@@ -1735,7 +1755,8 @@
 
                                 <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch">
 
-                                    <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"/>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"
+                                               Foreground="{StaticResource SidebarTextBrush}"/>
 
                                     <local:SelfDrawnTextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" Submitted="BookmarkEdit_Submitted" Cancelled="BookmarkEdit_Cancelled" CommitRequested="BookmarkEdit_CommitRequested"/>
 
@@ -1787,7 +1808,8 @@
 
                                     <Rectangle Grid.Column="0" Width="{x:Bind Indent}"/>
 
-                                    <TextBlock Grid.Column="1" Text="{x:Bind Title}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Title}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                               Foreground="{StaticResource SidebarTextBrush}"/>
 
                                 </Grid>
 
@@ -1827,14 +1849,16 @@
 
                         </Grid.RowDefinitions>
 
-                        <!-- 标题行。新建动作只走右键菜单（点空白处 / 点文件夹行），不在这里放按钮：
-                             标题栏按钮无从表达"建在哪个层级"，只能建在库根，和右键菜单是两套语义。 -->
-
-                        <Grid Grid.Row="0" Padding="14,0,10,8">
+                        <!-- 标题行。新建动作只走右键菜单（点空白处 / 点文件夹行 / 点这一行），不在这里放按钮：
+                             标题栏按钮无从表达"建在哪个层级"，只能建在库根，和右键菜单是两套语义。
+                             Background=Transparent 是必需的：无底色的 Grid 不参与命中测试，
+                             这一行的空白像素就永远收不到右键。 -->
+                        <Grid Grid.Row="0" Padding="14,0,10,8" Background="Transparent"
+                              ContextRequested="CanvasHeader_ContextRequested">
 
                             <TextBlock x:Name="CanvasPanelHeaderText" FontSize="12" FontWeight="SemiBold"
 
-                                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                                       Foreground="{StaticResource SidebarTextMutedBrush}"
 
                                        VerticalAlignment="Center"/>
 

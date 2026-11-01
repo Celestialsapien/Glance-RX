@@ -447,6 +447,21 @@ public sealed partial class MainPage : Page
         _canvasRowMultiSelectBrush = SetCanvasRowBrush("CanvasRowMultiSelectBrush", isDark
             ? Windows.UI.Color.FromArgb(0xFF, 0x49, 0x40, 0x5F)
             : Windows.UI.Color.FromArgb(0xFF, 0xD8, 0xD0, 0xED));
+        // 文字色：默认前景色（深色档 = 纯白）在整列铺开时刺眼，夜间尤其。
+        // 亮度阶梯按"谁能抢眼"排：激活行名字 > 列表项名称 > 非激活行名字 > 附属信息。
+        // 激活与非激活之间可以拉得很开，因为整屏只有一行激活 —— 纯白给一行是强调，给一列才是刺眼。
+        SetCanvasRowBrush("SidebarTextBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0xC9, 0xC9, 0xD1)
+            : Windows.UI.Color.FromArgb(0xFF, 0x20, 0x20, 0x26));
+        SetCanvasRowBrush("SidebarTextMutedBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x8E, 0x8E, 0x97)
+            : Windows.UI.Color.FromArgb(0xFF, 0x6B, 0x6B, 0x74));
+        _canvasRowTextBrush = SetCanvasRowBrush("CanvasRowTextBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x9A, 0x9A, 0xA2)
+            : Windows.UI.Color.FromArgb(0xFF, 0x60, 0x60, 0x6A));
+        _canvasRowTextActiveBrush = SetCanvasRowBrush("CanvasRowTextActiveBrush", isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0xFA, 0xFA, 0xFC)
+            : Windows.UI.Color.FromArgb(0xFF, 0x0A, 0x0A, 0x0E));
         // 换色后所有行的底色引用不变（同一支实例），但要重算一次：选中/激活的判定要重新落到新实例上。
         UpdateCanvasRowBackgrounds();
         // 画布缺失胶囊的图标色是按主题算出来的（见 BuildToastCapsule），主题变了要按新主题重建一枚。
@@ -5787,7 +5802,7 @@ public sealed partial class MainPage : Page
         if (_canvasDoc == null) return false;
         if (string.IsNullOrEmpty(_currentCanvasPath))
         {
-            string? created = CanvasLibrary.CreateEmpty();
+            string? created = CanvasLibrary.CreateEmpty(DefaultCanvasName());
             if (created == null) return false;
             _currentCanvasPath = created;
             RefreshCanvasTree();
@@ -5863,6 +5878,8 @@ public sealed partial class MainPage : Page
     private SolidColorBrush? _canvasRowPressedBrush;
     private SolidColorBrush? _canvasRowSelectedBrush;
     private SolidColorBrush? _canvasRowMultiSelectBrush;
+    private SolidColorBrush? _canvasRowTextBrush;
+    private SolidColorBrush? _canvasRowTextActiveBrush;
 
     /// <summary>整棵树重建（换文档、展开面板时用）。</summary>
     private void RefreshCanvasTree()
@@ -6003,16 +6020,19 @@ public sealed partial class MainPage : Page
         }
     }
 
-    /// <summary>行的两种状态分开表达，各自只走一条通道：
-    /// · 激活（= 盖在 PDF 上的那份）→ 行首强调色竖条，由 <see cref="CanvasTreeNode.IsActive"/> 单独驱动；
-    /// · 选中（= 可以被批量操作的那几行）→ 整行底色：单选一行为中性灰（与旧选中态一致），成批为强调紫。
+    /// <summary>行的状态分开表达，各自只走一条通道：
+    /// · 激活（= 盖在 PDF 上的那份）→ 行首强调色竖条 + 名字文字提到最亮一档；
+    /// · 选中（= 可以被批量操作的那几行）→ 整行底色：单选一行为中性灰，成批为强调紫。
     /// 底色只表达选中、不表达激活，所以"点 A"能同时给出灰底（选中）与竖条（开着），两件事各自可见。
-    /// 底色优先级：选中 &gt; 按下 &gt; 悬浮，空白 = 透明。</summary>
+    /// 底色优先级：选中 &gt; 按下 &gt; 悬浮，空白 = 透明。
+    /// 文字亮度是"激活 vs 非激活"唯一的整行线索：层级深时竖条与名字会被缩进拉开几十像素，
+    /// 光靠行首那条竖条关联不到名字，靠文字亮度差则不论多深都成立（且不与两种选中底色抢通道）。</summary>
     private void UpdateCanvasRowBackgrounds()
     {
         foreach (var row in _canvasRows)
         {
             row.IsActive = IsActiveCanvas(row);
+            row.NameBrush = row.IsActive ? _canvasRowTextActiveBrush : _canvasRowTextBrush;
             row.RowBackground =
                 _selectedCanvasNodes.Contains(row)
                     ? (_canvasSingleSelection ? _canvasRowSelectedBrush : _canvasRowMultiSelectBrush)
@@ -6222,6 +6242,18 @@ public sealed partial class MainPage : Page
         args.Handled = true;
     }
 
+    /// <summary>标题行右键 = 一个永远在的"库根空白位"。列表被画布排满时一个空白像素都不剩，
+    /// 而"新建到根目录"必须始终可达 —— 标题行不参与滚动、不会消失，正好当这个落点。
+    /// 坐标只取事件自带的这一份：列表的 PointerPressed 没经过这里，
+    /// 那份"最近一次右键位置"可能是上一次点在列表里的旧值。</summary>
+    private void CanvasHeader_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (CanvasContextMenu is { IsOpen: true }) return;
+        if (!args.TryGetPosition(this, out Point pagePt)) return;   // 取不到坐标：不弹，绝不拿 (0,0) 兜底
+        CanvasContextMenu.ShowAt(this, pagePt, BuildCanvasMenuRows(null));
+        args.Handled = true;
+    }
+
     /// <summary>记下这次按下是不是右键、以及指针在【页面】坐标系里的位置。
     /// 每次按下都刷新（不做"记住上一次右键"）：触摸长按 / 笔杆键这类"按下时才不是右键"的来源
     /// 必须在这一次就判掉，否则会拿上一次的旧坐标去摆菜单。
@@ -6320,12 +6352,25 @@ public sealed partial class MainPage : Page
     private static SelfDrawnMenuRow MenuRowText(string text, string glyph, Action action)
         => new() { Text = text, Glyph = glyph, Invoke = action };
 
+    /// <summary>新建画布的默认名：当前 PDF 的文件名（不含扩展名）—— 画布是给"这份文档"画的，
+    /// 名字跟着文档走才认得出谁是谁；没开文档时退回本地化的"未命名"。
+    /// 重名不在这里处理：同一层再新建一次由 CanvasLibrary 自动加序号。</summary>
+    private string DefaultCanvasName()
+    {
+        string name = "";
+        try { name = System.IO.Path.GetFileNameWithoutExtension(_currentPdfPath); } catch { }
+        name = (name ?? "").Trim();
+        // 长度让位给" (2)"序号与扩展名：文档名可能很长，但画布文件名仍要留余量。
+        if (name.Length > 80) name = name[..80].Trim();
+        return name.Length > 0 ? name : LocalizationService.Get("CanvasUntitledCanvas");
+    }
+
     /// <summary>在指定目录（null = 库根）里新建一份空画布：**只让它在对应层级出现，不激活**。
     /// 建完就盖上会把正在用的那份挤掉 —— 用户往往是先建好再决定何时切过去，
     /// 新建这个动作本身不该有"切换画布"的副作用。只刷新这一层，不重建整棵树。</summary>
     private void CreateCanvasIn(string? parentDir)
     {
-        string? created = CanvasLibrary.CreateEmpty(null, parentDir);
+        string? created = CanvasLibrary.CreateEmpty(DefaultCanvasName(), parentDir);
         if (created == null)
         {
             ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);

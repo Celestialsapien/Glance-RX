@@ -70,12 +70,34 @@ public sealed class CanvasTreeNode : System.ComponentModel.INotifyPropertyChange
             _isActive = value;
             Raise(nameof(IsActive));
             Raise(nameof(ActiveBarMark));
+            Raise(nameof(FileGlyph));
         }
     }
 
     /// <summary>行首竖条的显隐（只有激活行显示）。避开转换器：WinUI 没有内置的 bool→Visibility。</summary>
     public Microsoft.UI.Xaml.Visibility ActiveBarMark =>
         _isActive ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    /// <summary>文件图标：激活行用实心页（E729），其余用空心页（E7C3）。两者同一字形族、同一包围盒
+    /// （都是 1.00em 高、宽高比 1.33），所以切换时图标的尺寸与位置都不动，差别只有"填满"这一件事
+    /// —— 填充面积约 0.86 vs 0.29，比只改亮度多一个"形状级"的线索，缩进再深也看得见。</summary>
+    public string FileGlyph => _isActive ? "\uE729" : "\uE7C3";
+
+    private Microsoft.UI.Xaml.Media.Brush? _nameBrush;
+
+    /// <summary>名字文字色，由界面按"是否激活"写两档。列满时整屏都是同一亮度的文字，
+    /// 单靠行首竖条认不出正开着的是哪一份（层级深时竖条离名字还有几十像素），
+    /// 所以再用一档亮度差把激活行拎出来 —— 与底色（选中）、竖条（激活标记）互不抢通道。</summary>
+    public Microsoft.UI.Xaml.Media.Brush? NameBrush
+    {
+        get => _nameBrush;
+        set
+        {
+            if (ReferenceEquals(_nameBrush, value)) return;
+            _nameBrush = value;
+            Raise(nameof(NameBrush));
+        }
+    }
 
     /// <summary>展开箭头（只有文件夹行有）。</summary>
     public Microsoft.UI.Xaml.Visibility ChevronMark =>
@@ -266,9 +288,9 @@ internal static class CanvasLibrary
         public bool IsFolder { get; }
     }
 
-    /// <summary>在库里挑一个还没被占用的画布路径：未命名.gcanvas / 未命名 (2).gcanvas / …
+    /// <summary>在库里挑一个还没被占用的画布路径：名字.gcanvas / 名字 (2).gcanvas / …
     /// <paramref name="parentPath"/> 为 null = 库根。只挑路径不建文件 —— 用户可能只是想看一眼，不落空文件。</summary>
-    public static string NewCanvasPath(string baseName = "未命名", string? parentPath = null)
+    private static string NewCanvasPath(string baseName, string? parentPath)
     {
         string dir = string.IsNullOrEmpty(parentPath) ? Root : parentPath!;
         try { Directory.CreateDirectory(dir); } catch (Exception) { }
@@ -279,10 +301,12 @@ internal static class CanvasLibrary
     }
 
     /// <summary>建一份空白画布并落盘，返回文件路径；写失败返回 null。
-    /// 先落盘再交给界面：这样列表刷新能立刻看到它，也不会出现"内存里有一份、盘上没有"的悬空画布。</summary>
-    public static string? CreateEmpty(string? baseName = null, string? parentPath = null)
+    /// 先落盘再交给界面：这样列表刷新能立刻看到它，也不会出现"内存里有一份、盘上没有"的悬空画布。
+    /// 名字由调用方给（当前文档名或本地化的"未命名"）—— 库不猜名字，重名在这里加序号。</summary>
+    public static string? CreateEmpty(string baseName, string? parentPath = null)
     {
-        string path = NewCanvasPath(string.IsNullOrWhiteSpace(baseName) ? "未命名" : baseName!.Trim(), parentPath);
+        if (!IsNameValid(baseName)) return null;
+        string path = NewCanvasPath(baseName.Trim(), parentPath);
         try
         {
             if (CanvasStore.SaveFile(path, new CanvasDoc())) return path;
