@@ -38,15 +38,15 @@
           PointerExited="Root_PointerExited">
 
         <!-- ===== 边框壳：常态描边 + 聚焦强调描边（两层切换，免去代码里捞主题资源） ===== -->
-        <Border Background="Transparent" CornerRadius="4" BorderThickness="1"
+        <Border x:Name="FrameBorder" Background="Transparent" CornerRadius="4" BorderThickness="1"
                 BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"/>
         <Border x:Name="FocusFrame" Background="Transparent" CornerRadius="4" BorderThickness="1"
                 BorderBrush="{ThemeResource GlanceAccentBrush}" Visibility="Collapsed"/>
 
-        <!-- ===== 文本区：改用 Canvas 承载 ⇒ 子元素按"自然尺寸"测量（不受父级槽宽钳制）、可用
+        <!-- ===== 文本区：用 Canvas 承载 ⇒ 子元素按"自然尺寸"测量（不受父级槽宽钳制）、可用
              Canvas.Left/Top 自由定位；本层再设 Clip 裁到自身范围，即实现单行横向"滚动"。
-             （此前用 Grid：溢出槽宽的字形会被钳到槽宽而整段看不见，改用 Canvas 消除该钳制。） ===== -->
-        <Canvas x:Name="TextArea" Margin="4,6,4,6" VerticalAlignment="Center" SizeChanged="TextArea_SizeChanged">
+             （不用 Grid：Grid 会把溢出槽宽的字形钳到槽宽，长名字整段看不见。） ===== -->
+        <Canvas x:Name="TextArea" Margin="4,0,4,0" VerticalAlignment="Center" SizeChanged="TextArea_SizeChanged">
             <!-- 选区高亮（在字形之下）；位置/尺寸由代码用 Canvas.SetLeft/SetTop 与 Width/Height 给出 -->
             <Border x:Name="SelRect" Background="{ThemeResource GlanceAccentBrush}"
                     Opacity="0.35" Visibility="Collapsed"/>

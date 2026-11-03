@@ -121,6 +121,13 @@ public class SettingsService
             {
                 _data = data;
                 _data.CanvasExpandedFolders ??= new();   // 设置文件里写成 null 时的兜底
+                // 反序列化出来的字典用的是默认比较器，而路径比较必须忽略大小写（Windows）。
+                if (_data.CanvasOrder == null) _data.CanvasOrder = new(StringComparer.OrdinalIgnoreCase);
+                else if (!ReferenceEquals(_data.CanvasOrder.Comparer, StringComparer.OrdinalIgnoreCase))
+                {
+                    _data.CanvasOrder = new Dictionary<string, List<string>>(
+                        _data.CanvasOrder, StringComparer.OrdinalIgnoreCase);
+                }
             }
         }
         catch { }
@@ -140,6 +147,25 @@ public class SettingsService
         catch { }
     }
 
+    /// <summary>画布库每一层的手动顺序：目录绝对路径 → 子项的文件/目录名（含扩展名，按显示顺序）。
+    /// 不在表里的目录 = 没手动排过，按"文件夹在前、再按名称"。表里多出来的名字（文件被删/改名）
+    /// 在下次排序时自然落空，不影响其余项的顺序。</summary>
+    public IReadOnlyDictionary<string, List<string>> CanvasOrder => _data.CanvasOrder;
+
+    /// <summary>某一层的手动顺序；没排过返回 null（= 用默认排序）。</summary>
+    public IReadOnlyList<string>? GetCanvasOrder(string dirPath)
+        => _data.CanvasOrder.TryGetValue(dirPath, out List<string>? names) ? names : null;
+
+    /// <summary>写某一层的手动顺序（整体覆盖）。名字列表按显示顺序给，空列表等价于"没排过"。</summary>
+    public void SetCanvasOrder(string dirPath, IEnumerable<string> names)
+    {
+        if (string.IsNullOrEmpty(dirPath)) return;
+        var list = new List<string>(names);
+        if (list.Count == 0) _data.CanvasOrder.Remove(dirPath);
+        else _data.CanvasOrder[dirPath] = list;
+        Save();
+    }
+
     private class SettingsData
     {
         public string AppTheme { get; set; } = "Default";
@@ -153,5 +179,8 @@ public class SettingsService
         public double CanvasPanelScrollX { get; set; }
 
         public double CanvasPanelScrollY { get; set; }
+
+        /// <summary>每一层的手动顺序（拖拽的结果）。旧设置文件没有这一项 ⇒ 反序列化后为 null，Load 里补齐。</summary>
+        public Dictionary<string, List<string>> CanvasOrder { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
 }

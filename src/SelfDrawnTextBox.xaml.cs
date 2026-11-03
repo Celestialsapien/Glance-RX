@@ -55,6 +55,9 @@ public sealed partial class SelfDrawnTextBox : UserControl
     private int _caretIndex;           // 插入光标的"活跃端"码元索引：拖选时跟随鼠标（支持反向拖选），其余时刻=选区末端
     private bool _ibeamInstalled;
     private bool _pointerInside;       // 指针据实是否仍在控件范围内（几何判定，不唯事件 —— 以防被"假 PointerExited"骗）
+    /// <summary>已经脱离可视树（行容器重建 / 列表换行集合时会发生）。此刻的失焦不是"用户点到别处"，
+    /// 不能当成提交 —— 否则列表一刷新，正在改的名字就被自己提交掉、编辑框当场消失。</summary>
+    private bool _unloading;
     private DispatcherTimer? _blink;
     private long _lastPressMs;         // 上一次按下时刻（自行判双击，避开 PointerPressed Handled 后 Tapped 不触发）
     private int _lastPressIndex = -1;
@@ -62,16 +65,23 @@ public sealed partial class SelfDrawnTextBox : UserControl
     public SelfDrawnTextBox()
     {
         InitializeComponent();
+        // 内容根（Root）必须与控件本体等尺寸：内部所有居中、裁切、右对齐的"清空 ×"都以"控件这一格"为基准，
+        // 而 UserControl 只把内容按【它自己的期望尺寸】从左上摆放，不会撑满控件。隐藏宿主是原生 TextBox，
+        // 模板把最小高度写死绑到主题资源（32）⇒ 期望高度恒为 32，控件再矮它也不缩：
+        // 竖向文字在 32 里居中（相对矮盒子整体下沉），横向按文本宽度走（长名字直接画出框外）。
+        // 把 Root 钉在实测尺寸上：控件多大，文字就在多大里居中，与宿主/模板无关。
+        SizeChanged += (_, e) => PinContentToControl(e.NewSize);
         // Loaded 时字体的继承链已落定 ⇒ 重取行高/前缀宽度（构造期只拿到控件默认字号）
         Loaded += (_, _) =>
         {
+            _unloading = false;
             UpdateMetrics();
             RebuildAdvances();
             UpdateCaretAndSelection();
             // 受 AutoFocusOnShow 门控：否则开机时工具栏项（AutoFocusOnShow=False）会在 Loaded 里无条件抢焦点，
             if (AutoFocusOnShow && Visibility == Visibility.Visible) FocusEditor();
         };
-        Unloaded += (_, _) => { RestoreCursor(); StopBlink(); };
+        Unloaded += (_, _) => { _unloading = true; RestoreCursor(); StopBlink(); };
         // 可见性翻转 ⇒ 进入编辑落焦点（延迟一拍等布局落定）；折叠时立即收尾（否则指针还停在原地、
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
@@ -91,7 +101,17 @@ public sealed partial class SelfDrawnTextBox : UserControl
         });
         UpdateMetrics();
         RebuildAdvances();
-        ApplyCompactMode();   // 默认非紧凑 = XAML 里的 4,6,4,6；显式调一次避免依赖"谁先设值"的顺序
+        ApplyTextAreaMargin();   // 显式调一次：不依赖"谁先设值"的顺序
+    }
+
+    /// <summary>把内容根的尺寸钉到控件实测尺寸。相等的值不重设（避免无谓的布局失效/回环）；
+    /// 尺寸为 0（控件折叠）时跳过 —— 折叠期把 Root 设成 0 会让"不给 Height"的使用方再也长不回来。</summary>
+    private void PinContentToControl(Size size)
+    {
+        if (size.Width > 0 && (double.IsNaN(Root.Width) || Math.Abs(Root.Width - size.Width) > 0.01))
+            Root.Width = size.Width;
+        if (size.Height > 0 && (double.IsNaN(Root.Height) || Math.Abs(Root.Height - size.Height) > 0.01))
+            Root.Height = size.Height;
     }
 
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(
@@ -138,6 +158,35 @@ public sealed partial class SelfDrawnTextBox : UserControl
         set => SetValue(AutoFocusOnShowProperty, value);
     }
 
+    public static readonly DependencyProperty ShowFrameProperty = DependencyProperty.Register(
+        nameof(ShowFrame), typeof(bool), typeof(SelfDrawnTextBox),
+        new PropertyMetadata(true, OnShowFrameChanged));
+
+    /// <summary>是否由本控件画那圈描边（默认 true）。置 false 的场合（画布行内改名框）是
+    /// "框比控件高"：控件用 <see cref="AutoHeight"/> 只占一行，而框要比一行再宽裕一点，
+    /// 于是框改由外层按固定尺寸画。控件自画的框恒等于控件自身尺寸（Root 已钉成控件尺寸），
+    /// 两者尺寸不一致时四条边不保证都画得出来，故这类场合必须交给外层。</summary>
+    public bool ShowFrame
+    {
+        get => (bool)(GetValue(ShowFrameProperty) ?? true);
+        set => SetValue(ShowFrameProperty, value);
+    }
+
+    private static void OnShowFrameChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        => (d as SelfDrawnTextBox)?.ApplyFrameVisibility();
+
+    /// <summary>聚焦态：框架描边由"是否聚焦"和"是否自绘"两件事共同决定，只在这一个出口计算，
+    /// 免得 ShowFrame 与焦点切换各自写 Visibility 互相覆盖。</summary>
+    private bool _frameFocused;
+
+    private void ApplyFrameVisibility()
+    {
+        if (FrameBorder != null)
+            FrameBorder.Visibility = ShowFrame ? Visibility.Visible : Visibility.Collapsed;
+        if (FocusFrame != null)
+            FocusFrame.Visibility = ShowFrame && _frameFocused ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public static readonly DependencyProperty DigitsOnlyProperty = DependencyProperty.Register(
         nameof(DigitsOnly), typeof(bool), typeof(SelfDrawnTextBox), new PropertyMetadata(false, OnDigitsOnlyChanged));
 
@@ -147,22 +196,34 @@ public sealed partial class SelfDrawnTextBox : UserControl
         set => SetValue(DigitsOnlyProperty, value);
     }
 
-    public static readonly DependencyProperty CompactModeProperty = DependencyProperty.Register(
-        nameof(CompactMode), typeof(bool), typeof(SelfDrawnTextBox), new PropertyMetadata(false, OnCompactModeChanged));
+    public static readonly DependencyProperty AutoHeightProperty = DependencyProperty.Register(
+        nameof(AutoHeight), typeof(bool), typeof(SelfDrawnTextBox),
+        new PropertyMetadata(false, (d, _) => (d as SelfDrawnTextBox)?.UpdateMetrics()));
 
-    /// <summary>紧凑模式：去掉文本区上下各 6px 的留白，整控件高度 ≈ 行高 + 描边。
-    /// 供"行高固定 22px 的列表内改名"用 —— 默认留白会把行撑高一截，进编辑时列表会跳一下。</summary>
-    public bool CompactMode
+    /// <summary>高度恒等于实测行高（随字号/文本缩放自适应）。
+    /// 让"本控件的文字盒子"与同一行里高度为一行高的普通 TextBlock 完全同尺寸 ⇒
+    /// 两者都用行内 <c>VerticalAlignment=Center</c> 时位置逐像素一致，进出编辑态不产生位移。
+    /// 别再套一层固定高度的容器去居中：每多一层居中就多一次像素舍入（高 DPI 下会差 1 物理像素）。</summary>
+    public bool AutoHeight
     {
-        get => (bool)(GetValue(CompactModeProperty) ?? false);
-        set => SetValue(CompactModeProperty, value);
+        get => (bool)(GetValue(AutoHeightProperty) ?? false);
+        set => SetValue(AutoHeightProperty, value);
     }
 
-    private static void OnCompactModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
-        => (d as SelfDrawnTextBox)?.ApplyCompactMode();
-
-    private void ApplyCompactMode()
-        => TextArea.Margin = CompactMode ? new Thickness(4, 0, 4, 0) : new Thickness(4, 6, 4, 6);
+    /// <summary>文本区留白只由这一处决定：左右恒 4（文字与描边之间留出空隙，贴边会显得挤、长文本还会
+    /// 顶到描边上），聚焦且有文本时右侧让 26 给"清空 ×"；上下恒 0。
+    /// ⚠ 这个 4 是"文字与描边之间的视觉约定值"，使用方在同一格里放常态 TextBlock 时
+    /// （画布行名字、书签名字）必须给它相同的左内边距，否则进出编辑态文字会横向跳 4px；
+    /// 改这里就要同步改那几处的 Margin（Search: "与输入框内文字的左内边距一致"）。
+    /// 竖向不在这里做任何推算 —— 文本区高度就是行高（见 <see cref="UpdateMetrics"/>），
+    /// 由 <c>VerticalAlignment=Center</c> 在控件里居中，与同一行里"一行高 + 居中"的 TextBlock 位置一致。</summary>
+    private void ApplyTextAreaMargin()
+    {
+        bool showClear = ShowClearButton && Host.FocusState != FocusState.Unfocused && (Host.Text?.Length ?? 0) > 0;
+        const double side = 4;
+        TextArea.Margin = new Thickness(side, 0, showClear ? 26 : side, 0);
+        TextArea.VerticalAlignment = VerticalAlignment.Center;
+    }
 
     private static void OnDigitsOnlyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -198,7 +259,12 @@ public sealed partial class SelfDrawnTextBox : UserControl
         double h = MeasureTb.DesiredSize.Height;
         _lineHeight = h > 0 ? h : 16;
         Caret.Height = _lineHeight;
-        // Canvas 的期望尺寸恒为 0 ⇒ 不会像 Grid 那样"按内容定高"，盒子高度会被隐藏宿主 TextBox 单方面撑高/压扁，
+        // AutoHeight：控件高度就是一行行高。盒子内部因此没有任何竖向余量，
+        // 文字相对控件零偏移 —— 与同一行里"一行高 + 行内居中"的 TextBlock 位置完全一致。
+        if (AutoHeight && _lineHeight > 0 && Math.Abs(Height - _lineHeight) > 0.01) Height = _lineHeight;
+        // Canvas 的期望尺寸恒为 0（不按内容定高）⇒ 文本区高度必须在这里显式给出：
+        // 它只是"行盒"，竖向居中交给 Canvas 的 VerticalAlignment=Center，
+        // 这样控件被给成任何高度（行内 18 / 工具栏 32）时行盒都落在正中。
         TextArea.Height = _lineHeight;
     }
 
@@ -256,8 +322,9 @@ public sealed partial class SelfDrawnTextBox : UserControl
         // 居中模式：文本比视口窄时把整块居中（此时不滚动）；溢出后 anchor=0，退化为左对齐贴光标滚动
         _anchorX = ContentAlignment == TextAlignment.Center ? Math.Max(0, (view - total) / 2) : 0;
 
-        // Canvas 承载 ⇒ 用 Canvas.SetLeft/SetTop 定位；垂直方向按行高空出上下居中（Canvas 忽略对齐属性）
-        double top = Math.Max(0, (TextArea.ActualHeight - _lineHeight) / 2);
+        // Canvas 承载 ⇒ 用 Canvas.SetLeft/SetTop 定位。竖直方向行盒从 Canvas 顶端起排（top=0），
+        // "在控件里居中"由 TextArea 的 VerticalAlignment=Center 完成，不在这里算。
+        double top = 0;
         Canvas.SetLeft(VisibleText, _anchorX - _scrollX);
         Canvas.SetTop(VisibleText, top);
         Canvas.SetLeft(Caret, _anchorX + cx - _scrollX);
@@ -296,7 +363,7 @@ public sealed partial class SelfDrawnTextBox : UserControl
     {
         bool show = ShowClearButton && Host.FocusState != FocusState.Unfocused && (Host.Text?.Length ?? 0) > 0;
         ClearHit.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        TextArea.Margin = new Thickness(4, 6, show ? 26 : 4, 6);
+        ApplyTextAreaMargin();   // 右侧让位与左右内边距是同一份布局，必须走同一个出口
     }
 
     private void Host_TextChanged(object sender, TextChangedEventArgs e)
@@ -347,7 +414,8 @@ public sealed partial class SelfDrawnTextBox : UserControl
     private void Host_GotFocus(object sender, RoutedEventArgs e)
     {
         IsRequestingFocus = false;   // 焦点已落定，复位"自发起"标记（其后框架的重定位请求将被调用方拦截）
-        FocusFrame.Visibility = Visibility.Visible;
+        _frameFocused = true;
+        ApplyFrameVisibility();
         Caret.Visibility = Visibility.Visible;
         StartBlink();
         UpdateCaretAndSelection();
@@ -357,13 +425,15 @@ public sealed partial class SelfDrawnTextBox : UserControl
 
     private void Host_LostFocus(object sender, RoutedEventArgs e)
     {
-        FocusFrame.Visibility = Visibility.Collapsed;
+        _frameFocused = false;
+        ApplyFrameVisibility();
         StopBlink();
         Caret.Visibility = Visibility.Collapsed;
         UpdateClearButton();
         EditorLostFocus?.Invoke(this, EventArgs.Empty);
-        // 仅"仍在编辑（控件可见）"时请求提交；Cancel/Confirm 置 IsEditing=false 会先折叠控件 ⇒ 天然挡住重复提交
-        if (Visibility == Visibility.Visible) CommitRequested?.Invoke(this, new RoutedEventArgs());
+        // 仅"仍在编辑（控件可见）且还挂在可视树上"时请求提交；Cancel/Confirm 置 IsEditing=false 会先折叠控件
+        // ⇒ 天然挡住重复提交。控件已被摘下行（_unloading）时的失焦是重建的副作用，交回调用方保留编辑态。
+        if (!_unloading && Visibility == Visibility.Visible) CommitRequested?.Invoke(this, new RoutedEventArgs());
     }
 
     private void Host_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -496,10 +566,24 @@ public sealed partial class SelfDrawnTextBox : UserControl
         if (!Host.Focus(FocusState.Programmatic)) IsRequestingFocus = false;
     }
 
-    private void FocusEditor()
+    private void FocusEditor() => FocusEditor(MaxFocusTries);
+    /// <summary>落焦点，失败就隔一个调度回合再试，最多 <see cref="MaxFocusTries"/> 次。
+    /// 行内改名框是"上一拍才刚 Visible"的元素：容器与布局都还没落定时，那一次 Focus 会静默失败，
+    /// 于是框亮着却不吃键盘（打字无反应、Enter/Esc 无效），看上去就是"卡在编辑态退不出去"。
+    /// 拿到焦点后才进入正常的收尾（起光标、挪到文本末尾、滚到可见处）。</summary>
+    private void FocusEditor(int tries)
     {
         if (Visibility != Visibility.Visible) return;
         FocusHost();
+        if (Host.FocusState == FocusState.Unfocused)
+        {
+            if (tries > 0)
+            {
+                DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                    () => FocusEditor(tries - 1));
+            }
+            return;
+        }
         // ⚠ 光标必须在这里【无条件】起表，不能只靠 Host_GotFocus。
         // 焦点若【已经在】宿主上（例如点 √/× 结束编辑时，按钮被调用方的 GettingFocus 拦截挡下、
         // 反之"点别处失焦退出"时焦点真丢了，GotFocus 会来，所以那条路一直正常 ——
@@ -511,6 +595,9 @@ public sealed partial class SelfDrawnTextBox : UserControl
         _scrollX = double.MaxValue;
         UpdateCaretAndSelection();
     }
+
+    /// <summary>落焦点的重试次数：一行之内必成。给到 6 是留足"容器实例化 + 一次布局"的余量。</summary>
+    private const int MaxFocusTries = 6;
 
     private void StartBlink()
     {

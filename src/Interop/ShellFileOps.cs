@@ -17,6 +17,7 @@
 
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
@@ -34,13 +35,33 @@ internal static class ShellFileOps
     public static bool MoveToRecycleBin(string path)
     {
         if (string.IsNullOrEmpty(path)) return false;
+        return DeleteToRecycleBin(new[] { path });
+    }
+
+    /// <summary>一次 shell 调用把多项送进回收站。返回 false = 至少有一项没删成（哪一项由系统决定，拿不到）。
+    /// pFrom 本来就是"双 null 结尾的路径列表"，逐项调用等于把这段流程跑 N 遍 ——
+    /// 每遍都要走回收站索引 + 杀软扫描，多选二十项时的卡顿就是这 N 次往返叠出来的。
+    /// 调用方拿到 false 之后仍然应该重扫目录：部分失败时磁盘是真值，列表按实际结果收敛。</summary>
+    public static bool MoveToRecycleBin(IReadOnlyList<string> paths)
+        => paths == null || paths.Count == 0 || DeleteToRecycleBin(paths);
+
+    private static bool DeleteToRecycleBin(IReadOnlyList<string> paths)
+    {
+        var list = new System.Text.StringBuilder();
+        foreach (string path in paths)
+        {
+            if (string.IsNullOrEmpty(path)) continue;
+            list.Append(path).Append('\0');
+        }
+        if (list.Length == 0) return true;
+
         try
         {
             var op = new SHFILEOPSTRUCT
             {
                 wFunc = FO_DELETE,
-                // pFrom 必须是双 null 结尾的路径列表；托管封送只补一个结尾，所以要自己再接一个 '\0'。
-                pFrom = path + "\0",
+                // pFrom 必须是双 null 结尾的路径列表；托管封送只补一个结尾，所以每一项后面都要自己接 '\0'。
+                pFrom = list.ToString(),
                 fFlags = FOF_ALLOWUNDO | FOF_SILENT | FOF_NOERRORUI,
             };
             int result = SHFileOperation(ref op);

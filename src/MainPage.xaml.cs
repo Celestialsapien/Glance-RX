@@ -264,6 +264,9 @@ public sealed partial class MainPage : Page
         // 全局拦截 Tab：用户要求界面只由鼠标操作，Tab 不应把键盘焦点移到任何控件
         // （页数输入框、侧边栏缩略图、工具栏按钮等都在主视觉树内，Tab 的 KeyDown 会冒泡到此处）。
         this.AddHandler(KeyDownEvent, new KeyEventHandler(OnKeyDownSuppressTab), true);
+        // 点到行内改名框【以外】的任何地方 = 提交这次改名。见 OnPagePointerPressedCommitRename：
+        // 列表行不是可聚焦元素，点它不会移走焦点，只靠 LostFocus 会有"点哪儿都退不出去"的情况。
+        this.AddHandler(PointerPressedEvent, new PointerEventHandler(OnPagePointerPressedCommitRename), true);
 
         // 主键盘 = / - ：WinUI XAML 枚举解析不支持 OemPlus/OemMinus 字符串（WMC0055），
         var zoomInAccel = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
@@ -379,6 +382,15 @@ public sealed partial class MainPage : Page
         if (CanvasPanelHeaderText != null) CanvasPanelHeaderText.Text = LocalizationService.Get("CanvasPanelTitle");
         // 列表的数据源恒为 _canvasRows（拍平后的可见行）：增删都靠差分就地改这个集合，容器与滚动位置才保得住。
         if (CanvasRowList != null) CanvasRowList.ItemsSource = _canvasRows;
+        // 拖拽的移动/抬起一律挂在【列表】上，不挂在行上：整个拖拽期间行容器可能被刷新重建，
+        // 抓在行上会在中途断线。handledEventsToo=true 是因为内部 ScrollViewer 会处理掉一部分指针事件
+        // （触摸拖动滚动时 PointerMoved 是 Handled 的），而"移出门槛即作废长按"恰恰要靠这些移动事件。
+        if (CanvasRowList != null)
+        {
+            CanvasRowList.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(CanvasRowList_PointerMoved), true);
+            CanvasRowList.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(CanvasRowList_PointerReleased), true);
+            CanvasRowList.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler(CanvasRowList_PointerCaptureLost), true);
+        }
         // 展开状态跨会话恢复：先把上次离开时的展开集合装回来，第一次 BuildTree 就直接是那个样子。
         foreach (string folder in _settingsService.CanvasExpandedFolders)
         {
@@ -515,9 +527,11 @@ public sealed partial class MainPage : Page
         }
         else if (e.Key == VirtualKey.Escape)
         {
+            // 行内改名：Esc = 放弃这次改名（不落盘）。放在最前 —— 改名态下其它 Esc 语义都不该抢。
+            if (FindRenamingNode() is { } renaming) { renaming.IsRenaming = false; e.Handled = true; }
             // 白板连线拖拽中按 Esc → 取消本次连线（松手落空同样会取消，Esc 只是更快的退出手感）。
             // ⚠ 不接管"按住波浪键的待接态"：那是白板内部状态，取消由 GpuPageView 自己管（松开它 / 同卡再点 / 左键点空白）。
-            if (GpuViewer.CancelCanvasConnection()) e.Handled = true;
+            else if (GpuViewer.CancelCanvasConnection()) e.Handled = true;
         }
         else if (e.Key == VirtualKey.Delete &&
                  !e.Handled && _currentMode == EditMode.Canvas && !GpuViewer.IsCanvasEditing)
@@ -5805,6 +5819,7 @@ public sealed partial class MainPage : Page
             string? created = CanvasLibrary.CreateEmpty(DefaultCanvasName());
             if (created == null) return false;
             _currentCanvasPath = created;
+            AppendCanvasOrder(created);   // 自动建的那份同样排到最末
             RefreshCanvasTree();
         }
         try
@@ -5885,7 +5900,8 @@ public sealed partial class MainPage : Page
     private void RefreshCanvasTree()
     {
         if (CanvasRowList == null) return;
-        _canvasRoots = CanvasLibrary.BuildTree(_expandedCanvasFolders);
+        _canvasRoots = CanvasLibrary.BuildTree(_expandedCanvasFolders, _settingsService.CanvasOrder);
+        NormalizeCanvasOrderTree(_canvasRoots);   // 建完就把顺序表钉死：此后只有拖拽能改相对次序
         SyncCanvasRows();
     }
 
@@ -5956,7 +5972,17 @@ public sealed partial class MainPage : Page
     /// 找不到该目录（上级被整体删掉/改名）时退回整树重建。</summary>
     private void RefreshCanvasFolder(string dirPath)
     {
-        if (CanvasRowList == null) return;
+        if (!PatchCanvasFolder(dirPath)) { RefreshCanvasTree(); return; }
+        SyncCanvasRows();
+    }
+
+    /// <summary>刷新目录的"前半段"：把这一层的磁盘现状同步进树，但不拍平、不动列表。
+    /// 拆出来是给批量删除用的 —— 一次删掉多项时会影响多个目录，逐目录调 RefreshCanvasFolder
+    /// 会把整棵列表拍平 N 遍（每遍都是 O(行数×IndexOf)），行越多越明显。
+    /// 返回 false = 树里找不到这个目录，调用方应整树重建。</summary>
+    private bool PatchCanvasFolder(string dirPath)
+    {
+        if (CanvasRowList == null) return false;
 
         ObservableCollection<CanvasTreeNode>? target;
         int depth;
@@ -5971,10 +5997,11 @@ public sealed partial class MainPage : Page
             target = folder?.Children;
             depth = (folder?.Depth ?? 0) + 1;
         }
-        if (target == null) { RefreshCanvasTree(); return; }
+        if (target == null) return false;
 
-        CanvasLibrary.SyncChildren(target, dirPath, _expandedCanvasFolders, depth);
-        SyncCanvasRows();
+        CanvasLibrary.SyncChildren(target, dirPath, _expandedCanvasFolders, _settingsService.CanvasOrder, depth);
+        NormalizeCanvasOrder(dirPath, target);   // 这一层同样钉死：新出现的一律追加到末尾
+        return true;
     }
 
     /// <summary>把树拍平成可见行并就地同步进列表（增删而非整体替换）：容器与滚动位置都保住。</summary>
@@ -6015,6 +6042,9 @@ public sealed partial class MainPage : Page
     {
         foreach (var n in nodes)
         {
+            // 已提交删除的行（含整棵子树）不再出行：删除的耗时全在磁盘那一步，
+            // 把它挪到后台之后，界面"点下去就少这几行"，不必等 shell 回来。
+            if (n.IsPendingDelete) continue;
             into.Add(n);
             if (n.IsFolder && n.IsExpanded) FlattenCanvasRows(n.Children, into);
         }
@@ -6100,8 +6130,9 @@ public sealed partial class MainPage : Page
         }
     }
 
-    /// <summary>整行按下：点文件夹 = 展开/收起（可反复点），点画布 = 立刻盖上。
-    /// 动作放在按下而不是抬起 —— 展开/收起会重建行集合，等抬起时容器可能已经不在了（表现为"点一下没反应"）。
+    /// <summary>整行按下：这里只落"选中"，主动作（打开画布 / 展开文件夹）留到抬起时结算 —— 见 CommitCanvasPress。
+    /// 不在这里执行，是因为长按拖拽要占用同一次按下：按下就展开文件夹会当场重排行集合，
+    /// 拖拽还没起飞落点就已经换了一套坐标；按下就切画布则会让一次拖拽顺手把画布换掉（还要整份重新解析）。
     /// 带 Ctrl / Shift 时只改多选、不执行行本身的主动作：否则连选几下会把画布来回换、把文件夹开开关关。</summary>
     private void CanvasRow_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
@@ -6124,15 +6155,47 @@ public sealed partial class MainPage : Page
         }
 
         SelectOnlyCanvasNode(node);
+        BeginCanvasPress(node, sender as FrameworkElement, e);
+    }
 
-        if (node.IsFolder)
+    /// <summary>按下时记账：起点坐标、抓取点在行内的纵向位置、待结算的节点，然后起长按定时器。
+    /// 这三样东西就是这次按下期间的全部状态 —— 抬起时据此判断"是点了一下还是拖了一下"。</summary>
+    private void BeginCanvasPress(CanvasTreeNode node, FrameworkElement? container, PointerRoutedEventArgs e)
+    {
+        Point pt = e.GetCurrentPoint(this).Position;
+        _canvasPressNode = node;
+        _canvasDragPressPoint = pt;
+        _canvasDragPointer = e.Pointer;
+        _canvasDragMoved = false;
+
+        // 抓取点在行内的纵向位置：幽灵跟手时保持这条"抓取线"，不会一跳就偏到指针正下方。
+        double grabY = pt.Y;
+        if (container != null)
         {
-            node.IsExpanded = !node.IsExpanded;
-            if (node.IsExpanded) _expandedCanvasFolders.Add(node.FullPath);
-            else _expandedCanvasFolders.Remove(node.FullPath);
-            SyncCanvasRows();
+            try { grabY = pt.Y - container.TransformToVisual(this).TransformPoint(new Point(0, 0)).Y; }
+            catch (Exception) { }   // 换算不出来（容器刚被移出树）：退回绝对坐标，幽灵仍跟着指针
         }
-        else ApplyCanvas(node.FullPath);
+        _canvasDragGrabY = Math.Clamp(grabY, 0, 24);
+
+        StartCanvasHoldTimer();
+    }
+
+    /// <summary>抬起的结算点：把按下时推迟的动作补上 —— 没拖动过才算"点了一下"。
+    /// 由 CanvasRowList_PointerReleased 调用（抬起事件挂在列表上，行容器被重建也不会丢）。
+    /// 动作按【节点引用】执行、不按容器：这条路径成立的前提是按下到抬起之间没有人动过行集合。</summary>
+    private void CommitCanvasPress()
+    {
+        CanvasTreeNode? node = _canvasPressNode;
+        _canvasPressNode = null;
+        if (node == null || _canvasDragMoved) return;
+        if (!_canvasRows.Contains(node) || node.IsRenaming) return;   // 期间被删/改名/收起了
+
+        if (!node.IsFolder) { ApplyCanvas(node.FullPath); return; }
+
+        node.IsExpanded = !node.IsExpanded;
+        if (node.IsExpanded) _expandedCanvasFolders.Add(node.FullPath);
+        else _expandedCanvasFolders.Remove(node.FullPath);
+        SyncCanvasRows();
     }
 
     /// <summary>普通点击：把选择重置成"只有这一行"，并用中性灰底标出来（不是紫底 —— 紫底留给成批选择）。
@@ -6223,6 +6286,656 @@ public sealed partial class MainPage : Page
         if (ReferenceEquals(_hoverCanvasNode, node)) _hoverCanvasNode = null;
         if (ReferenceEquals(_pressedCanvasNode, node)) _pressedCanvasNode = null;
         UpdateCanvasRowBackgrounds();
+    }
+
+    // ---------------- 行长按拖拽排序 ----------------
+    //
+    // 一次拖拽分三段，界限只看指针：按下 → 长按定时器（CanvasDragHoldMs）到点且没移动过 ⇒ 起飞；
+    // 期间指针移动超过 CanvasDragSlop ⇒ 认定是滚动手势，长按作废、这次按下只剩"选中"；
+    // 起飞后指针捕获在【列表】上，移动抬起来自列表而不是某一行（行容器随时可能被重建）。
+    // 落点由"指针 Y 落在哪一行的哪一段"决定：文件夹行中段 = 放进它里面（画描边环），
+    // 其余 = 插在两行之间（画一条对齐该层缩进的细线）。落点一律吸附到行的边界上，
+    // 不跟指针连续移动 —— 提示必须落在"会变成什么样"的位置，而不是指针在哪就在哪。
+
+    /// <summary>长按多久起飞。太短会和"点一下"抢，太长会让人觉得卡。</summary>
+    private const int CanvasDragHoldMs = 380;
+
+    /// <summary>起飞前允许的指针抖动（像素）。超了就当滚动/选择手势，不再起拖。</summary>
+    private const double CanvasDragSlop = 5;
+
+    /// <summary>贴边自动滚动的触发带高与每 30ms 滚动的像素数。</summary>
+    private const double CanvasDragEdgeZone = 26;
+    private const double CanvasDragScrollStep = 12;
+
+    /// <summary>幽灵的高度与不透明度。<see cref="CanvasDragGhostHeight"/> 必须与行高
+    /// （<c>CanvasRowTemplate</c> 根 Grid 的 <c>MinHeight</c>）和幽灵自身的 <c>Height</c> 三处同值，
+    /// 否则吸附位置与行的竖向居中对不上。
+    /// 不透明度 &lt; 1 是刻意的：它浮在落点提示上面，全不透明会把自己下方那条线整段吃掉。</summary>
+    private const double CanvasDragGhostHeight = 22;
+    private const double CanvasDragGhostOpacity = 0.85;
+
+    private DispatcherTimer? _canvasHoldTimer;
+    private CanvasTreeNode? _canvasPressNode;        // 本次按下待结算的行（点击与拖拽共用这一个身份）
+    private CanvasTreeNode? _canvasDragNode;         // 已经起飞的那一行
+    private Point _canvasDragPressPoint;             // 按下时的页面坐标
+    private Microsoft.UI.Xaml.Input.Pointer? _canvasDragPointer;
+    private double _canvasDragGrabY;                 // 按下点在行内的纵向位置（幽灵保持这条抓取线）
+    private bool _canvasDragMoved;                   // 本次按下期间指针是否已越过门槛
+    private bool _canvasDragActive;
+    private Point _canvasDragLastPoint;
+
+    private DispatcherTimer? _canvasAutoScrollTimer;
+    private double _canvasAutoScrollDelta;
+
+    // 落点：解析出来先存下，落手（抬指）时才真正执行 —— 抬指那一刻指针可能已经不在原位。
+    private string? _canvasDropDir;                  // 落点所在目录
+    private int _canvasDropAt;                       // 在该目录子项里的插入位置（已剔除被拖的那一项）
+    private bool _canvasDropInto;                    // 放进文件夹（画环）而不是插在两行之间（画线）
+    private bool _canvasDropAfter;                   // 相对参照行插在它后面
+    private int _canvasDropDepth;                    // 参照行的层级（线的左端缩进）
+    private bool _canvasDropValid;
+    private bool _canvasDropInBand;                  // 落点是列表上/下那条"库根"投放带
+    private bool _canvasDropBandTop;                 // 命中的是上带（放最前）还是下带（放最末）
+    private Rect _canvasDropRowRect;
+    private Rect _canvasDropListRect;
+
+    private void StartCanvasHoldTimer()
+    {
+        StopCanvasHoldTimer();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(CanvasDragHoldMs) };
+        timer.Tick += CanvasHoldElapsed;
+        _canvasHoldTimer = timer;
+        timer.Start();
+    }
+
+    private void StopCanvasHoldTimer()
+    {
+        if (_canvasHoldTimer == null) return;
+        _canvasHoldTimer.Stop();
+        _canvasHoldTimer.Tick -= CanvasHoldElapsed;
+        _canvasHoldTimer = null;
+    }
+
+    /// <summary>长按到点：指针还按着、没移动过、这一行还在列表里 ⇒ 起飞。
+    /// 三个条件缺一不可 —— 少判"还在列表里"就会去拖一行刚被删/被收起、已经不在树上的节点。</summary>
+    private void CanvasHoldElapsed(object? sender, object e)
+    {
+        StopCanvasHoldTimer();
+        if (_canvasDragMoved || _canvasDragActive) return;
+        if (_canvasPressNode is not { } node || !_canvasRows.Contains(node)) return;
+        BeginCanvasDrag(node);
+    }
+
+    private void CanvasRowList_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_canvasDragActive)
+        {
+            UpdateCanvasDrag(e.GetCurrentPoint(this).Position);
+            return;
+        }
+        if (_canvasPressNode == null) return;
+
+        Point pt = e.GetCurrentPoint(this).Position;
+        double dx = pt.X - _canvasDragPressPoint.X;
+        double dy = pt.Y - _canvasDragPressPoint.Y;
+        if (dx * dx + dy * dy <= CanvasDragSlop * CanvasDragSlop) return;
+
+        // 越过门槛 = 这是一次拖动（滚动 / 拉选），长按作废；这次按下从此只剩"选中"的语义。
+        _canvasDragMoved = true;
+        StopCanvasHoldTimer();
+    }
+
+    private void CanvasRowList_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        StopCanvasHoldTimer();
+        if (_canvasDragActive) FinishCanvasDrag(commit: true);
+        else CommitCanvasPress();
+
+        // 起飞后指针捕获在列表上，行自己的 PointerReleased 收不到 ⇒ 按下态在这里一并清掉。
+        // _canvasPressNode 必须一起清：它是"待结算的点击"，留着的话下一次右键抬起会把它补结算掉、
+        // 于是"拖完一行再右键"会莫名其妙打开一份画布。
+        _canvasPressNode = null;
+        _pressedCanvasNode = null;
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>捕获被夺走（切窗口、系统手势、别的元素抢了捕获）：按取消处理，不落盘。
+    /// 宁可这次拖拽白做，也不能在"不知道指针最后在哪"的情况下改用户文件。</summary>
+    private void CanvasRowList_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_canvasDragActive) return;
+        FinishCanvasDrag(commit: false);
+    }
+
+    private void BeginCanvasDrag(CanvasTreeNode node)
+    {
+        if (CanvasDragLayer == null || CanvasDragGhost == null || CanvasRowList == null) return;
+
+        _canvasDragActive = true;
+        _canvasDragNode = node;
+        _canvasDragLastPoint = _canvasDragPressPoint;
+        _canvasDropValid = false;
+
+        CanvasDragGhostIcon.Glyph = node.IsFolder ? "\uE8B7" : node.FileGlyph;
+        CanvasDragGhostText.Text = node.Name;
+        ApplyCanvasDragGhostTheme();
+
+        CanvasDropLine.Visibility = Visibility.Collapsed;
+        CanvasDropIntoRing.Visibility = Visibility.Collapsed;
+        CanvasDragGhost.Opacity = CanvasDragGhostOpacity;
+        CanvasDragGhost.Visibility = Visibility.Visible;
+        CanvasDragLayer.Visibility = Visibility.Visible;
+
+        UpdateCanvasGhostPosition(_canvasDragPressPoint);
+        PlayCanvasGhostIntro();
+
+        // 抓指针：之后整个拖拽期间的移动/抬起都投递到列表本身。
+        if (_canvasDragPointer != null)
+        {
+            try { CanvasRowList.CapturePointer(_canvasDragPointer); } catch (Exception) { }
+        }
+
+        // 起飞后清掉悬浮高亮：它和落点提示抢同一块地方。
+        _hoverCanvasNode = null;
+        UpdateCanvasRowBackgrounds();
+        UpdateCanvasDrag(_canvasDragPressPoint);
+    }
+
+    /// <summary>拖拽中的每一帧：幽灵跟手、贴边自动滚动、重算落点。
+    /// 指针已经离开列表范围（比如挪到 PDF 上）⇒ 没有落点，收掉提示但继续拖。</summary>
+    private void UpdateCanvasDrag(Point pagePt)
+    {
+        if (!_canvasDragActive) return;
+        _canvasDragLastPoint = pagePt;
+
+        UpdateCanvasGhostPosition(pagePt);
+
+        if (_canvasDragNode is not { } node || !_canvasRows.Contains(node))
+        {
+            // 拖着的那一行在拖拽期间消失了（外部删除 / 收起父文件夹）：直接收摊，别再改顺序。
+            FinishCanvasDrag(commit: false);
+            return;
+        }
+
+        Rect listRect = CanvasRowList.TransformToVisual(this).TransformBounds(
+            new Rect(0, 0, CanvasRowList.ActualWidth, CanvasRowList.ActualHeight));
+
+        bool resolved = TryResolveCanvasDrop(node, listRect, pagePt);
+
+        // 落在列表下方那条投放带上时不自动滚动：那已经在列表之外，再滚只是徒劳地抖列表。
+        if (resolved && _canvasDropInBand) StopCanvasAutoScroll();
+        else UpdateCanvasAutoScroll(listRect, pagePt);
+
+        if (!resolved) { ClearCanvasDropCue(); return; }
+        ShowCanvasDropCue();
+    }
+
+    /// <summary>算落点：指针落在哪一行、那一行的哪一段；或者落在列表下方那条"库根末尾"投放带上。
+    /// 行的位置一律用【容器投影到页面】的矩形，不按索引乘行高 —— 虚拟化、横向滚动、
+    /// 未来改行高都不会让这套算法失效。</summary>
+    private bool TryResolveCanvasDrop(CanvasTreeNode node, Rect listRect, Point pagePt)
+    {
+        // 横向偏出列表太多（拖到 PDF 区上）就没有落点；纵向给一点溢出容忍，
+        // 贴边自动滚动时不会在"有落点/没落点"之间闪。
+        if (pagePt.X < listRect.X - 40 || pagePt.X > listRect.Right + 40) return false;
+
+        // ---- 列表下方那条恒定投放带：落上去 = 放到库根最末 ----
+        // 先于行判断：它紧贴列表下沿，不属于任何一行，语义只有一个 —— "进根目录，排最后"。
+        _canvasDropInBand = false;
+        if (TryResolveRootDropBand(node, listRect, pagePt)) return true;
+
+        if (pagePt.Y < listRect.Y - 24 || pagePt.Y > listRect.Bottom + 24) return false;
+
+        int hit = -1, first = -1, last = -1;
+        Rect hitRect = default, firstRect = default, lastRect = default;
+
+        for (int i = 0; i < _canvasRows.Count; i++)
+        {
+            if (CanvasRowList.ContainerFromIndex(i) is not FrameworkElement fe || fe.ActualHeight <= 0) continue;
+            Rect r = fe.TransformToVisual(this).TransformBounds(new Rect(0, 0, fe.ActualWidth, fe.ActualHeight));
+            if (first < 0) { first = i; firstRect = r; }
+            last = i; lastRect = r;
+            if (hit < 0 && pagePt.Y >= r.Y && pagePt.Y < r.Bottom) { hit = i; hitRect = r; }
+        }
+        if (first < 0) return false;
+
+        bool clamped = hit < 0;
+        if (clamped)
+        {
+            // 落在首行之上 / 末行之下（含滚动余量里）：吸附到最近的那一头。
+            if (pagePt.Y <= firstRect.Y) { hit = first; hitRect = firstRect; }
+            else { hit = last; hitRect = lastRect; }
+        }
+
+        CanvasTreeNode row = _canvasRows[hit];
+        double rel = Math.Clamp((pagePt.Y - hitRect.Y) / Math.Max(1, hitRect.Height), 0, 1);
+
+        // 磁吸判据：文件夹行的中段 44% = "放进去"，上下两端 = "插在它前后"。
+        // 中段给得比一半以内更宽，是指针不必精确停在行中央就能进去；文件行只有一种语义，以中线为界。
+        bool into = row.IsFolder && rel > 0.28 && rel < 0.72;
+        bool after = clamped ? pagePt.Y > firstRect.Y : rel >= 0.5;
+
+        string dir = into ? row.FullPath : (Path.GetDirectoryName(row.FullPath) ?? CanvasLibrary.Root);
+
+        // 文件夹不能搬进自己或自己的子孙（否则整棵子树会从树上消失）。
+        if (node.IsFolder && IsSameOrUnder(dir, node.FullPath)) return false;
+
+        string? srcDir = Path.GetDirectoryName(node.FullPath);
+        bool sameDir = string.Equals(srcDir, dir, StringComparison.OrdinalIgnoreCase);
+
+        // 跨层时目标已有同名项：系统会拒绝，提前判掉，别让提示画在会失败的位置上。
+        if (!sameDir)
+        {
+            string fileName = Path.GetFileName(node.FullPath);
+            try
+            {
+                if (File.Exists(Path.Combine(dir, fileName)) || Directory.Exists(Path.Combine(dir, fileName))) return false;
+            }
+            catch (Exception) { return false; }
+        }
+
+        var siblings = new List<CanvasTreeNode>(SiblingNodesOf(dir));
+        int at;
+        if (into)
+        {
+            // 放进文件夹 = 排到它的子项末尾；被拖的那一项若本来就在里面，先摘掉再定位。
+            siblings.RemoveAll(n => ReferenceEquals(n, node));
+            at = siblings.Count;
+        }
+        else
+        {
+            int idx = siblings.IndexOf(row);
+            if (idx < 0) return false;
+            at = idx + (after ? 1 : 0);
+            int self = siblings.IndexOf(node);
+            if (self >= 0)
+            {
+                siblings.RemoveAt(self);
+                if (self < at) at--;    // 自己先被摘掉，落点整体前移一格
+            }
+        }
+
+        _canvasDropDir = dir;
+        _canvasDropAt = at;
+        _canvasDropInto = into;
+        _canvasDropAfter = after;
+        _canvasDropDepth = row.Depth;
+        _canvasDropRowRect = hitRect;
+        _canvasDropListRect = listRect;
+        _canvasDropValid = true;
+        return true;
+    }
+
+    private void ShowCanvasDropCue()
+    {
+        Rect listRect = _canvasDropListRect;
+
+        // 投放带只在被命中时染色：平时它们是列表上下的一段纯留白，不做任何视觉声明。
+        ApplyCanvasRootBandTint();
+
+        if (_canvasDropInto)
+        {
+            CanvasDropLine.Visibility = Visibility.Collapsed;
+            CanvasDropIntoRing.Visibility = Visibility.Visible;
+            Canvas.SetLeft(CanvasDropIntoRing, listRect.X);
+            Canvas.SetTop(CanvasDropIntoRing, _canvasDropRowRect.Y + 1);
+            CanvasDropIntoRing.Width = Math.Max(8, listRect.Width - 2);
+            CanvasDropIntoRing.Height = Math.Max(8, _canvasDropRowRect.Height - 2);
+            return;
+        }
+
+        CanvasDropIntoRing.Visibility = Visibility.Collapsed;
+        CanvasDropLine.Visibility = Visibility.Visible;
+
+        // 线的左端对齐"新位置所在层"的缩进：行模板是 2 边距 + 12 缩进/级 + 12 箭头列，
+        // 所以落点层的名字起点在 14 + 12×层级 —— 线画在那里才看得出会插进第几层。
+        double x = listRect.X + 14 + _canvasDropDepth * 12;
+        double y = (_canvasDropAfter ? _canvasDropRowRect.Bottom : _canvasDropRowRect.Y) - 1;
+        Canvas.SetLeft(CanvasDropLine, x);
+        Canvas.SetTop(CanvasDropLine, y);
+        CanvasDropLine.Width = Math.Max(8, listRect.Right - 10 - x);
+    }
+
+    private void ClearCanvasDropCue()
+    {
+        _canvasDropValid = false;
+        _canvasDropInBand = false;
+        _canvasDropBandTop = false;
+        if (CanvasDropLine != null) CanvasDropLine.Visibility = Visibility.Collapsed;
+        if (CanvasDropIntoRing != null) CanvasDropIntoRing.Visibility = Visibility.Collapsed;
+        ApplyCanvasRootBandTint();
+    }
+
+    /// <summary>上/下投放带的染色：只有当前命中的那一条亮起来，另一条始终透明。
+    /// 亮起来时一并显出箭头（上带向上、下带向下）：光有底色只说"这里能放"，
+    /// 说不出"放到哪儿"——两头都是库根，区别全在方向。</summary>
+    private void ApplyCanvasRootBandTint()
+    {
+        bool top = _canvasDropInBand && _canvasDropBandTop;
+        bool bottom = _canvasDropInBand && !_canvasDropBandTop;
+
+        if (CanvasRootTopDropZone != null)
+            CanvasRootTopDropZone.Background = top ? _canvasRowMultiSelectBrush : null;
+        if (CanvasRootDropZone != null)
+            CanvasRootDropZone.Background = bottom ? _canvasRowMultiSelectBrush : null;
+
+        if (CanvasRootTopDropGlyph != null)
+            CanvasRootTopDropGlyph.Visibility = top ? Visibility.Visible : Visibility.Collapsed;
+        if (CanvasRootDropGlyph != null)
+            CanvasRootDropGlyph.Visibility = bottom ? Visibility.Visible : Visibility.Collapsed;
+
+        // 顶部那条带子就是"画布"标题行：悬停时箭头顶替标题文字（两者都在左侧同一处，不能叠在一起）。
+        if (CanvasPanelHeaderText != null)
+            CanvasPanelHeaderText.Visibility = top ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>库根的"最前 / 最末"两条恒定投放区：上 = 面板标题行（24 高，不参与滚动、不占可视区），
+    /// 下 = 列表下沿那条带（24 高）。存在的理由：最末一行若是【展开文件夹】里的子项，
+    /// 列表整条下边界都会被"进文件夹"吃掉，用户没有任何位置能表达"放到根目录末尾"；
+    /// 首行同理（被滚到中间时够不着"最前"）。两条平时全透明，命中时才染色 + 显方向箭头。</summary>
+    private bool TryResolveRootDropBand(CanvasTreeNode node, Rect listRect, Point pagePt)
+    {
+        if (TryResolveRootDropEdge(node, listRect, pagePt, CanvasRootTopDropZone, atTop: true)) return true;
+        if (TryResolveRootDropEdge(node, listRect, pagePt, CanvasRootDropZone, atTop: false)) return true;
+        return false;
+    }
+
+    private bool TryResolveRootDropEdge(CanvasTreeNode node, Rect listRect, Point pagePt,
+                                        Border? zone, bool atTop)
+    {
+        if (zone is not { ActualHeight: > 0 }) return false;
+
+        Rect band = zone.TransformToVisual(this).TransformBounds(
+            new Rect(0, 0, zone.ActualWidth, zone.ActualHeight));
+        if (pagePt.Y < band.Y || pagePt.Y >= band.Bottom) return false;
+        if (pagePt.X < listRect.X - 40 || pagePt.X > listRect.Right + 40) return false;
+
+        // 已经在库根里 = 只是排序，不涉及同名；从别处拖来则目标已有同名项时系统会拒绝，提前判掉。
+        bool sameDir = string.Equals(Path.GetDirectoryName(node.FullPath), CanvasLibrary.Root,
+                                     StringComparison.OrdinalIgnoreCase);
+        if (!sameDir)
+        {
+            string fileName = Path.GetFileName(node.FullPath);
+            try
+            {
+                if (File.Exists(Path.Combine(CanvasLibrary.Root, fileName)) ||
+                    Directory.Exists(Path.Combine(CanvasLibrary.Root, fileName))) return false;
+            }
+            catch (Exception) { return false; }
+        }
+
+        var rootSiblings = new List<CanvasTreeNode>(SiblingNodesOf(CanvasLibrary.Root));
+        rootSiblings.RemoveAll(n => ReferenceEquals(n, node));
+
+        _canvasDropDir = CanvasLibrary.Root;
+        _canvasDropAt = atTop ? 0 : rootSiblings.Count;
+        _canvasDropInto = false;
+        _canvasDropDepth = 0;                     // 根层：提示线按 0 级缩进画
+        // 提示线：上带画在带子【下沿】（贴住第一行上方），下带画在带子【上沿】（贴住最后一行下方）。
+        // ShowCanvasDropCue 用 "after ? Bottom : Y" 再减 1，所以把矩形设成带子本身、after 按方向给。
+        _canvasDropAfter = atTop;
+        _canvasDropRowRect = band;
+        _canvasDropListRect = listRect;
+        _canvasDropInBand = true;
+        _canvasDropBandTop = atTop;
+        _canvasDropValid = true;
+        return true;
+    }
+
+    /// <summary>幽灵跟着指针走：垂向保持"按下时抓在行里的那一点"，横向偏到指针右侧一小段，
+    /// 这样它既不挡住落点线，也不会在指针水平微动时忽左忽右地抖。
+    /// 右侧只留 10px：幽灵本身窄（≤160），贴得越近越像"从行里拎起来"，也越不容易整片盖住落点提示。</summary>
+    private void UpdateCanvasGhostPosition(Point pagePt)
+    {
+        if (CanvasDragGhost == null) return;
+        double w = CanvasDragGhost.ActualWidth > 0 ? CanvasDragGhost.ActualWidth : 120;
+        double x = pagePt.X + 10;
+        if (ActualWidth > w) x = Math.Clamp(x, 0, ActualWidth - w - 6);
+        Canvas.SetLeft(CanvasDragGhost, x);
+        Canvas.SetTop(CanvasDragGhost, pagePt.Y - _canvasDragGrabY - 2);
+    }
+
+    /// <summary>抬指时先让幽灵"吸"到落点上（贴住那条线 / 进入那个环），再淡出 —— 落点提示由它交接给静态指示，
+    /// 视觉上东西是真的被放下了，而不是原地消失。</summary>
+    private void SnapCanvasGhostToDrop()
+    {
+        if (CanvasDragGhost == null || !_canvasDropValid) return;
+        Canvas.SetTop(CanvasDragGhost, _canvasDropInto
+            ? _canvasDropRowRect.Y + (_canvasDropRowRect.Height - CanvasDragGhostHeight) / 2
+            : (_canvasDropAfter ? _canvasDropRowRect.Bottom : _canvasDropRowRect.Y) - CanvasDragGhostHeight / 2);
+    }
+
+    private void PlayCanvasGhostIntro()
+    {
+        if (CanvasDragGhost == null) return;
+        var sb = new Storyboard();
+
+        var fade = new DoubleAnimation
+        {
+            // 淡到 0.85 而不是 1：幽灵是半透明的浮层，动画的终值必须与 XAML 里那条 Opacity 一致，
+            // 否则淡入结束时它会被动画 held 成全不透明，把下方的落点线整段盖掉。
+            From = 0, To = CanvasDragGhostOpacity,
+            Duration = new Duration(TimeSpan.FromMilliseconds(110)),
+        };
+        Storyboard.SetTarget(fade, CanvasDragGhost);
+        Storyboard.SetTargetProperty(fade, "Opacity");
+        sb.Children.Add(fade);
+
+        // 缩放 0.90 → 1.05：从"按在行里的大小"弹到"抬起来的放大态"。
+        AddCanvasGhostScaleAnimation(sb, 0.90, 1.05, 150);
+        sb.Begin();
+    }
+
+    private void PlayCanvasGhostOutro()
+    {
+        if (CanvasDragGhost == null || CanvasDragLayer == null) return;
+
+        var sb = new Storyboard();
+        var fade = new DoubleAnimation
+        {
+            // From 取常量而不是读当前值：上一次淡出的动画会把 Opacity held 在 0，
+            // 读回来是 0 的话这次淡出就等于什么都不做（幽灵当场消失）。
+            From = CanvasDragGhostOpacity, To = 0,
+            Duration = new Duration(TimeSpan.FromMilliseconds(90)),
+        };
+        Storyboard.SetTarget(fade, CanvasDragGhost);
+        Storyboard.SetTargetProperty(fade, "Opacity");
+        sb.Children.Add(fade);
+
+        AddCanvasGhostScaleAnimation(sb, 1.05, 0.98, 90);
+        sb.Completed += (s, e) =>
+        {
+            if (_canvasDragActive) return;   // 期间又起了新的一次拖拽：这一层还得用，别收
+            CanvasDragGhost.Visibility = Visibility.Collapsed;
+            CanvasDragGhost.Opacity = CanvasDragGhostOpacity;
+            CanvasDragGhostScale.ScaleX = 1.05;
+            CanvasDragGhostScale.ScaleY = 1.05;
+            CanvasDragLayer.Visibility = Visibility.Collapsed;
+        };
+        sb.Begin();
+    }
+
+    private void AddCanvasGhostScaleAnimation(Storyboard sb, double from, double to, int ms)
+    {
+        if (CanvasDragGhostScale == null) return;
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var duration = new Duration(TimeSpan.FromMilliseconds(ms));
+
+        var sx = new DoubleAnimation { From = from, To = to, Duration = duration, EasingFunction = ease };
+        Storyboard.SetTarget(sx, CanvasDragGhostScale);
+        Storyboard.SetTargetProperty(sx, "ScaleX");
+        sb.Children.Add(sx);
+
+        var sy = new DoubleAnimation { From = from, To = to, Duration = duration, EasingFunction = ease };
+        Storyboard.SetTarget(sy, CanvasDragGhostScale);
+        Storyboard.SetTargetProperty(sy, "ScaleY");
+        sb.Children.Add(sy);
+    }
+
+    /// <summary>幽灵配色：比面板底色再亮一档 + 一道描边，深浅两套跟面板同步
+    /// （面板底色是代码里按主题写死的，这里取同一套判断，不引用自定义主题键）。</summary>
+    private void ApplyCanvasDragGhostTheme()
+    {
+        bool dark = this.ActualTheme == ElementTheme.Dark;
+        CanvasDragGhost.Background = new SolidColorBrush(dark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x3E, 0x3E, 0x46)
+            : Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        CanvasDragGhost.BorderBrush = new SolidColorBrush(dark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x5A, 0x5A, 0x64)
+            : Windows.UI.Color.FromArgb(0xFF, 0xD2, 0xD2, 0xDA));
+
+        // 文字与图标用"激活档"亮度：此时全场只有它在被搬动，它就是主角。
+        var fg = new SolidColorBrush(dark
+            ? Windows.UI.Color.FromArgb(0xFF, 0xFA, 0xFA, 0xFC)
+            : Windows.UI.Color.FromArgb(0xFF, 0x0A, 0x0A, 0x0E));
+        CanvasDragGhostText.Foreground = fg;
+        CanvasDragGhostIcon.Foreground = fg;
+    }
+
+    /// <summary>列表某一层的直接子项（树里的那一层）。库根 = _canvasRoots，其余 = 对应文件夹节点的 Children。
+    /// 这一层就是"手动顺序"的落笔单位：拖一次就把整层名字按新顺序写下来。</summary>
+    private IReadOnlyList<CanvasTreeNode> SiblingNodesOf(string dir)
+    {
+        if (string.Equals(dir, CanvasLibrary.Root, StringComparison.OrdinalIgnoreCase)) return _canvasRoots;
+        if (FindCanvasFolder(_canvasRoots, dir) is { } folder) return folder.Children;
+        return Array.Empty<CanvasTreeNode>();
+    }
+
+    /// <summary>贴边自动滚动：指针进上/下 26px 的带子就按固定步长滚，滚完重算落点
+    /// （指针没动、行却动了，落点必须跟着变）。</summary>
+    private void UpdateCanvasAutoScroll(Rect listRect, Point pagePt)
+    {
+        double delta = 0;
+        if (pagePt.Y < listRect.Y + CanvasDragEdgeZone) delta = -CanvasDragScrollStep;
+        else if (pagePt.Y > listRect.Bottom - CanvasDragEdgeZone) delta = CanvasDragScrollStep;
+
+        _canvasAutoScrollDelta = delta;
+        if (delta == 0) { StopCanvasAutoScroll(); return; }
+
+        if (_canvasAutoScrollTimer != null) return;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
+        timer.Tick += CanvasAutoScrollTick;
+        _canvasAutoScrollTimer = timer;
+        timer.Start();
+    }
+
+    private void CanvasAutoScrollTick(object? sender, object e)
+    {
+        if (!_canvasDragActive) { StopCanvasAutoScroll(); return; }
+        if (FindDescendantScrollViewer(CanvasRowList) is not { } sv) return;
+
+        double target = Math.Clamp(sv.VerticalOffset + _canvasAutoScrollDelta, 0, Math.Max(0, sv.ScrollableHeight));
+        if (Math.Abs(target - sv.VerticalOffset) < 0.5) return;
+        sv.ChangeView(null, target, null, disableAnimation: true);
+
+        // ChangeView 的新布局要下一轮才落定：立刻重算会读到旧矩形，落点慢一格。
+        Point pt = _canvasDragLastPoint;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (_canvasDragActive) UpdateCanvasDrag(pt);
+        });
+    }
+
+    private void StopCanvasAutoScroll()
+    {
+        _canvasAutoScrollDelta = 0;
+        if (_canvasAutoScrollTimer == null) return;
+        _canvasAutoScrollTimer.Stop();
+        _canvasAutoScrollTimer.Tick -= CanvasAutoScrollTick;
+        _canvasAutoScrollTimer = null;
+    }
+
+    /// <summary>收摊：清状态、放捕获、幽灵淡出，再（可选）落实落点。
+    /// 顺序关键 —— 先把状态清干净再动磁盘/刷列表，否则刷新过程中触发的指针事件会走进半截的拖拽逻辑。</summary>
+    private void FinishCanvasDrag(bool commit)
+    {
+        CanvasTreeNode? node = _canvasDragNode;
+        bool valid = commit && _canvasDropValid && node != null;
+        string? dir = _canvasDropDir;
+        int at = _canvasDropAt;
+        bool into = _canvasDropInto;
+
+        _canvasDragActive = false;
+        _canvasDragNode = null;
+        _canvasPressNode = null;
+        _canvasDropValid = false;
+        _canvasDropDir = null;
+        StopCanvasAutoScroll();
+        StopCanvasHoldTimer();
+        try { CanvasRowList?.ReleasePointerCaptures(); } catch (Exception) { }
+
+        if (valid) SnapCanvasGhostToDrop();
+        PlayCanvasGhostOutro();
+        ClearCanvasDropCue();   // 线/环/投放带染色一起收
+
+        if (valid) ApplyCanvasDrop(node!, dir!, at, into);
+        UpdateCanvasRowBackgrounds();
+    }
+
+    /// <summary>落实一次拖拽。同层 = 只改顺序；跨层 = 先动磁盘（MoveNode），再把两层的顺序表都写成完整名字表。
+    /// 「写完整表」是这套排序能成立的关键：只记被移动的那一项的话，其余项仍按默认规则排，
+    /// 用户摆好的位置会被别的项挤走。表里多出来的名字（文件已删/改名）在排序时自然落空，不用清理。</summary>
+    private void ApplyCanvasDrop(CanvasTreeNode node, string dir, int at, bool into)
+    {
+        string? srcDir = Path.GetDirectoryName(node.FullPath);
+        bool sameDir = string.Equals(srcDir, dir, StringComparison.OrdinalIgnoreCase);
+        string name = Path.GetFileName(node.FullPath);
+        string landed = node.FullPath;   // 落地后的路径（跨层时会被 MoveNode 改写）
+
+        if (sameDir)
+        {
+            var order = new List<CanvasTreeNode>(SiblingNodesOf(dir));
+            int self = order.IndexOf(node);
+            if (self < 0) return;
+            order.RemoveAt(self);
+            if (into) at = order.Count;                      // 放进自己的上层文件夹 = 排到最末
+            at = Math.Clamp(at, 0, order.Count);
+            order.Insert(at, node);
+            _settingsService.SetCanvasOrder(dir, order.Select(n => Path.GetFileName(n.FullPath)).ToList());
+        }
+        else
+        {
+            string? moved = CanvasLibrary.MoveNode(node.FullPath, node.IsFolder, dir);
+            if (moved == null)
+            {
+                ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
+                return;
+            }
+            // 当前画布 / 已展开文件夹的路径前缀跟着换（拖走的可能正是盖着的那一份）
+            RemapCanvasPath(node.FullPath, moved);
+            // 拖走文件夹：它内部各层的顺序表键（按目录全路径存的）整棵一起搬到新前缀，
+            // 否则进了新位置的文件夹会把内部画布退回默认排序 —— "内部顺序跟着走"靠这一步。
+            if (node.IsFolder) RekeyCanvasSubtreeOrder(node.FullPath, moved);
+
+            // 源层：把它从手动顺序里摘掉。没排过的那层不用写 —— 它本来就该按默认规则排。
+            if (srcDir != null && _settingsService.GetCanvasOrder(srcDir) is { } srcOrder)
+            {
+                _settingsService.SetCanvasOrder(srcDir,
+                    srcOrder.Where(n => !string.Equals(n, name, StringComparison.OrdinalIgnoreCase)));
+            }
+
+            // 目标层：现有子项 + 这位新来的（插在落点），写完整名字表
+            var names = SiblingNodesOf(dir).Select(n => Path.GetFileName(n.FullPath)).ToList();
+            names.Insert(Math.Clamp(into ? names.Count : at, 0, names.Count), Path.GetFileName(moved));
+            _settingsService.SetCanvasOrder(dir, names);
+
+            landed = moved;
+        }
+
+        // 放进文件夹后顺手展开它：否则拖进去的东西当场看不见，像是拖丢了。
+        if (into && FindCanvasFolder(_canvasRoots, dir) is { IsExpanded: false } folder)
+        {
+            folder.IsExpanded = true;
+            _expandedCanvasFolders.Add(dir);
+        }
+
+        RefreshCanvasFolder(dir);
+        if (!sameDir && srcDir != null) RefreshCanvasFolder(srcDir);
+
+        // 落到新位置后把视口跟过去：拖到列表外（顶部/底部投放带）或拖进折叠区时，
+        // 落点行原本不在可见范围，不跟过去用户只看到"东西没了"。
+        // 纵向靠 ScrollIntoView，横向（深层缩进把名字顶出右边）靠 RevealCanvasRowName。
+        ScrollCanvasRowIntoView(landed);
     }
 
     /// <summary>右键入口：点到某一行 → 节点菜单；点空白 → 库级菜单（新建画布/文件夹、刷新、在资源管理器中显示）。
@@ -6377,8 +7090,60 @@ public sealed partial class MainPage : Page
             return;
         }
         ExpandCanvasFolder(parentDir);
+        AppendCanvasOrder(created);   // 先记顺序（读的是当前显示顺序），再刷新列表
         RefreshCanvasFolder(parentDir ?? CanvasLibrary.Root);
         ScrollCanvasRowIntoView(created);
+    }
+
+    /// <summary>把刚建出来的项追加到该层顺序表的末尾 —— "新建永远在最下方"靠的就是这一步。
+    /// 默认排序（哪怕是自然排序）都可能把它插到中间去，只有写进顺序表才算数。
+    /// 该层还没有顺序表时，先按【当前显示顺序】物化一份再接上新项：物化结果与用户眼前所见逐项一致，
+    /// 于是"新建在最末"这件事在任何历史状态下都成立。
+    /// 拿不到同层兄弟（目录还没进树）就不写 —— 只记一个名字会让它成为"唯一排过的项"而排到最前面。</summary>
+    private void AppendCanvasOrder(string path)
+    {
+        if (Path.GetDirectoryName(path) is not { } dir) return;
+        var names = SiblingNodesOf(dir).Select(n => Path.GetFileName(n.FullPath)).ToList();
+        if (names.Count == 0) return;
+
+        string name = Path.GetFileName(path);
+        if (!names.Contains(name, StringComparer.OrdinalIgnoreCase)) names.Add(name);
+        _settingsService.SetCanvasOrder(dir, names);
+    }
+
+    /// <summary>把顺序表与"眼前这一层"对齐：缺的按显示顺序补到末尾、已经不在的剔除。
+    /// 内容没变就不写盘（相等即跳过），所以可以在每次刷新后无条件调用。
+    /// 这是"顺序只由拖拽决定"的兜底：除拖拽外没有任何路径能调整相对次序 ——
+    /// 新建/外部新增只会被追加到末尾，删除/改名只是增删某一条，其余各项的名次原样不动。</summary>
+    private void NormalizeCanvasOrder(string dirPath, IReadOnlyList<CanvasTreeNode> children)
+    {
+        if (children.Count == 0) return;
+
+        var names = new List<string>(children.Count);
+        foreach (var c in children) names.Add(Path.GetFileName(c.FullPath));
+
+        if (_settingsService.GetCanvasOrder(dirPath) is { } existing && existing.Count == names.Count)
+        {
+            bool same = true;
+            for (int i = 0; i < names.Count; i++)
+            {
+                if (!string.Equals(existing[i], names[i], StringComparison.OrdinalIgnoreCase)) { same = false; break; }
+            }
+            if (same) return;
+        }
+        _settingsService.SetCanvasOrder(dirPath, names);
+    }
+
+    /// <summary>整棵树逐层对齐。折叠的文件夹也在树里（BuildTree 一律递归建），所以深层也会被覆盖。</summary>
+    private void NormalizeCanvasOrderTree(IReadOnlyList<CanvasTreeNode> nodes)
+    {
+        NormalizeCanvasOrder(CanvasLibrary.Root, nodes);
+        foreach (var n in nodes)
+        {
+            if (!n.IsFolder) continue;
+            NormalizeCanvasOrder(n.FullPath, n.Children);
+            NormalizeCanvasOrderTree(n.Children);
+        }
     }
 
     /// <summary>在指定目录（null = 库根）里新建一个文件夹并展开这一层。
@@ -6393,6 +7158,7 @@ public sealed partial class MainPage : Page
             return;
         }
         ExpandCanvasFolder(parentDir);
+        AppendCanvasOrder(created);   // 先记顺序（读的是当前显示顺序），再刷新列表
         RefreshCanvasFolder(parentDir ?? CanvasLibrary.Root);
         ScrollCanvasRowIntoView(created);
     }
@@ -6407,14 +7173,7 @@ public sealed partial class MainPage : Page
     {
         if (CanvasRowList == null) return;
 
-        CanvasTreeNode? target = null;
-        foreach (var row in _canvasRows)
-        {
-            if (!string.Equals(row.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) continue;
-            target = row;
-            break;
-        }
-        if (target == null) return;   // 父层被收起等情况：这一行根本不在可见行集合里
+        if (FindCanvasRowByPath(fullPath) is not { } target) return;   // 父层被收起等情况：这一行根本不在可见行集合里
 
         CanvasRowList.ScrollIntoView(target);
         RevealCanvasRowName(target, 15);
@@ -6427,6 +7186,10 @@ public sealed partial class MainPage : Page
     private void RevealCanvasRowName(CanvasTreeNode row, int left)
     {
         if (CanvasRowList == null) return;
+        // 正在行内改名：名字那一格是收起的（换成输入框），没有"要露出的名字"可对；
+        // 更关键的是这条链路会连着强制重排（UpdateLayout + 等帧重试），
+        // 而改名框正靠焦点活着 —— 持续重排会把刚拿到的焦点打掉。改名优先，让路。
+        if (row.IsRenaming) return;
         CanvasRowList.UpdateLayout();
 
         if (CanvasRowList.ContainerFromItem(row) is not ListViewItem container)
@@ -6448,6 +7211,7 @@ public sealed partial class MainPage : Page
     private bool TryRevealName(ListViewItem container, CanvasTreeNode row)
     {
         if (CanvasRowList == null) return true;
+        if (row.IsRenaming) return true;   // 改名中：这条链路的理由消失了，收手（别再强制重排）
         if (FindDescendantScrollViewer(CanvasRowList) is not { } sv) return true;
 
         CanvasRowList.UpdateLayout();
@@ -6502,16 +7266,39 @@ public sealed partial class MainPage : Page
         if (FindCanvasFolder(_canvasRoots, dirPath!) is { } node) node.IsExpanded = true;
     }
 
-    /// <summary>进入行内改名：同一时刻只允许一行在改，顺手把别的行收掉。
-    /// 改名不动高亮 —— 高亮只表达"盖在 PDF 上的那份画布"，和编辑哪个名字无关。</summary>
+    /// <summary>右键菜单里的「重命名」。菜单项是在关闭菜单的同一个按下里执行的，
+    /// 此刻这一次点击的"抬起"还没走完：当场开编辑的话，紧随其后的抬起/菜单清理会把刚拿到的焦点带走，
+    /// 表现就是"改名框一闪就退出、根本改不了"。所以延后一个调度回合再开编辑，让那次点击彻底走完。
+    /// 开的时候按【路径】找回当前节点实例：菜单是按右键那一刻构造的，期间行集合可能已经重建过一次。</summary>
     private void StartCanvasRename(CanvasTreeNode node)
     {
+        string path = node.FullPath;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => BeginCanvasRename(path));
+    }
+
+    /// <summary>真正进入行内改名：同一时刻只允许一行在改，顺手把别的行收掉。
+    /// 改名不动高亮 —— 高亮只表达"盖在 PDF 上的那份画布"，和编辑哪个名字无关。</summary>
+    private void BeginCanvasRename(string fullPath)
+    {
+        if (FindCanvasRowByPath(fullPath) is not { } node) return;   // 期间被删/改名/父层收起
+
         foreach (var other in EnumerateCanvasNodes(_canvasRoots))
         {
             if (!ReferenceEquals(other, node) && other.IsRenaming) other.IsRenaming = false;
         }
         node.RenameText = node.Name;
         node.IsRenaming = true;
+    }
+
+    /// <summary>按路径在当前可见行集合里找节点：改名、滚动这些都只对"真的在列表里"的行有意义。</summary>
+    private CanvasTreeNode? FindCanvasRowByPath(string fullPath)
+    {
+        foreach (var row in _canvasRows)
+        {
+            if (string.Equals(row.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) return row;
+        }
+        return null;
     }
 
     private static IEnumerable<CanvasTreeNode> EnumerateCanvasNodes(IEnumerable<CanvasTreeNode> nodes)
@@ -6529,15 +7316,51 @@ public sealed partial class MainPage : Page
 
     private void CanvasRowRename_Cancelled(object sender, RoutedEventArgs e)
     {
-        if (RowNodeOf(sender) is not { } node) return;
-        node.IsRenaming = false;
+        if (RowNodeOf(sender) is { } node) node.IsRenaming = false;
+    }
+
+    /// <summary>点到行内改名框以外的地方 = 提交。为什么不能只靠失焦：列表行不是可聚焦元素
+    /// （行是 Grid、列表 IsTabStop=False），点另一行根本不会把焦点从宿主身上移走 ⇒ 没有 LostFocus
+    /// ⇒ 改名框一直亮着，看上去就是"卡在编辑态退不出去"。这里按指针落点兜底，且不看焦点在谁身上。
+    /// 菜单里的条目也算"框外"：先提交再执行菜单动作，语义一致（改个名不能被右键菜单挂住）。
+    /// <paramref name="handledEventsToo: true"/> 是必需的 —— 行与控件自己都把 PointerPressed 标记了 Handled。</summary>
+    private void OnPagePointerPressedCommitRename(object sender, PointerRoutedEventArgs e)
+    {
+        if (FindRenamingNode() is not { } node) return;
+        if (IsPressInsideRenameBox(e.OriginalSource as DependencyObject, node)) return;
+        CommitCanvasRename(node);
+    }
+
+    /// <summary>这次按下是否落在【正在改名那一行】的输入框里（点框内是定位光标/拖选，不能提交）。</summary>
+    private static bool IsPressInsideRenameBox(DependencyObject? source, CanvasTreeNode node)
+    {
+        for (var d = source; d != null; d = VisualTreeHelper.GetParent(d))
+        {
+            if (d is SelfDrawnTextBox box) return ReferenceEquals(box.DataContext, node);
+        }
+        return false;
+    }
+
+    /// <summary>当前正在行内改名的行（同一时刻至多一行）。</summary>
+    private CanvasTreeNode? FindRenamingNode()
+    {
+        foreach (var row in _canvasRows)
+        {
+            if (row.IsRenaming) return row;
+        }
+        return null;
+    }
+
+    private void CommitRowRename(object sender)
+    {
+        if (RowNodeOf(sender) is { } node) CommitCanvasRename(node);
     }
 
     /// <summary>提交行内改名。名字没变 / 只是空白 ⇒ 当取消处理；改名成功后把"当前画布"指针一起搬到新路径，
     /// 否则画布明明还在、程序却认为上次那份不见了。</summary>
-    private void CommitRowRename(object sender)
+    private void CommitCanvasRename(CanvasTreeNode node)
     {
-        if (RowNodeOf(sender) is not { } node || !node.IsRenaming) return;
+        if (!node.IsRenaming) return;
         node.IsRenaming = false;
 
         string text = node.RenameText.Trim();
@@ -6552,8 +7375,65 @@ public sealed partial class MainPage : Page
         if (string.Equals(renamed, node.FullPath, StringComparison.OrdinalIgnoreCase)) return;
 
         string oldPath = node.FullPath;
+        RekeyCanvasOrder(oldPath, renamed);   // 必须在 Refresh 之前：此刻树里还是旧名，才落得回原来那一格
         RemapCanvasPath(oldPath, renamed);
         RefreshCanvasFolder(Path.GetDirectoryName(oldPath) ?? CanvasLibrary.Root);
+    }
+
+    /// <summary>改名后把顺序表里的"键"一起换掉，让这一项**名次不变**。
+    /// 顺序表按两样东西作键：父目录里"含扩展名的文件名"、以及文件夹自身子表的"目录全路径"。
+    /// 键一变就对不上 ⇒ 这一项失去名次，被默认排序（当前区域 = 中文拼音 + 数字序号）重新插到别处，
+    /// 看上去就是"改个名自己跳位"。所以两级都要换：
+    /// ① 父目录表里的这一项：按【当前显示顺序】物化一份，再把旧名原位替换成新名；
+    /// ② 文件夹自身那张子表：整体搬到新路径上（空表 = 删掉旧键）。
+    /// 幂等：旧名已不在表里（例如外部改名已经处理过一次）就什么都不做。</summary>
+    private void RekeyCanvasOrder(string oldPath, string newPath)
+    {
+        if (string.IsNullOrEmpty(oldPath) || string.IsNullOrEmpty(newPath)) return;
+        if (string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase)) return;
+
+        string parentDir = Path.GetDirectoryName(oldPath) ?? CanvasLibrary.Root;
+        string oldName = Path.GetFileName(oldPath);
+        string newName = Path.GetFileName(newPath);
+
+        var names = SiblingNodesOf(parentDir).Select(n => Path.GetFileName(n.FullPath)).ToList();
+        int at = names.FindIndex(n => string.Equals(n, oldName, StringComparison.OrdinalIgnoreCase));
+        if (at >= 0)
+        {
+            names[at] = newName;
+            _settingsService.SetCanvasOrder(parentDir, names);
+        }
+
+        // 文件夹才有"子表"；文件改完名 Directory.Exists 为 false，直接跳过
+        if (!Directory.Exists(newPath)) return;
+        RekeyCanvasSubtreeOrder(oldPath, newPath);
+    }
+
+    /// <summary>把 oldPath 这一层**以及它所有子孙目录**的顺序表键整体搬到 newPath 前缀下。
+    /// 子表是按"目录全路径"作键的：文件夹被改名或拖到别处后路径变了，键就全失效 ⇒
+    /// 里面的画布顺序会退回默认排序。整棵子树一起搬，"拖走文件夹，内部顺序也跟着走"才成立。
+    /// 该层从没排过时，按眼前显示顺序物化一份到新路径上（等于"动完之后和动之前一模一样"）。</summary>
+    private void RekeyCanvasSubtreeOrder(string oldPath, string newPath)
+    {
+        var rekeys = _settingsService.CanvasOrder.Keys
+            .Where(k => IsSameOrUnder(k, oldPath))
+            .Select(k => (Old: k, New: newPath + k[oldPath.Length..]))
+            .ToList();
+
+        if (rekeys.Count == 0)
+        {
+            var direct = SiblingNodesOf(oldPath).Select(n => Path.GetFileName(n.FullPath)).ToList();
+            if (direct.Count > 0) _settingsService.SetCanvasOrder(newPath, direct);
+            return;
+        }
+
+        foreach ((string oldKey, string newKey) in rekeys)
+        {
+            var list = _settingsService.GetCanvasOrder(oldKey)?.ToList();
+            if (list == null || list.Count == 0) continue;
+            _settingsService.SetCanvasOrder(oldKey, Array.Empty<string>());   // 空表 ⇒ 删掉旧键
+            _settingsService.SetCanvasOrder(newKey, list);
+        }
     }
 
     private static CanvasTreeNode? RowNodeOf(object sender)
@@ -6601,21 +7481,55 @@ public sealed partial class MainPage : Page
 
         // 每一层只需刷新一次：同一目录下删掉多项时，逐项重扫既慢又会让列表抖好几下。
         var parents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        bool failed = false;
         foreach (var node in targets)
         {
-            string? parentDir = Path.GetDirectoryName(node.FullPath);
-            if (!CanvasLibrary.Delete(node.FullPath)) { failed = true; continue; }
             _expandedCanvasFolders.RemoveWhere(p => IsSameOrUnder(p, node.FullPath));
-            if (parentDir != null) parents.Add(parentDir);
+            if (Path.GetDirectoryName(node.FullPath) is { } parentDir) parents.Add(parentDir);
         }
 
         // 先清选择再刷新：别让被删掉的节点还留在选择集合里（SyncCanvasRows 虽然会剪枝，
         // 但那是"不在行集合里"的兜底，这里主动收干净更直白）。
         ClearCanvasSelection();
-        foreach (string dir in parents) RefreshCanvasFolder(dir);
 
-        if (failed) ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
+        // 【乐观隐藏】把这几行标成"待删"再拍平一次：行当场消失，用户看到的响应是即时的。
+        // 真正的删除交给后台 STA 线程 —— 一次 shell 往返（回收站索引 + 杀软扫描）在 UI 线程上
+        // 无论怎么合并批量，二十项仍会有几百毫秒的可感停顿；挪出去之后这段时间用户已经在做别的事了。
+        foreach (var node in targets) node.IsPendingDelete = true;
+        SyncCanvasRows();
+
+        var paths = targets.Select(t => t.FullPath).ToList();
+        string[] dirs = parents.ToArray();
+        var thread = new System.Threading.Thread(() =>
+        {
+            bool ok = Interop.ShellFileOps.MoveToRecycleBin(paths);
+            DispatcherQueue.TryEnqueue(() => FinishCanvasDelete(targets, dirs, ok));
+        })
+        {
+            IsBackground = true,
+            Name = "CanvasDelete",
+        };
+        thread.SetApartmentState(System.Threading.ApartmentState.STA);   // shell 删除要在 STA 上调用
+        thread.Start();
+    }
+
+    /// <summary>后台删除回来的收尾（UI 线程）：按磁盘真值把受影响的目录重扫一遍。
+    /// 成功 ⇒ 文件已不在，SyncChildren 会把节点从树上摘掉；部分/全部失败 ⇒ 清除待删标记，行回到原处。
+    /// 标记必须【先无条件清掉】再重扫：批量里可能只成功了一部分，没删掉的那些不能永远隐身。</summary>
+    private void FinishCanvasDelete(List<CanvasTreeNode> targets, string[] dirs, bool ok)
+    {
+        foreach (var node in targets) node.IsPendingDelete = false;
+
+        bool rebuilt = false;
+        foreach (string dir in dirs)
+        {
+            if (PatchCanvasFolder(dir)) continue;
+            RefreshCanvasTree();   // 上级被整体删掉了：整树重建（它自己会拍平）
+            rebuilt = true;
+            break;
+        }
+        if (!rebuilt) SyncCanvasRows();
+
+        if (!ok) ShowSaveToast(LocalizationService.Get("CanvasOpFailed"), ToastIconKind.Error);
     }
 
     private void CopyCanvasPath(CanvasTreeNode node)
@@ -6677,6 +7591,7 @@ public sealed partial class MainPage : Page
             FileSystemEventHandler onFile = (s, e) => QueueCanvasRefresh(e.FullPath);
             RenamedEventHandler onRename = (s, e) =>
             {
+                QueueCanvasRekey(e.OldFullPath, e.FullPath);   // 外部改名同样要"留在原地"
                 QueueCanvasRefresh(e.OldFullPath);   // 旧的一行要消失
                 QueueCanvasRefresh(e.FullPath);      // 新的一行要出现
             };
@@ -6695,6 +7610,22 @@ public sealed partial class MainPage : Page
 
     /// <summary>待刷新的目录。同一批事件里若多次落到同一层，合并成一次。</summary>
     private readonly HashSet<string> _pendingCanvasDirs = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>待换键的改名对（外部改名用）。与刷新同处一个防抖窗口，在真正重扫之前落地 ——
+    /// 否则重扫会先按"旧名已失效"把这一项排到末尾，再换键也来不及了。</summary>
+    private readonly List<(string OldPath, string NewPath)> _pendingCanvasRekeys = new();
+
+    /// <summary>后台线程：把改名对排到 UI 线程（顺序表与树都只能在 UI 线程动）。</summary>
+    private void QueueCanvasRekey(string? oldPath, string? newPath)
+    {
+        if (string.IsNullOrEmpty(oldPath) || string.IsNullOrEmpty(newPath)) return;
+        string o = oldPath!, n = newPath!;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (CanvasPanelSplitView?.IsPaneOpen != true) return;   // 面板收起时列表本就要重建，不必排
+            _pendingCanvasRekeys.Add((o, n));
+        });
+    }
 
     /// <summary>后台线程入口：先判"这条路径关不关心"，再切到 UI 线程排队。
     /// 关心的 = 画布文件（.gcanvas），或没有扩展名的条目（文件夹）。临时文件等一律忽略。</summary>
@@ -6726,6 +7657,13 @@ public sealed partial class MainPage : Page
     /// <summary>定时器到点：只同步受影响的那一层目录（在树里就地打补丁），不动其它行、不丢展开态。</summary>
     private void FlushCanvasRefreshQueue()
     {
+        // 换键必须先于重扫：重扫时若旧名还挂在表里，这一项已经被排到末尾了
+        if (_pendingCanvasRekeys.Count > 0)
+        {
+            foreach ((string oldPath, string newPath) in _pendingCanvasRekeys) RekeyCanvasOrder(oldPath, newPath);
+            _pendingCanvasRekeys.Clear();
+        }
+
         if (_pendingCanvasDirs.Count == 0) { RefreshCanvasTree(); return; }
 
         var dirs = _pendingCanvasDirs.ToArray();
@@ -6744,6 +7682,7 @@ public sealed partial class MainPage : Page
         try { _canvasRefreshTimer?.Stop(); } catch { }
         _canvasRefreshTimer = null;
         _pendingCanvasDirs.Clear();
+        _pendingCanvasRekeys.Clear();
     }
 
     /// <summary>白板操作入撤销栈。两个方向都改模型 ⇒ 一律置脏，否则撤销后画面回退、磁盘仍停在新状态。</summary>

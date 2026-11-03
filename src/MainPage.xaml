@@ -109,8 +109,10 @@
 
         <!-- 资源管理器的一行：缩进 + 展开箭头 + 图标 + 名字。整行都是命中区 —— 根 Grid 的透明底色就是命中面
              （子元素无背景时不参与命中测试，事件冒泡到这层；行底色 Border 可能是 null，指望不上它）。
-             点击动作在 PointerPressed 里做（不等 Released）：行集合可能因为展开/收起被重建，
-             等 Released 时容器已经不在了，表现就是"点一下没反应，动动鼠标再点才行"。 -->
+             PointerPressed 里只落"选中"，主动作（打开画布 / 展开文件夹）留到抬起时结算：
+             长按拖拽要占用同一次按下，若按下就展开，行集合会在拖拽开始前被重排一遍。
+             动作按【节点引用】执行、不按容器（见 CommitCanvasPress），所以行集合即使在
+             按下与抬起之间被刷新过也不会丢。 -->
 
         <DataTemplate x:Key="CanvasRowTemplate" x:DataType="services:CanvasTreeNode">
 
@@ -176,29 +178,37 @@
 
                     </Grid>
 
-                    <!-- 名字：平时文本，改名时换成行内输入框（与书签同一套控件）。输入框固定 20 高，
-                         行本身固定 22 ⇒ 进编辑不会把行撑高。
+                    <!-- 名字：平时文本，改名时换成行内输入框（与书签同一套控件）。
                          HorizontalAlignment=Left：让 TextBlock 的宽度始终等于文本自然宽度。
                          默认 Stretch 会把它拉成整列宽（列是 *，行被撑到"最宽一行"后短名字会被拉长），
-                         那样"新建后横向滚到看得见名字"就算不出真正的右端位置。 -->
+                         那样"新建后横向滚到看得见名字"就算不出真正的右端位置。
+                         Margin 左边 4 与输入框内文字的左内边距一致 ⇒ 进/出编辑态文字不横向跳。 -->
 
                     <TextBlock Grid.Column="3" Text="{x:Bind Name}" FontSize="12" VerticalAlignment="Center"
-                               HorizontalAlignment="Left"
+                               HorizontalAlignment="Left" Margin="4,0,0,0"
                                Foreground="{x:Bind NameBrush, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" Visibility="{x:Bind NameTextMark, Mode=OneWay}"/>
 
-                    <local:SelfDrawnTextBox Grid.Column="3" Height="20" FontSize="12" VerticalAlignment="Center"
+                    <!-- 改名：框只是装饰，"文字"自己跟名字走同一条算式。
+                         框 = 固定 20 高、行内居中（比一行 16 多出上下各 2，大字号下也不贴边）；
+                         文字 = 恰好一行高（AutoHeight）+ 行内居中，
+                         与左边名字 TextBlock 的"一行高 + 居中"完全相同 ⇒ 进出编辑零位移。
+                         框高【不要】改成跟随行高：那会重新引入"尺寸联动 + 第二层居中"，
+                         文字会再次相对名字偏移。框与文字是两个独立兄弟节点，改框高不动文字。
+                         也不要把文字塞进框里居中：每多一层居中就多一次像素舍入
+                         （125% 缩放下每层舍到 0.8DIP 格），文字会比名字低约 1 个物理像素。 -->
 
-                                            CompactMode="True"
+                    <Border Grid.Column="3" Height="20" VerticalAlignment="Center" CornerRadius="4"
+                            BorderThickness="1" Background="Transparent"
+                            BorderBrush="{StaticResource CanvasRowActiveBarBrush}"
+                            Visibility="{x:Bind IsRenaming, Mode=OneWay}"/>
 
+                    <local:SelfDrawnTextBox Grid.Column="3" AutoHeight="True" FontSize="12" VerticalAlignment="Center"
+                                            ShowFrame="False"
                                             Text="{x:Bind RenameText, Mode=TwoWay}"
-
                                             Visibility="{x:Bind IsRenaming, Mode=OneWay}"
-
                                             Submitted="CanvasRowRename_Submitted"
-
                                             Cancelled="CanvasRowRename_Cancelled"
-
                                             CommitRequested="CanvasRowRename_CommitRequested"/>
 
                 </Grid>
@@ -1755,7 +1765,11 @@
 
                                 <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch">
 
+                                <!-- Margin 左边 4 与输入框内文字的左内边距一致 ⇒ 进/出编辑态文字不横向跳
+                                     （行 Padding 已给 4，输入框再内缩 4 给描边留白，非编辑态必须同步） -->
+
                                     <TextBlock Grid.Column="0" Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" FontSize="12"
+                                               Margin="4,0,0,0"
                                                Foreground="{StaticResource SidebarTextBrush}"/>
 
                                     <local:SelfDrawnTextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" Submitted="BookmarkEdit_Submitted" Cancelled="BookmarkEdit_Cancelled" CommitRequested="BookmarkEdit_CommitRequested"/>
@@ -1852,15 +1866,29 @@
                         <!-- 标题行。新建动作只走右键菜单（点空白处 / 点文件夹行 / 点这一行），不在这里放按钮：
                              标题栏按钮无从表达"建在哪个层级"，只能建在库根，和右键菜单是两套语义。
                              Background=Transparent 是必需的：无底色的 Grid 不参与命中测试，
-                             这一行的空白像素就永远收不到右键。 -->
-                        <Grid Grid.Row="0" Padding="14,0,10,8" Background="Transparent"
+                             这一行的空白像素就永远收不到右键。
+                             它同时是"库根最前"的恒定投放区（见 TryResolveRootDropEdge）：高度固定 24，
+                             与列表下方那条同高。拖拽是拖、右键是点，两种手势不重叠，不冲突；
+                             而这一行本来就不参与滚动、永远在，做投放区一分可视区都不占。 -->
+                        <Grid Grid.Row="0" Height="24" Background="Transparent"
                               ContextRequested="CanvasHeader_ContextRequested">
 
+                            <!-- 染色层：Background 由代码在拖拽悬停时写入。IsHitTestVisible=False 才不挡住
+                                 这一行的右键（右键认的是外层无底色的 Grid）。 -->
+
+                            <Border x:Name="CanvasRootTopDropZone" Background="Transparent"
+                                    IsHitTestVisible="False"/>
+
                             <TextBlock x:Name="CanvasPanelHeaderText" FontSize="12" FontWeight="SemiBold"
-
+                                       Margin="14,0,10,0"
                                        Foreground="{StaticResource SidebarTextMutedBrush}"
-
                                        VerticalAlignment="Center"/>
+
+                            <FontIcon x:Name="CanvasRootTopDropGlyph"
+                                      FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE898;"
+                                      FontSize="12" Visibility="Collapsed"
+                                      HorizontalAlignment="Left" VerticalAlignment="Center" Margin="14,0,0,0"
+                                      Foreground="{StaticResource SidebarTextBrush}"/>
 
                         </Grid>
 
@@ -1873,22 +1901,48 @@
                              "卡片超出本文档页数"的提示不在这里（那会让整块内容下移）：它是左下角胶囊栈里
                              常驻的一格，与保存提示同一条入栈路径（见 SyncCanvasMissingToast）。 -->
 
-                        <ListView Grid.Row="1" x:Name="CanvasRowList" Background="Transparent" Margin="0,0,0,8"
+                        <Grid Grid.Row="1">
 
-                                  IsTabStop="False" UseSystemFocusVisuals="False"
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
 
-                                  SelectionMode="None" IsItemClickEnabled="False"
+                            <ListView Grid.Row="0" x:Name="CanvasRowList" Background="Transparent" Margin="0"
 
-                                  ScrollViewer.HorizontalScrollMode="Enabled"
-                                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                      IsTabStop="False" UseSystemFocusVisuals="False"
 
-                                  ItemContainerStyle="{StaticResource CanvasRowItemStyle}"
+                                      SelectionMode="None" IsItemClickEnabled="False"
 
-                                  ItemTemplate="{StaticResource CanvasRowTemplate}"
+                                      ScrollViewer.HorizontalScrollMode="Enabled"
+                                      ScrollViewer.HorizontalScrollBarVisibility="Auto"
 
-                                  PointerPressed="CanvasRowList_PointerPressed"
+                                      ItemContainerStyle="{StaticResource CanvasRowItemStyle}"
 
-                                  ContextRequested="CanvasRowList_ContextRequested"/>
+                                      ItemTemplate="{StaticResource CanvasRowTemplate}"
+
+                                      PointerPressed="CanvasRowList_PointerPressed"
+
+                                      ContextRequested="CanvasRowList_ContextRequested"/>
+
+                            <!-- 列表下方【恒定】的"库根末尾"投放带（拖拽排序用，见 TryResolveRootDropBand）。
+                                 它必须在列表之外、且紧贴列表下沿：若最末一行是展开文件夹里的子项，
+                                 列表的整条下边界都会被"放进这个文件夹"吃掉，根目录末尾就永远够不着。
+                                 平时全透明（视觉上就是列表底部留白），拖拽悬停时由代码染色 + 画落点线。
+                                 IsHitTestVisible=False：落点靠几何判断，不需要它吃指针。 -->
+
+                            <Border Grid.Row="1" x:Name="CanvasRootDropZone" Height="24"
+                                    Background="Transparent" IsHitTestVisible="False">
+
+                                <FontIcon x:Name="CanvasRootDropGlyph"
+                                          FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE896;"
+                                          FontSize="12" Visibility="Collapsed"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center" Margin="14,0,0,0"
+                                          Foreground="{StaticResource SidebarTextBrush}"/>
+
+                            </Border>
+
+                        </Grid>
 
                     </Grid>
 
@@ -2411,6 +2465,41 @@
             </Border>
 
         </Grid>
+
+        <!-- 行拖拽的浮层：幽灵 + 落点指示。IsHitTestVisible=False —— 拖拽期间指针已经被列表捕获，
+             这一层只负责画，不参与命中，否则幽灵会挡住自己下方的行、落点算不准。
+             幽灵用 ElevationShadow（Translation.Z 抬升 + ThemeShadow 投影）做"离开平面"的立体感，
+             配合 1.05 的缩放：缩放中心取中心点（RenderTransformOrigin），放大时不会往右下角跑。
+             缩放对象单独命名（CanvasDragGhostScale）：起落两段动画直接对它下指令，不走 VisualState。 -->
+        <Canvas x:Name="CanvasDragLayer" Canvas.ZIndex="3500" IsHitTestVisible="False" Visibility="Collapsed">
+
+            <!-- 行间落点：一条强调色细线，左端对齐落点层级的缩进，于是能看出会落在第几层。 -->
+            <Border x:Name="CanvasDropLine" Height="2" CornerRadius="1"
+                    Background="{StaticResource CanvasRowActiveBarBrush}" Visibility="Collapsed"/>
+
+            <!-- 进文件夹落点：套住目标文件夹行的描边（不占底色，避免和选中/多选撞车）。 -->
+            <Border x:Name="CanvasDropIntoRing" BorderThickness="1.5" CornerRadius="4"
+                    BorderBrush="{StaticResource CanvasRowActiveBarBrush}" Visibility="Collapsed"/>
+
+            <!-- 幽灵的尺寸刻意压得比一行更矮更窄：它浮在指针旁边，比行还肥就会盖住落点线。
+                 高度 = 行高 22，视觉上就是"那一行被拿起来了"；MaxWidth 160（×1.05 缩放 ≈ 168）
+                 保证它永远窄于面板；Opacity 0.85 让下面的落点提示透出来。 -->
+            <Border x:Name="CanvasDragGhost" Height="22" MaxWidth="160" CornerRadius="5" BorderThickness="1"
+                    Opacity="0.85"
+                    local:ElevationShadow.IsEnabled="True" local:ElevationShadow.Elevation="24"
+                    RenderTransformOrigin="0.5,0.5" Visibility="Collapsed">
+                <Border.RenderTransform>
+                    <ScaleTransform x:Name="CanvasDragGhostScale" ScaleX="1.05" ScaleY="1.05"/>
+                </Border.RenderTransform>
+                <StackPanel Orientation="Horizontal" Spacing="6" Padding="8,0" VerticalAlignment="Center">
+                    <FontIcon x:Name="CanvasDragGhostIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                              FontSize="12" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="CanvasDragGhostText" FontSize="11" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+            </Border>
+
+        </Canvas>
 
         <!-- 自绘右键菜单（画布库用）。挂在页面主可视树的最上层而不是弹层里：弹层是独立视觉树，
              一弹就把焦点/光标语境切走 —— 框架菜单会莫名改鼠标光标、并让背后那一行丢掉悬浮态。
