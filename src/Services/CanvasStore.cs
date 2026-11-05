@@ -67,14 +67,52 @@ public sealed class CanvasDoc
 
     [JsonPropertyName("nodes")] public List<CanvasNode> Nodes { get; set; } = new();
     [JsonPropertyName("edges")] public List<CanvasEdge> Edges { get; set; } = new();
+
+    /// <summary>页面上的笔迹（画笔模式的墨）。与 nodes/edges 并列：同一份画布承载"白板卡片"与"页上墨迹"
+    /// 两类内容，两者都是"页局部坐标 + 页号"，只是绘制视图不同（阅读视图画墨，白板视图画卡片）。
+    /// 一笔跨页时按页切成多段，段之间默认相连（渲染时用一条直线跨过页间空隙）。</summary>
+    [JsonPropertyName("ink")] public List<CanvasInk> Ink { get; set; } = new();
+}
+
+/// <summary>一条笔画。整条挂在【发起页】上：全部点用那一页的局部坐标，允许越出页框
+/// （负数、超页高都是正常轨迹）—— 跨页、穿过页间空隙、越过左右页边，都只是同一条线的自然延伸。
+/// 于是不需要按页切开，也不需要任何事后补线；整条共用同一套页变换，
+/// 旋转页面、切换单页/双页/网格时都不会被拉出假线。</summary>
+public sealed class CanvasInk
+{
+    [JsonPropertyName("color")] public string Color { get; set; } = "#F2C200";
+    [JsonPropertyName("width")] public double Width { get; set; } = 3.5;
+
+    /// <summary>发起页（0-based）。-1 = 无归属（数据损坏的防御值，任何页都不画）。</summary>
+    [JsonPropertyName("page")] public int Page { get; set; } = -1;
+
+    /// <summary>扁平点串 [x0,y0,x1,y1,…]，页局部未旋转 PDF 点，可越出页框。</summary>
+    [JsonPropertyName("pts")] public List<double> Pts { get; set; } = new();
+
+    /// <summary>旧格式残留（曾是"按页切段"，一条笔有 N 段）。**只在读回旧文件时出现、写入永不产出**；
+    /// 读到就每段各还原成一笔（不跨页连接），旧内容因此不会凭空消失。</summary>
+    [JsonPropertyName("segments")] public List<CanvasInkSegment>? LegacySegments { get; set; }
+}
+
+/// <summary>旧格式里的一段（见 <see cref="CanvasInk.LegacySegments"/>）：段自带页号与点串。
+/// 点同样是【页局部未旋转 PDF 点】的扁平数组 —— 不存旋转量，页面旋转是文档级视图状态（随 ViewState 保存），
+/// 换算进页局部坐标时已把旋转逆算回去，于是同一组点在 0/90/180/270 度下都落在同一处内容上，
+/// 存了反而会与当时的视图状态打架。</summary>
+public sealed class CanvasInkSegment
+{
+    /// <summary>本段所属页（0-based）。-1 = 无归属（数据损坏的防御值，任何页都不画）。</summary>
+    [JsonPropertyName("page")] public int Page { get; set; } = -1;
+
+    [JsonPropertyName("pts")] public List<double> Pts { get; set; } = new();
 }
 
 /// <summary>格式标记内容。format 用来拒绝"未来版本写的"文件：老程序宁可当它不存在，
 /// 也不要用旧模型去解析新格式、再把结果写回去毁掉它。</summary>
 public sealed class CanvasFormatMark
 {
-    /// <summary>当前写出的格式号。改字段语义时递增，并在读取侧按需接受旧号。</summary>
-    public const int CurrentFormat = 1;
+    /// <summary>当前写出的格式号。改字段语义时递增，并在读取侧按需接受旧号。
+    /// 2 = 增加 ink（页面笔迹，整条挂发起页）；1 = 只有 nodes/edges。旧文件照常读，ink 为空。</summary>
+    public const int CurrentFormat = 2;
 
     [JsonPropertyName("format")] public int Format { get; set; } = CurrentFormat;
 }

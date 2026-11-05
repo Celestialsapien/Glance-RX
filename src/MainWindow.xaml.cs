@@ -1172,7 +1172,7 @@ public sealed partial class MainWindow : Window
             {
                 // 使用正常保存流程（与 Ctrl+S 相同），等待完成后再退出。
                 // onExit=true：进程随后终止，不必再重建渲染引擎（否则白烧一次 MuPDF 初始化 + 重排缩略图）。
-                bool saved = await mainPage.SaveOriginalPdfAsync(notify: false, onExit: true);
+                bool saved = await mainPage.SaveChangesAsync(notify: false);
                 if (saved)
                 {
                     _isClosingConfirmed = true;

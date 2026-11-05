@@ -47,21 +47,6 @@ public static class CacheManager
         return CacheDirectory;
     }
 
-    /// <summary>生成缓存目录内一个唯一临时文件路径（含扩展名，如 "pdf"）。 调用方负责在使用后删除；即使漏删， 也会在下次启动时回收。</summary>
-    public static string GetTempFilePath(string extension)
-    {
-        EnsureCacheDirectory();
-        string ext = string.IsNullOrWhiteSpace(extension) ? "tmp" : extension.TrimStart('.');
-        return Path.Combine(CacheDirectory, $"{Guid.NewGuid():N}.{ext}");
-    }
-
-    /// <summary>返回缓存目录内某个具名文件的完整路径（不自动创建文件）。 适合放诊断日志等"安全可删"的持久化缓存文件。</summary>
-    public static string GetCacheFilePath(string fileName)
-    {
-        EnsureCacheDirectory();
-        return Path.Combine(CacheDirectory, fileName);
-    }
-
     /// <summary>启动时调用：清理过期/超额缓存，防止目录无限增长。 删除整个 Cache 目录都不影响软件运行。失败静默。</summary>
     public static void Cleanup()
     {
@@ -71,7 +56,7 @@ public static class CacheManager
 
             var dir = new DirectoryInfo(CacheDirectory);
 
-            // 一次性清理：早期版本留下的「未烘焙原始副本」缓存（批注已是真实 PDF 注解对象），
+            // 一次性清理：早期版本留下的「未烘焙原始副本」缓存（旧版本曾把批注烘进 PDF），
             foreach (var f in dir.GetFiles("anno_base_*.pdf"))
                 TryDelete(f);
 

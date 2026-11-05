@@ -1640,6 +1640,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     public void InvalidateOverlay()
     {
         _annoLayerNeedsFullRebuild = true;
+        // 墨集合可能整批换过（载入 / 换画布 / 撤销）：有墨页索引下次绘制重扫一遍。
+        _inkPagesDirty = true;
         try { ScreenCanvas.Invalidate(); } catch { }
     }
 
@@ -1667,6 +1669,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         public Windows.UI.Color ParsedColor;
         // 累积层已烘入的点数：当前笔画增量烘入时，只画 [BakingPoints, Count) 这一段，
         public int BakingPoints;
+        // 笔的页局部包围盒（PDF 点，可越出页框）：判断"笔是否还压在视口里"用，按 PointsVersion 失效。
+        public Rect Bounds;
+        public bool HasBounds;
+        public int BoundsVersion = -1;
     }
     // Key = AnnotationViewModel 的引用哈希（不重写 GetHashCode，用 RuntimeHelpers）
     // 用 ConditionalWeakTable 不用 Dictionary：标注被 GC 回收时缓存自动释放，不会内存泄漏
@@ -1705,8 +1711,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private bool _isAnnotating;
     private int _annotatingPage = -1;
 
-    /// <summary>视口坐标 → 命中页 + 页局部坐标（PDF 点，未旋转）。requireInside=true 时点必须落在某页内。</summary>
-    private bool TryViewportToPage(Point vp, bool requireInside,
+    /// <summary>视口坐标 → 命中页 + 页局部坐标（PDF 点，未旋转）。指针不在任何页矩形内时返回 false。</summary>
+    private bool TryViewportToPage(Point vp,
         out int pageIndex, out double px, out double py)
     {
         pageIndex = -1; px = 0; py = 0;
@@ -1949,9 +1955,131 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         try { return annos.ToArray(); } catch { return null; }
     }
 
-    private bool HasVisiblePenAnnotations(List<(GpuPageInfo Page, Rect Dest)> visible)
+    /// <summary>有墨的页索引。墨集合只在"载入/换画布/撤销"这类整批变化时才变，故按需重建；
+    /// 落笔时新页由 <see cref="NotifyInkPageAdded"/> 增量补一条，不必扫全文档。</summary>
+    private readonly List<int> _inkPages = new();
+    private bool _inkPagesDirty = true;
+
+    private void RebuildInkPages()
     {
-        foreach (var (p, _) in visible)
+        _inkPages.Clear();
+        var provider = AnnotationProvider;
+        if (provider != null)
+        {
+            for (int i = 0; i < _pages.Count; i++)
+            {
+                IReadOnlyList<AnnotationViewModel>? a;
+                try { a = provider(i); } catch { continue; }
+                if (a != null && a.Count > 0) _inkPages.Add(i);
+            }
+        }
+        _inkPagesDirty = false;
+    }
+
+    /// <summary>有人刚在某页上落了笔（这一页可能原本没有墨）。只加不删：多余的页只会被多查一次，
+    /// 它的笔若不在视口里就画不着 —— 索引的"多"是无害的，"少"才会让墨凭空消失。</summary>
+    public void NotifyInkPageAdded(int pageIndex)
+    {
+        if (_inkPagesDirty || pageIndex < 0) return;   // 反正下次绘制会整份重建
+        if (!_inkPages.Contains(pageIndex)) _inkPages.Add(pageIndex);
+    }
+
+    /// <summary>笔的页局部包围盒（PDF 点）。按 PointsVersion 缓存 —— 落笔过程中点数在变，
+    /// 重算也就只在这时发生；空笔返回 false。</summary>
+    private static bool TryStrokeBounds(AnnotationViewModel a, CachedAnnoGeometry cache, out Rect bounds)
+    {
+        int ver = a.PointsVersion;
+        if (cache.BoundsVersion == ver)
+        {
+            bounds = cache.Bounds;
+            return cache.HasBounds;
+        }
+
+        var pts = a.GetPointsSnapshot();
+        if (pts.Length == 0)
+        {
+            cache.HasBounds = false;
+            cache.BoundsVersion = ver;
+            bounds = default;
+            return false;
+        }
+        double minX = pts[0].X, maxX = minX, minY = pts[0].Y, maxY = minY;
+        for (int i = 1; i < pts.Length; i++)
+        {
+            double x = pts[i].X, y = pts[i].Y;
+            if (x < minX) minX = x; else if (x > maxX) maxX = x;
+            if (y < minY) minY = y; else if (y > maxY) maxY = y;
+        }
+        cache.Bounds = new Rect(minX, minY, maxX - minX, maxY - minY);
+        cache.HasBounds = true;
+        cache.BoundsVersion = ver;
+        bounds = cache.Bounds;
+        return true;
+    }
+
+    /// <summary>这一页上是否还有笔压在视口里。整条笔挂在发起页、可以越出页框很远（跨到第 3 页之后），
+    /// 所以判据是【笔的屏幕包围盒 ∩ 视口】，不是"页距几页"。</summary>
+    private bool PageHasStrokeInViewport(int pageIndex, Rect dest, double z)
+    {
+        var annos = SafeAnnos(pageIndex);
+        if (annos == null) return false;
+
+        var xf = MakePageXform(dest, z);
+        float vw = (float)_vpW, vh = (float)_vpH;
+        const float Margin = 32f;   // 线宽与抗锯齿的余量：擦着视口边也算看得见
+
+        foreach (var a in annos)
+        {
+            if (a.Type != AnnotationType.Pen) continue;
+            var cache = _annoGeoCache.GetValue(a, _ => new CachedAnnoGeometry());
+            if (!TryStrokeBounds(a, cache, out Rect b)) continue;
+
+            // 四角全映射：旋转不是 90 的整数倍时，只取对角两点会算窄了包围盒。
+            Vector2 c0 = xf.Map(b.Left, b.Top);
+            Vector2 c1 = xf.Map(b.Right, b.Top);
+            Vector2 c2 = xf.Map(b.Right, b.Bottom);
+            Vector2 c3 = xf.Map(b.Left, b.Bottom);
+            float minX = MathF.Min(MathF.Min(c0.X, c1.X), MathF.Min(c2.X, c3.X));
+            float maxX = MathF.Max(MathF.Max(c0.X, c1.X), MathF.Max(c2.X, c3.X));
+            float minY = MathF.Min(MathF.Min(c0.Y, c1.Y), MathF.Min(c2.Y, c3.Y));
+            float maxY = MathF.Max(MathF.Max(c0.Y, c1.Y), MathF.Max(c2.Y, c3.Y));
+
+            if (maxX + Margin >= 0 && minX - Margin <= vw &&
+                maxY + Margin >= 0 && minY - Margin <= vh) return true;
+        }
+        return false;
+    }
+
+    /// <summary>标注要画的页集合 = 可见页 + "笔仍压在视口里的有墨页"。整条笔挂在【发起页】上，
+    /// 溢出那一截可能在发起页早已滚出视口、甚至跨到第 3 页之后 —— 按页的邻近关系猜（原先只 ±1 页）
+    /// 迟早漏，所以直接拿每笔的屏幕包围盒与视口求交：**只要视口能看见就画**，与隔了几页无关。</summary>
+    private List<(GpuPageInfo Page, Rect Dest)> ExpandPagesForInk(
+        List<(GpuPageInfo Page, Rect Dest)> visible, double z, double hOff, double vOff)
+    {
+        if (_inkPagesDirty) RebuildInkPages();
+        if (_inkPages.Count == 0) return visible;
+
+        List<(GpuPageInfo Page, Rect Dest)>? list = null;
+        foreach (int idx in _inkPages)
+        {
+            if (idx < 0 || idx >= _pages.Count) continue;
+            bool already = false;
+            foreach (var (p, _) in visible) if (p.Index == idx) { already = true; break; }
+            if (already) continue;
+
+            var dest = ComputePageDest(idx, z, hOff, vOff);
+            if (!PageHasStrokeInViewport(idx, dest, z)) continue;
+
+            list ??= new List<(GpuPageInfo Page, Rect Dest)>(visible);
+            list.Add((_pages[idx], dest));
+        }
+        return list ?? visible;
+    }
+
+    /// <summary>这些页里是否至少有一条笔（决定这一帧要不要碰标注层）。</summary>
+    private bool HasPenAnnotations(List<(GpuPageInfo Page, Rect Dest)> pages)
+    {
+        foreach (var (p, _) in pages)
         {
             var annos = SafeAnnos(p.Index);
             if (annos == null) continue;
@@ -1959,6 +2087,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 if (a.Type == AnnotationType.Pen) return true;
         }
         return false;
+    }
+
+    /// <summary>视图动画期间用矢量逐笔绘制是否可承受。可见页上的笔数直接决定每帧的描边量
+    /// （几何是缓存的，重建只发生在点数变化时），超过阈值就退回整层位图 —— 保证极端页不掉帧。</summary>
+    private bool InkMotionVectorAllowed(List<(GpuPageInfo Page, Rect Dest)> pages)
+    {
+        const int MaxStrokes = 240;
+        int n = 0;
+        foreach (var (p, _) in pages)
+        {
+            var annos = SafeAnnos(p.Index);
+            if (annos == null) continue;
+            n += annos.Length;
+            if (n > MaxStrokes) return false;
+        }
+        return true;
     }
 
     private void EnsureAnnoLayer()
@@ -2380,30 +2524,6 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             if (lead < b) { best = p.Index; break; }
         }
         return best;
-    }
-
-    /// 保存/另存为成功后重新挂接底层渲染引擎：仅替换引擎句柄，【刻意保留】旧瓦片缓存， 【刻意不】重建布局、不触碰视口、不重构建可见页。
-    public void ReattachRenderService(PdfRenderService svc)
-    {
-        RenderService = svc;
-
-        // 引擎句柄已更换（保存/另存为后 reload 同一文档）：在途渲染必须排空到旧引擎上完成，
-        // 否则旧 worker 还持着已 Dispose 的引擎在渲染。缓存条目保留——瓦片像素与引擎无关
-        _renderCache?.CancelRenderingBlocking(this);
-        _renderCache?.AbortRendering(this);
-
-        // 旋转已烘焙进导出文件（保存流已把 page.RotationAngle 归零），视图旋转同步归零以匹配
-        if (_rotation != 0)
-        {
-            _rotation = 0;
-            if (_pages.Count > 0) RecomputeLayout(_pages);
-        }
-
-        // 仅按"当前（未变的）滚动偏移/缩放"重新评估可见窗口——已缓存页直接命中、不重光栅；
-        UpdateVisibleRange();
-        QueueVisiblePages();
-        InvalidateBoth();
-        NotifyViewState();
     }
 
     private readonly struct FacingRow
@@ -8232,31 +8352,44 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _drawDs = null;
 
         // ---- 标注叠加：与页位图画在【同一交换链】（原子合成，消除双画布相位脱节的震动/闪光）。
-        if (AnnotationsVisible && HasVisiblePenAnnotations(visible))
+        // 页集合要带前后各一页：墨挂在发起页上，溢出到相邻页的部分在发起页出视口后仍应留在屏上。
+        var inkPages = ExpandPagesForInk(visible, z, hOff, vOff);
+        if (AnnotationsVisible && HasPenAnnotations(inkPages))
         {
             if (IsViewAnimating || _isDragPanning)
             {
-                // 视图在动：把累积层按"新变换 ∘ 旧变换⁻¹"整体 blit 一次，不再逐笔重画
-                //（逐笔重画要每帧对每条笔画做一次描边展开，成本与可见点数成正比）。
-                // 旋转下该映射不成立（每页绕自身中心转），退回逐笔。
-                EnsureAnnoLayer();
-                bool blitted = false;
-                if (_rotation == 0 && _annoLayer != null && _annoBaseZoom > 0)
+                // 视图在动：优先逐笔矢量绘制 —— 几何已按 PointsVersion 缓存，每帧只是换一次变换重画，
+                // 与白板卡片同一性质，于是缩放/滚动期间笔迹与卡片一样清晰（不再一个糊一个清）。
+                // 只有可见笔段超过阈值时才退回"整层位图重映射"：极端页（整页涂满）宁可暂时发糊，
+                // 也不把一帧的描边量顶穿。
+                if (InkMotionVectorAllowed(inkPages))
                 {
-                    BlitAnnoLayerDuringMotion(ds, z, hOff, vOff, visible);
-                    // 层像素已与当前视图脱钩：停稳后必须整层重烘，否则会拿旧变换的像素贴新视图（整层错位）。
+                    DrawAnnotationsOnCanvas(ds, z, inkPages);
+                    // 层像素已与当前视图脱钩：停稳后必须整层重烘，否则会拿旧变换的像素贴新视图。
                     _annoLayerNeedsFullRebuild = true;
-                    blitted = true;
                 }
-                if (!blitted) DrawAnnotationsOnCanvas(ds, z, visible);
+                else
+                {
+                    // 兜底：把累积层按"新变换 ∘ 旧变换⁻¹"整体 blit 一次，不再逐笔重画。
+                    // 旋转下该映射不成立（每页绕自身中心转），退回逐笔。
+                    EnsureAnnoLayer();
+                    bool blitted = false;
+                    if (_rotation == 0 && _annoLayer != null && _annoBaseZoom > 0)
+                    {
+                        BlitAnnoLayerDuringMotion(ds, z, hOff, vOff, inkPages);
+                        _annoLayerNeedsFullRebuild = true;
+                        blitted = true;
+                    }
+                    if (!blitted) DrawAnnotationsOnCanvas(ds, z, inkPages);
+                }
             }
             else
             {
                 EnsureAnnoLayer();
                 if (_annoLayer != null)
                 {
-                    if (_annoLayerNeedsFullRebuild) RebuildAnnoLayer(visible, z, hOff, vOff);
-                    else BakeUnbakedStrokes(visible, z, hOff, vOff);
+                    if (_annoLayerNeedsFullRebuild) RebuildAnnoLayer(inkPages, z, hOff, vOff);
+                    else BakeUnbakedStrokes(inkPages, z, hOff, vOff);
                     ds.DrawImage(_annoLayer);
                 }
             }
@@ -8273,9 +8406,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// <summary>缩放/滚动动画是否进行中。此时标注【逐帧随变换改变】：累积层是按某一变换烘好的位图，
-    /// 原地 1:1 重用必然错位，每帧重烘又等于全视口 Clear + 重画全部笔画；所以这一帧改走
-    /// "整层按新变换重映射"（<see cref="BlitAnnoLayerDuringMotion"/>），只有映射不成立（旋转）
-    /// 或层里尚无像素时才逐笔重画。</summary>
+    /// 原地 1:1 重用必然错位。这一帧优先逐笔矢量重画（几何有缓存，与白板卡片同一性质）；
+    /// 可见笔段过多时才退回"整层按新变换重映射"（<see cref="BlitAnnoLayerDuringMotion"/>）。</summary>
     private bool IsViewAnimating =>
         _isSmoothZooming || _isWheelScrolling || _zoomAnimCommitting;
 
@@ -8304,7 +8436,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         ds.Transform = saved;
     }
 
-    /// <summary>视图移动中（缩放/滚轮弹簧/拖拽平移）的笔迹路径：不重画，把累积层按
+    /// <summary>视图移动中的笔迹兜底路径（可见笔段过多时才走）：不重画，把累积层按
     /// "新变换 ∘ 旧变换⁻¹" 整体 blit 一次。
     /// 依据：文档→屏幕是统一仿射 screen = pagePt·z + (center − offset)，与页无关，
     /// 因此任意两个视图之间存在同一个"缩放 + 平移"，可以一次性落到整层位图上；
@@ -8956,8 +9088,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (AnnotationInputActive && pt.Properties.IsLeftButtonPressed)
         {
             StopSmoothZoom();
-            if (TryViewportToPage(pt.Position, requireInside: true,
-                out int pageIdx, out double px, out double py))
+            if (TryViewportToPage(pt.Position, out int pageIdx, out double px, out double py))
             {
                 _isAnnotating = true;
                 _annotatingPage = pageIdx;
@@ -9256,9 +9387,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_isAnnotating)
         {
             var pt = e.GetCurrentPoint(Viewer);
+            // 整条笔始终按【发起页】换算：坐标可以越出页框（负数 / 超页高都是正常轨迹），
+            // 于是同一笔的点串天然连续 —— 跨页、跨页间空隙、越过左右页边，全都只是这条线的延伸，
+            // 不需要按页切开、也不需要事后补线；整条随发起页同一套变换绘制，旋转与换布局时更不会拉出假线。
             if (ViewportToLockedPage(_annotatingPage, pt.Position, out double px, out double py))
+            {
                 AnnotationPointerMoved?.Invoke(this,
                     new GpuAnnotationPointerArgs { PageIndex = _annotatingPage, X = px, Y = py });
+            }
             e.Handled = true;
             return;
         }

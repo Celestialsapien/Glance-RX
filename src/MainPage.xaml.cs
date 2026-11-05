@@ -47,11 +47,6 @@ using System.Runtime.InteropServices;
 using GlanceRX.Interop;
 using GlanceRX.Services;
 using static GlanceRX.Tuning;
-using PdfSharp.Pdf;
-using PdfSharp.Pdf.IO;
-using PdfSharp.Pdf.Advanced;
-using PdfSharp.Pdf.Annotations;
-using PdfSharp.Drawing;
 
 namespace GlanceRX;
 
@@ -80,9 +75,7 @@ public sealed partial class MainPage : Page
 
     public bool HasUnsavedChanges { get; set; } = false;
 
-    // 未落盘改动的来源：PDF 侧（笔迹）与白板 JSON 各自独立。分开记是为了"只改了白板"时
-    // 完全跳过一次整份 PDF 重写——那是保存路径上最贵的动作。
-    private bool _annotationsDirty;
+    // 未落盘改动：笔迹与卡片都在画布文件里，所以只有这一个来源。
     private bool _canvasDirty;
     // 保存流程重入闸门：同一次按键可能被多个入口各处理一次（工具栏按钮 + 加速器 + 关窗流程），
     // 而只读/加密文档的保存要弹"另存为"文件框 —— 两次并发就会同时冒出两个框。
@@ -91,7 +84,7 @@ public sealed partial class MainPage : Page
 
     // 批量加载（从磁盘读回）标注时临时抑制"脏标记 + 自动保存"：对象初始化器会触发 AnnotationViewModel
     // 否则从磁盘读回"已保存"的标注会被误判成未保存更改，导致即使本次没画、关闭也弹保存询问。
-    internal static bool SuppressAnnotationDirty { get; set; }
+    internal static bool SuppressDirtyMarking { get; set; }
 
     private Windows.Storage.StorageFile? _pendingFileToLoad;
 
@@ -125,8 +118,6 @@ public sealed partial class MainPage : Page
     private bool _isUnloading = false;
     private string _currentPdfPath = "";
     private string? _currentPdfPassword;
-    // 能否将批注写回原文件（覆盖保存）。加密/只读 PDF 为 false —— 这类文档永不改写原文件，
-    private bool _canOverwriteOriginal = true;
     private SettingsService _settingsService = new();
     private bool _toolbarAlwaysVisible;
     private uint _totalPages = 0;
@@ -142,6 +133,12 @@ public sealed partial class MainPage : Page
     private EditMode _currentMode = EditMode.Navigate;
     private bool _isDrawingHighlight = false;
     private AnnotationViewModel? _activeHighlight;
+
+    /// <summary>笔画的最小收点间距（页局部 PDF 点）。0.6pt 在 100% 缩放下不到 1 像素：
+    /// 慢写时手在原地的抖动会被滤掉，快写几乎不丢点，于是点数 ≈ 线条长度 ÷ 该值，
+    /// 而不是跟着采样频率走。只决定"这个点收不收"，从不改动已收的点。</summary>
+    private const double InkMinPointGap = 0.6;
+
     // 画笔色板第 1 位 = 主题强调紫（Obsidian 紫）：浅色 #9873F7 / 深色 #A882FF，
     private const string AccentColorTag = "Accent";
 
@@ -1115,7 +1112,7 @@ public sealed partial class MainPage : Page
 
     private async void SavePdf_Click(object sender, RoutedEventArgs e)
     {
-        await SaveOriginalPdfAsync();
+        await SaveChangesAsync();
     }
 
     private async void Print_Click(object? sender, RoutedEventArgs? e)
@@ -1206,7 +1203,8 @@ public sealed partial class MainPage : Page
         DocumentStore.SaveViewState(_currentPdfPath, data);
     }
 
-    /// <summary>"不保存退出"：批注只写进 PDF 文件（文件即真相源），未保存的笔迹从未落盘，文件始终是 "上次保存态"。因此放弃未保存更改无需回滚任何数据——清空内存叠加层、复位脏标记即可， 下次打开自然读到已保存批注（加密/只读走另存为、普通可写走原地保存，行为一致）。</summary>
+    /// <summary>"不保存退出"：未落盘的画布改动不在盘上，放弃它无需回滚任何数据 ——
+    /// 清掉内存里的墨与脏标记即可，下次打开仍是文件里那份（上次保存态）。</summary>
     public void DiscardUnsavedOnExit()
     {
         try
@@ -1214,9 +1212,8 @@ public sealed partial class MainPage : Page
             foreach (var p in _pages) p.Annotations.Clear();
         }
         catch { }
-        // 白板同样丢弃：清掉脏标记后 CleanupForExit 的 FlushCanvas 不会再写盘；
+        // 清掉脏标记后 CleanupForExit 的 FlushCanvas 不会再写盘；
         // 托管表里那几份"切走时没写进去"的也一并作废 —— 用户选的就是"不保存"。
-        _annotationsDirty = false;
         _canvasDirty = false;
         _canvasSavePaused = false;   // 这一路是"全部放弃"，暂停态与那枚常驻提示也该跟着散场
         _unsavedCanvasDocs.Clear();
@@ -1261,422 +1258,37 @@ public sealed partial class MainPage : Page
         }
     }
 
-    public async Task<bool> SaveOriginalPdfSilentAsync(bool onExit = false)
-    {
-        if (string.IsNullOrEmpty(_currentPdfPath) || _pages.Count == 0) return false;
-
-        // 白板与 PDF 相互独立：先落所有画布（含切走时托管的那几份），失败也要让 PDF 继续写，
-        // 但不许静默 —— 这里若吞掉失败，用户会以为"保存"把两样都存好了，实际只有 PDF 落了盘。
-        // 走 await 版：这条路可能弹"另选保存位置"，得等用户答复再继续。
-        await SaveAllCanvasesAsync();
-
-        // Cancel page rendering FIRST to release the semaphore and prevent deadlocks!
-        if (_pdfRenderCts != null)
-        {
-            try { _pdfRenderCts.Cancel(); } catch { }
-        }
-
-        await _ffiSemaphore.WaitAsync();
-        try
-        {
-            var savedList = new List<SavedAnnotation>();
-            foreach (var page in _pages)
-            {
-                foreach (var anno in page.Annotations)
-                {
-                    var savedAnno = new SavedAnnotation
-                    {
-                        PageIndex = page.PageIndex,
-                        Type = anno.Type,
-                        X = anno.X,
-                        Y = anno.Y,
-                        Width = anno.Width,
-                        Height = anno.Height,
-                        Content = anno.Content ?? "",
-                        ColorHex = anno.ColorHex,
-                        Thickness = anno.Thickness,
-                        RotationAngle = page.RotationAngle
-                    };
-
-                    foreach (var pt in anno.PointsCollection)
-                    {
-                        savedAnno.Points.Add(new SavedPoint { X = pt.X, Y = pt.Y });
-                    }
-
-                    savedList.Add(savedAnno);
-                }
-            }
-
-            var pageRotations = new Dictionary<int, double>();
-            foreach (var page in _pages)
-            {
-                pageRotations[page.PageIndex] = page.RotationAngle;
-            }
-
-            string tempFile = CacheManager.GetTempFilePath("pdf");
-            
-            try
-            {
-                if (SaveButton != null) SaveButton.IsEnabled = false;
-
-                // Cancel background rendering task to avoid accessing native engine during/after cleanup
-                await CancelBackgroundRenderAsync();
-
-                // 保存固定三步：① 释放引擎让出文件句柄 ② 写出带注解的副本 ③ 覆盖回原路径。
-                // 全程只换引擎句柄、不重载文档（不跑 TryInitialFit），阅读位置与缩放因此不被重置。
-
-                // ① 必须先释放：PdfSharp 要打开原文件做 Modify，引擎还握着句柄会被拒。
-                if (_pdfRenderService != null)
-                {
-                    _pdfRenderService.Dispose();
-                    _pdfRenderService = null;
-                }
-
-                // ② 写到临时文件：原文件此刻仍完好，写到一半失败也不会损坏它。
-                var exportService = new GlanceRX.Services.PdfExportService();
-                await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, tempFile, savedList, pageRotations, _currentPdfPassword);
-
-                // ③ 覆盖回原路径：只读属性会让 File.Copy 抛 UnauthorizedAccessException，先摘掉。
-                try
-                {
-                    if ((System.IO.File.GetAttributes(_currentPdfPath) & System.IO.FileAttributes.ReadOnly) != 0)
-                        System.IO.File.SetAttributes(_currentPdfPath, System.IO.FileAttributes.Normal);
-                }
-                catch { }
-                File.Copy(tempFile, _currentPdfPath, true);
-                try { File.Delete(tempFile); } catch { }
-
-                // Reset the rotation angle since rotation is now permanently applied in the PDF file itself.
-                foreach (var page in _pages)
-                {
-                    page.RotationAngle = 0.0;
-                }
-                _annotationsDirty = false;
-                // 批注落盘了，但白板可能还有没写进去的份（托管表）：标记是同一条，交给同一处统一算。
-                RefreshUnsavedState();
-
-                // 退出流程到此为止：文件已落盘，进程随即终止，下面"重建引擎 + 重排缩略图"
-                // 纯属白烧（MuPDF 初始化与本进程的 TerminateProcess 还容易撞出死锁）。
-                if (onExit)
-                {
-                    return true;
-                }
-
-                _pdfRenderService = new PdfRenderService();
-                await _pdfRenderService.InitializeAsync(_currentPdfPath, _currentPdfPassword);
-
-                // GPU 阅读器仅"换引擎句柄 + 清旧位图缓存"重新挂接更新后的文件，
-                GpuViewer.ReattachRenderService(_pdfRenderService);
-
-                GpuViewer.InvalidateOverlayThrottled();
-
-                if (_pdfRenderCts != null)
-                {
-                    try { _pdfRenderCts.Cancel(); } catch { }
-                    _pdfRenderCts.Dispose();
-                }
-                _pdfRenderCts = new CancellationTokenSource();
-
-                for (int i = 0; i < _pages.Count; i++)
-                {
-                    _pages[i].ThumbnailSource = null;
-                    if (_realizedSidebar.Contains(i)) _ = EnsureThumbnailRenderedAsync(i);
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                try
-                {
-                    string logPath = CacheManager.GetCacheFilePath("save_error.txt");
-                    File.WriteAllText(logPath, $"Time: {DateTime.Now}\nError: {ex.Message}\nStack: {ex.StackTrace}\nInner: {ex.InnerException?.Message}");
-                }
-                catch { }
-
-                // 保存失败时恢复渲染引擎，使查看器仍可正常使用。
-                // ⚠ 关键：必须用【非破坏式】ReattachRenderService，绝不能 LoadAsync ——
-                // 否则会重建查看器并跑 TryInitialFit，把视口重置回首页 + 适应宽度
-                if (_pdfRenderService == null && !string.IsNullOrEmpty(_currentPdfPath))
-                {
-                    try
-                    {
-                        _pdfRenderService = new PdfRenderService();
-                        await _pdfRenderService.InitializeAsync(_currentPdfPath, _currentPdfPassword);
-                        GpuViewer.ReattachRenderService(_pdfRenderService);
-                        GpuViewer.InvalidateOverlayThrottled();
-
-                        if (_pdfRenderCts != null)
-                        {
-                            try { _pdfRenderCts.Cancel(); } catch { }
-                            _pdfRenderCts.Dispose();
-                        }
-                        _pdfRenderCts = new CancellationTokenSource();
-                    }
-                    catch (Exception)
-                    {
-                    }
-                }
-
-                return false;
-            }
-        }
-        finally
-        {
-            _ffiSemaphore.Release();
-            if (SaveButton != null)
-            {
-                this.DispatcherQueue.TryEnqueue(() =>
-                {
-                    if (SaveButton != null) SaveButton.IsEnabled = true;
-                });
-            }
-        }
-    }
-
-    public Task<bool> SaveOriginalPdfAsync(bool notify = true, bool onExit = false)
+    /// <summary>Ctrl+S 与"保存并退出"的唯一入口。Glance 不写 PDF：笔迹与卡片都在画布文件里，
+    /// 所以"保存"只剩把所有画布收尾（当前这份 + 切走时托管在内存里的那几份）。</summary>
+    public Task<bool> SaveChangesAsync(bool notify = true)
     {
         // 已有保存在跑：返回它，让本次调用等同一个结果。
         // 不能直接 return true —— 关窗流程会把"true"当成"已落盘"随即强杀进程，
-        // 而那次写入（temp 覆盖原文件）可能正在半途，文件会被截断。
+        // 而那次写入可能正在半途，文件会被截断。
         var running = _saveTask;
         if (running != null) return running;
 
-        var task = RunSaveAsync(notify, onExit);
+        var task = RunSaveAsync(notify);
         _saveTask = task;
         return task;
     }
 
-    private async Task<bool> RunSaveAsync(bool notify, bool onExit)
+    private async Task<bool> RunSaveAsync(bool notify)
     {
         // 先让出一次：保证调用方已经把 Task 存进 _saveTask，finally 才可能清到正确的那一个
-        // （否则"只改白板"这种同步就能跑完的路径会在赋值之前就把字段清掉，之后永远残留）。
+        // （否则"没有脏标记"这种同步就能跑完的路径会在赋值之前就把字段清掉，之后永远残留）。
         await Task.Yield();
         try
         {
-            return await SaveOriginalPdfCoreAsync(notify, onExit);
-        }
-        finally
-        {
-            _saveTask = null;
-        }
-    }
-
-    private async Task<bool> SaveOriginalPdfCoreAsync(bool notify, bool onExit)
-    {
-        // 只有白板改动：PDF 不需要重写，也不该因为文件只读/加密就把用户推进"另存为"。
-        if (!_annotationsDirty)
-        {
-            // 一次把所有画布都收尾：当前这份 + 之前切走时没能写进去、托管在内存里的那几份。
-            // 关窗询问里的"保存并退出"走的就是这条 —— 切到别的画布再关软件，那几份同样会被问到。
             bool saved = await SaveAllCanvasesAsync();
             if (saved && notify) ShowSaveToast(LocalizationService.Get("SaveToastSuccess"), ToastIconKind.Success);
             // 失败时**不退出**：窗口和内存里的画布都留着，他还能按 Ctrl+S 或再点一次关闭重来 ——
             // 一次误点取消不该等于把这次编辑判死刑。
             return saved;
         }
-
-        // 路由依据"当前文档的原始文件是否可被覆盖"（_canOverwriteOriginal），而非是否带密码。
-        if (!_canOverwriteOriginal)
-        {
-            return await ExportPdfAsync(notify, onExit);
-        }
-
-        bool success = await SaveOriginalPdfSilentAsync(onExit);
-        if (!success)
-        {
-            // 直接覆盖失败（目标被 OS 限制写入 / 只读 / 锁定等，典型如 Windows 受控文件夹访问
-            SuppressPenRing();
-            try
-            {
-                var dialog = new ContentDialog
-                {
-                    Title = GlanceRX.Services.LocalizationService.Get("OverwriteFailedTitle"),
-                    Content = GlanceRX.Services.LocalizationService.Get("OverwriteFailedContent"),
-                    PrimaryButtonText = GlanceRX.Services.LocalizationService.Get("SaveCopy"),
-                    CloseButtonText = GlanceRX.Services.LocalizationService.Get("Cancel"),
-                    XamlRoot = this.XamlRoot,
-                    RequestedTheme = DialogTheme()
-                };
-
-                var result = await dialog.ShowAsync();
-                if (result == ContentDialogResult.Primary)
-                {
-                    return await ExportPdfAsync(notify, onExit);
-                }
-                if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveToastFailed"), ToastIconKind.Error);
-                return false;
-            }
-            finally
-            {
-                ResumePenRing();
-            }
-        }
-
-        if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveToastSuccess"), ToastIconKind.Success);
-        return true;
-    }
-
-    private async Task<bool> ExportPdfAsync(bool notify = true, bool onExit = false)
-    {
-        if (string.IsNullOrEmpty(_currentPdfPath) || _pages.Count == 0) return false;
-        // 另存为流程全程（含系统 FileSavePicker 文件选择框、导出成功/失败提示）整个窗口恢复原生鼠标，
-        SuppressPenRing();
-        try
-        {
-            // 保存触发前先快照视口：FileSavePicker 会让主窗口失焦/挂起，可能使 ScrollViewer
-        GpuViewer.GetCurrentViewState(out double svZoom, out double svH, out double svV, out int svPage);
-        var savedView = new ViewStateData
-        {
-            ZoomPercent = svZoom,
-            HorizontalOffset = svH,
-            VerticalOffset = svV,
-            PageIndex = svPage,
-            RotationDegrees = 0,
-            LayoutMode = (int)GpuViewer.LayoutMode,
-            Arrangement = (int)GpuViewer.Arrangement,
-            SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-        };
-
-            var picker = new FileSavePicker();
-
-        var app = Application.Current as App;
-        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(app?.MainWindow);
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-
-        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
-        picker.FileTypeChoices.Add("PDF Document", new List<string> { ".pdf" });
-        picker.SuggestedFileName = Path.GetFileNameWithoutExtension(_currentPdfPath) + "_annotated";
-
-        StorageFile file = await picker.PickSaveFileAsync();
-        if (file == null)
-        {
-            return false;
-        }
-
-        var savedList = new List<SavedAnnotation>();
-            foreach (var page in _pages)
-            {
-                foreach (var anno in page.Annotations)
-                {
-                    var savedAnno = new SavedAnnotation
-                    {
-                        PageIndex = page.PageIndex,
-                        Type = anno.Type,
-                        X = anno.X,
-                        Y = anno.Y,
-                        Width = anno.Width,
-                        Height = anno.Height,
-                        Content = anno.Content ?? "",
-                        ColorHex = anno.ColorHex,
-                        Thickness = anno.Thickness,
-                        RotationAngle = page.RotationAngle
-                    };
-
-                    foreach (var pt in anno.PointsCollection)
-                    {
-                        savedAnno.Points.Add(new SavedPoint { X = pt.X, Y = pt.Y });
-                    }
-
-                    savedList.Add(savedAnno);
-                }
-            }
-
-            var pageRotations = new Dictionary<int, double>();
-            foreach (var page in _pages)
-            {
-                pageRotations[page.PageIndex] = page.RotationAngle;
-            }
-
-            // 2. 导出真实 /Ink 注解对象到新文件。导出前先释放 Rust 引擎对源文件(_currentPdfPath)的
-            _pdfRenderService?.Dispose();
-            _pdfRenderService = null;
-
-            var exportService = new GlanceRX.Services.PdfExportService();
-            await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, file.Path, savedList, pageRotations, _currentPdfPassword);
-
-            _annotationsDirty = false;
-            // 同 SaveOriginalPdfSilentAsync：批注清了不等于白板也清了。
-            RefreshUnsavedState();
-
-            // 退出流程：文件已导出，不再把引擎切到副本（进程随即结束）。
-            // 画布是库里的独立文件、不跟文档改名，故这里无需任何搬运。
-            if (onExit)
-            {
-                _currentPdfPath = file.Path;
-                _canOverwriteOriginal = IsFileOverwritable(_currentPdfPath);
-                _currentPdfPassword = null;
-                return true;
-            }
-
-            // 让"另存为"接管为活动文档：引擎切到导出副本（页面内容一致、旋转已写进文件，
-            try
-            {
-                foreach (var page in _pages) page.RotationAngle = 0.0;
-
-                _pdfRenderService = new PdfRenderService();
-                await _pdfRenderService.InitializeAsync(file.Path, null);
-                GpuViewer.ReattachRenderService(_pdfRenderService);
-                GpuViewer.InvalidateOverlayThrottled();
-
-                _currentPdfPath = file.Path;
-                _canOverwriteOriginal = IsFileOverwritable(_currentPdfPath);
-                _currentPdfPassword = null;
-                UpdateWindowTitle(file.Name);
-            }
-            catch
-            {
-                // 导出本身已成功；若接管新文件失败（引擎重挂/初始化异常），恢复引擎到原文件
-                try
-                {
-                    if (_pdfRenderService == null)
-                    {
-                        _pdfRenderService = new PdfRenderService();
-                        await _pdfRenderService.InitializeAsync(_currentPdfPath, _currentPdfPassword);
-                        GpuViewer.ReattachRenderService(_pdfRenderService);
-                        GpuViewer.InvalidateOverlayThrottled();
-                    }
-                }
-                catch { }
-            }
-
-            // 把视口拉回触发另存为前的位置（防御 FileSavePicker 使窗口失焦导致的首页复位）。
-            try { GpuViewer.RestoreView(savedView); } catch { }
-
-            // 3. 成功提示：改用右下角小弹窗（自动消失），不再弹模态对话框（免去点击确定）。
-            if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveAsToastSuccess"), ToastIconKind.Success);
-            // FileSavePicker 会改变焦点态导致视口漂移，故返回后仍需补保视口（已不用模态对话框），
-            try { GpuViewer.RestoreView(savedView); } catch { }
-            try { GpuViewer.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => GpuViewer.RestoreView(savedView)); } catch { }
-            return true;
-        }
-        catch (Exception ex)
-        {
-            // 失败提示：改用右下角小弹窗（自动消失）。详细错误写入日志便于排查（小弹窗不展示长文本）。
-            try
-            {
-                string logPath = CacheManager.GetCacheFilePath("save_error.txt");
-                File.WriteAllText(logPath, $"Time: {DateTime.Now}\nExportPdf error: {ex.Message}\nStack: {ex.StackTrace}\nInner: {ex.InnerException?.Message}");
-            }
-            catch { }
-            // 导出失败：本方法已释放引擎，须恢复到原文件(_currentPdfPath 尚未切换)，使查看器仍可正常使用。
-            try
-            {
-                if (_pdfRenderService == null)
-                {
-                    _pdfRenderService = new PdfRenderService();
-                    await _pdfRenderService.InitializeAsync(_currentPdfPath, _currentPdfPassword);
-                    GpuViewer.ReattachRenderService(_pdfRenderService);
-                    GpuViewer.InvalidateOverlayThrottled();
-                }
-            }
-            catch { }
-            if (notify) ShowSaveToast(GlanceRX.Services.LocalizationService.Get("SaveAsToastFailed"), ToastIconKind.Error);
-            return false;
-        }
         finally
         {
-            ResumePenRing();
+            _saveTask = null;
         }
     }
 
@@ -1973,8 +1585,6 @@ public sealed partial class MainPage : Page
             _isUnloading = false;
 
             _pages.Clear();
-            _annotationHistory.Clear();
-            _annotationRedo.Clear();
             _currentPageIndex = 0;
             PageNumberInput.Text = "1";
             TotalPagesText.Text = "/ 0";
@@ -1991,8 +1601,6 @@ public sealed partial class MainPage : Page
             }
             RetryUnsavedCanvases();   // 别的文档/画布留下的那几份也顺手再试一次
             _currentPdfPath = path;
-            _canOverwriteOriginal = true; // 默认可覆盖；引擎初始化成功后按加密/只读重写
-            _annotationsDirty = false;
             _canvasDirty = false;
             // 新文档自己还没改动，但托管表里可能压着别的画布 —— 不能让一次切文档把它们一起当"已保存"。
             RefreshUnsavedState();
@@ -2043,8 +1651,6 @@ public sealed partial class MainPage : Page
                     await _pdfRenderService.InitializeAsync(_currentPdfPath, pdfPassword);
                     engineReady = true;
                     _currentPdfPassword = pdfPassword;
-                    // 不能覆盖原文件（加密/只读）→ 走另存为生成未加密副本；副本可写 → 可覆盖自身。
-                    _canOverwriteOriginal = (_currentPdfPassword == null) && IsFileOverwritable(_currentPdfPath);
                 }
                 catch (PdfPasswordRequiredException)
                 {
@@ -2090,9 +1696,7 @@ public sealed partial class MainPage : Page
                 PageListView.ScrollIntoView(_pages[restoredIdx]);
             }
 
-            await LoadAnnotationsAsync(_currentPdfPath);
-            GpuViewer.InvalidateOverlay();
-
+            // 画布是墨的唯一载体：页上笔迹完全由当前画布重建，PDF 里一概不读、不写。
             LoadCanvasForCurrentDocument();
 
             await LoadBookmarksAsync();
@@ -5492,100 +5096,92 @@ public sealed partial class MainPage : Page
 
     // ── GPU 路径标注处理器（坐标已由 GpuPageView 换算成页局部 PDF 点；
 
-    /// <summary>批注改动置脏：PDF 需要重写（笔迹只在保存时烘焙进文件）。与白板脏标记分开记。</summary>
-    internal void MarkAnnotationsDirty()
-    {
-        _annotationsDirty = true;
-        HasUnsavedChanges = true;
-    }
-
     private void GpuAnnotation_Pressed(object? sender, GpuAnnotationPointerArgs e)
     {
         if (_currentMode == EditMode.Navigate) return;
         if (e.PageIndex < 0 || e.PageIndex >= _pages.Count) return;
-        var pageVm = _pages[e.PageIndex];
-        var point = new Point(e.X, e.Y);
 
-        MarkAnnotationsDirty();
+        // 落笔即建画布文件：这份画布从此既承载卡片，也承载墨迹，两者共用同一条保存路径
+        // （置脏 → 防抖 500ms → 写回画布文件 → 失败出口），不再有"保存时烘进 PDF"这回事。
+        MarkCanvasDirty();
 
         _isDrawingHighlight = true;
-        _activeHighlight = new AnnotationViewModel
-        {
-            Type = AnnotationType.Pen,
-            X = 0, Y = 0,
-            ColorHex = GetActiveColorHexWithOpacity(),
-            Thickness = _activeThickness
-        };
-        _activeHighlight.AppendPoint(point);
-        pageVm.Annotations.Add(_activeHighlight);
+        // 一个 ViewModel 就是整条笔：跨页不会另起对象，点继续往同一串里追加，
+        // 于是"整条一起撤"是天然的，不存在撤一半的情形。
+        var stroke = NewInkStroke(e.PageIndex, GetActiveColorHexWithOpacity(), _activeThickness);
+        stroke.AppendPoint(new Point(e.X, e.Y));
+        _pages[e.PageIndex].Annotations.Add(stroke);
+        // 这一页可能原本一道墨都没有：告诉渲染侧"有墨页"多了一页，否则它滚出视口后再回来不会重画。
+        GpuViewer.NotifyInkPageAdded(e.PageIndex);
+        _activeHighlight = stroke;
+
         _annotationRedo.Clear();
-        var created = _activeHighlight;
         _annotationHistory.Add(new EditorHistoryEntry(
-            undo: () =>
-            {
-                pageVm.Annotations.Remove(created);
-                MarkAnnotationsDirty();
-                _ = SaveAnnotationsAsync();
-            },
-            redo: () =>
-            {
-                if (!pageVm.Annotations.Contains(created)) pageVm.Annotations.Add(created);
-                MarkAnnotationsDirty();
-                _ = SaveAnnotationsAsync();
-            }));
+            undo: () => SetInkStrokeVisible(stroke, false),
+            redo: () => SetInkStrokeVisible(stroke, true)));
         GpuViewer.InvalidateOverlayThrottled();
     }
 
+    /// <summary>笔画移动。坐标恒为【发起页】的页局部坐标，越出页框（跨到下一页、穿过页间空隙、
+    /// 越过左右页边）都只当作同一条线的延伸 —— 不切段、不裁剪、不补线。</summary>
     private void GpuAnnotation_Moved(object? sender, GpuAnnotationPointerArgs e)
     {
         if (!_isDrawingHighlight || _activeHighlight == null) return;
-        // 用线程安全 AppendPoint：加锁并递增版本号 → 渲染侧缓存自动失效
+
+        // 点数正比于线条长短而不是采样次数：慢写时手在原地抖，事件照样每帧都来，
+        // 全收只会让文件白胖、且后半段全是几乎重合的点。只决定"这一点收不收"、
+        // 从不改动已收的点 —— 存下来的折线与屏幕所见逐点一致（与事后抽稀的根本区别，后者会挪点位）。
+        Point last = _activeHighlight.LastPoint;
+        if (!double.IsNaN(last.X))
+        {
+            double dx = e.X - last.X, dy = e.Y - last.Y;
+            if (dx * dx + dy * dy < InkMinPointGap * InkMinPointGap) return;
+        }
         _activeHighlight.AppendPoint(new Point(e.X, e.Y));
-        // 节流刷新：合并 1000Hz 鼠标高频事件，一帧最多重画一次（GPU 不再被打爆）
         GpuViewer.InvalidateOverlayThrottled();
     }
 
     private void GpuAnnotation_Released(object? sender, GpuAnnotationPointerArgs e)
     {
-        if (_isDrawingHighlight)
+        if (!_isDrawingHighlight) return;
+        _isDrawingHighlight = false;
+
+        if (_activeHighlight != null)
         {
-            _isDrawingHighlight = false;
-
-            // 收笔点无条件补进点集：笔画必须终止在抬笔处；且"按下即抬"的短点若无补点就只剩
-            // 1 个点，保存时会被 /Ink 的"≥2 点"判据丢掉。
-            if (_activeHighlight != null && _activeHighlight.Type == AnnotationType.Pen)
+            // 收笔点无条件补进这条笔：笔画必须终止在抬笔处，"按下即抬"的单点也靠它保留下来
+            // （只有 1 个点的笔由渲染侧画成圆点）。这一步刻意不走最小间距过滤 —— 它就是终点。
+            Point last = _activeHighlight.LastPoint;
+            double dx = e.X - last.X, dy = e.Y - last.Y;
+            if (double.IsNaN(last.X) || dx * dx + dy * dy > 1e-6)
                 _activeHighlight.AppendPoint(new Point(e.X, e.Y));
-
-            // Compute proper bounding box for pen strokes so that X/Y/Width/Height
-            if (_activeHighlight != null && _activeHighlight.Type == AnnotationType.Pen)
-            {
-                // 用快照读取，保证线程安全（此时 UI 线程已不加点，但快照机制统一路径更可靠）
-                var pts = _activeHighlight.GetPointsSnapshot();
-                if (pts.Length > 0)
-                {
-                    double minX = pts[0].X, minY = pts[0].Y;
-                    double maxX = pts[0].X, maxY = pts[0].Y;
-                    for (int i = 1; i < pts.Length; i++)
-                    {
-                        if (pts[i].X < minX) minX = pts[i].X;
-                        if (pts[i].Y < minY) minY = pts[i].Y;
-                        if (pts[i].X > maxX) maxX = pts[i].X;
-                        if (pts[i].Y > maxY) maxY = pts[i].Y;
-                    }
-                    // 包围盒只作元数据/侧栏校验用途（Rust 的 validate_annotation 硬性要求
-                    double bx = minX < 0 ? 0 : minX;
-                    double by = minY < 0 ? 0 : minY;
-                    _activeHighlight.X = bx;
-                    _activeHighlight.Y = by;
-                    _activeHighlight.Width = Math.Max(0, maxX - bx);
-                    _activeHighlight.Height = Math.Max(0, maxY - by);
-                }
-            }
-
-            _activeHighlight = null;
-            _ = SaveAnnotationsAsync();
-            GpuViewer.InvalidateOverlayThrottled();
         }
+
+        _activeHighlight = null;
+        GpuViewer.InvalidateOverlayThrottled();
+    }
+
+    /// <summary>新起一条笔：它自己记着发起页，于是"这一笔属于哪页"不需要外部再维护一份映射。</summary>
+    private AnnotationViewModel NewInkStroke(int page, string colorHex, double thickness) => new()
+    {
+        Type = AnnotationType.Pen,
+        PageIndex = page,
+        ColorHex = colorHex,
+        Thickness = thickness
+    };
+
+    /// <summary>整条笔显示 / 隐藏（撤销、重做）：一笔一个对象，所以本来就是整条一起。</summary>
+    private void SetInkStrokeVisible(AnnotationViewModel stroke, bool visible)
+    {
+        if (stroke.PageIndex >= 0 && stroke.PageIndex < _pages.Count)
+        {
+            var list = _pages[stroke.PageIndex].Annotations;
+            if (visible) { if (!list.Contains(stroke)) list.Add(stroke); }
+            else list.Remove(stroke);
+        }
+        MarkCanvasDirty();
+        // 这一笔整条从页上消失了：累积层里还有它的像素，只有整层重烘才会真的擦掉，
+        // 光"置脏 + 重画"会把它当已烘入的段落跳过（幽灵笔迹）。
+        GpuViewer.InvalidateOverlay();
     }
 
     // Ctrl+Z / Ctrl+Y：整页 KeyDown 兜底（见构造函数 AddHandler）。不再用 Page 级加速器 ——
@@ -5635,7 +5231,7 @@ public sealed partial class MainPage : Page
         // 必须【同步】置 Handled：放到 await 之后等于告诉框架这次按键没人认领，
         // 同一次 Ctrl+S 会被再处理一遍 —— 只读/加密文档因此冒出两个"另存为"框。
         args.Handled = true;
-        await SaveOriginalPdfAsync();
+        await SaveChangesAsync();
     }
 
     private void Print_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -5741,51 +5337,6 @@ public sealed partial class MainPage : Page
         }
     }
 
-    /// <summary>批注持久化走"保存时写入 PDF 真实 /Ink 注解对象"（见 SaveOriginalPdfAsync / ExportPdfAsync）， 文件即唯一真相源。</summary>
-    public Task SaveAnnotationsAsync() => Task.CompletedTask;
-
-    /// <summary>从 PDF 文件读回 Glance 写入的真实 /Ink 注解对象，重建叠加层模型。文件即唯一真相源： 无 JSON 侧栏、无副本。"不保存退出"不再需要回滚——未保存的笔迹从未落盘，文件始终是 上次保存态，重开即读到已保存批注。</summary>
-    private async Task LoadAnnotationsAsync(string pdfPath)
-    {
-        SuppressAnnotationDirty = true;
-        try
-        {
-            foreach (var p in _pages) p.Annotations.Clear();
-            if (string.IsNullOrEmpty(pdfPath) || !File.Exists(pdfPath)) return;
-
-            // 后台线程读 PDF 真实注解对象（MuPDF 按需打开文件读取、
-            var savedList = await Task.Run(() => PdfExportService.ReadGlanceInkAnnotations(pdfPath, _currentPdfPassword));
-            if (savedList == null) return;
-
-            foreach (var saved in savedList)
-            {
-                if (saved.PageIndex < 0 || saved.PageIndex >= _pages.Count) continue;
-                var annoVm = new AnnotationViewModel
-                {
-                    Type = saved.Type,
-                    X = saved.X,
-                    Y = saved.Y,
-                    Width = saved.Width,
-                    Height = saved.Height,
-                    Content = saved.Content,
-                    ColorHex = saved.ColorHex ?? "#F2C200",
-                    Thickness = saved.Thickness > 0 ? saved.Thickness : 3.5
-                };
-                if (saved.Points != null && saved.Points.Count > 0)
-                {
-                    var pc = new Microsoft.UI.Xaml.Media.PointCollection();
-                    foreach (var pt in saved.Points) pc.Add(new Point(pt.X, pt.Y));
-                    annoVm.PointsCollection = pc;
-                }
-                _pages[saved.PageIndex].Annotations.Add(annoVm);
-                // 已保存的批注不进入撤销历史：加载已完成、用户不应通过 Ctrl+Z
-                // 撤销已落盘的内容（否则会误删用户上次保存的工作）。
-            }
-        }
-        catch { }
-        finally { SuppressAnnotationDirty = false; }
-    }
-
     /// <summary>当前盖在这个文档上的画布文件路径（空 = 没盖画布）。画布与 PDF 之间没有任何绑定关系，
     /// 这只是"上次用了哪份"的记忆项：随时可在右侧面板换一份，画布被删/改名后指向失效就退回空。</summary>
     private string? _currentCanvasPath;
@@ -5824,7 +5375,7 @@ public sealed partial class MainPage : Page
     /// 另存为）都把对应项移出本表。键 = 画布文件路径，与 <see cref="_currentCanvasPath"/> 同一套比较规则。</summary>
     private readonly Dictionary<string, CanvasDoc> _unsavedCanvasDocs = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>白板（Canvas 模式）：从当前画布文件读取卡片与连线，保留模型供交互改写，并把当前数组交给 GpuViewer 渲染。
+    /// <summary>白板（Canvas 模式）：从当前画布文件读取卡片、连线与笔迹，保留模型供交互改写，并把当前数组交给 GpuViewer 渲染。
     /// 内存模型是唯一真相源，交互只置脏、不落盘；写入时机在 FlushCanvas（停手自动保存 / 显式保存 / 切换文档 / 切换画布 / 退出保存）。</summary>
     private void LoadCanvasForCurrentDocument()
     {
@@ -5851,12 +5402,106 @@ public sealed partial class MainPage : Page
         // 别再一回来就弹一次另存为 —— 用户可能只是想看看、想改两笔。
         _canvasSavePaused = pending;
         GpuViewer.SetCanvasData(_canvasDoc.Nodes, _canvasDoc.Edges);
+        LoadInkFromCanvasDoc();
+        // 换画布 = 换内容：撤销栈里捏着的是上一份画布的 ViewModel，留着它一按 Ctrl+Z
+        // 就会把上一份的笔迹塞进当前这份（并且随即被一起存进当前画布文件）。
+        _annotationHistory.Clear();
+        _annotationRedo.Clear();
         SyncCanvasMissingToast();
         SyncCanvasOutsideRootToast();
         UpdateCanvasDetachButton();
         UpdateCanvasRowBackgrounds();
         // 托管表里可能还压着别的画布：那就照旧立着"未保存"，别让切一下画布就把提示和关窗询问一起抹掉。
         RefreshUnsavedState();
+    }
+
+    /// <summary>按当前画布重建页上墨迹。画布是笔迹的唯一载体：里面有墨就画，没有就把页清空
+    /// （换画布就是换墨，上一份的墨不会跟过来）。每条笔带着自己的发起页，跨页的那一截也在同一条点串里。</summary>
+    private void LoadInkFromCanvasDoc()
+    {
+        var ink = _canvasDoc?.Ink;
+
+        // 建 ViewModel 会给 ColorHex / Thickness 赋值，它们的 setter 会反过来置脏 ——
+        // 于是"刚打开、什么都没改"也会立刻变成有未保存改动（进而提示保存、白写一次盘）。
+        SuppressDirtyMarking = true;
+        try
+        {
+            LoadInkCore(ink);
+        }
+        finally { SuppressDirtyMarking = false; }
+
+        // 墨被整批换掉了：累积层里还留着上一份画布的像素，必须整层重烘，
+        // 否则旧笔迹会以"幽灵"形式留在屏幕上（只置脏不会自己触发重画）。
+        GpuViewer.InvalidateOverlay();
+    }
+
+    private void LoadInkCore(List<CanvasInk>? ink)
+    {
+        foreach (var p in _pages) p.Annotations.Clear();
+        if (ink == null) return;
+
+        foreach (var stroke in ink)
+        {
+            // 旧格式（按页切段）残留：每段各还原成一笔，内容不丢，只是不再跨页连成一条。
+            if (stroke.LegacySegments is { Count: > 0 })
+            {
+                foreach (var seg in stroke.LegacySegments)
+                    AddInkStroke(stroke, seg.Page, seg.Pts);
+                continue;
+            }
+            AddInkStroke(stroke, stroke.Page, stroke.Pts);
+        }
+    }
+
+    /// <summary>按一条笔的点串还原成页上的一个墨迹对象。点允许越出页框（跨页、越过左右页边都是正常轨迹），
+    /// 这里不做任何范围过滤 —— 过滤掉的就是用户眼里"画了但没留下"的那一截。</summary>
+    private void AddInkStroke(CanvasInk stroke, int page, List<double> pts)
+    {
+        if (page < 0 || page >= _pages.Count || pts.Count < 2) return;
+        var vm = new AnnotationViewModel
+        {
+            Type = AnnotationType.Pen,
+            PageIndex = page,
+            ColorHex = string.IsNullOrEmpty(stroke.Color) ? "#F2C200" : stroke.Color,
+            Thickness = stroke.Width > 0 ? stroke.Width : 3.5
+        };
+        var pc = new Microsoft.UI.Xaml.Media.PointCollection();
+        for (int i = 0; i + 1 < pts.Count; i += 2)
+            pc.Add(new Point(pts[i], pts[i + 1]));
+        vm.PointsCollection = pc;
+        _pages[page].Annotations.Add(vm);
+    }
+
+    /// <summary>把内存里的墨整体写进画布模型（写文件之前调用）。一条笔一条记录、挂在它的发起页上：
+    /// 点串里就是整条线，跨页的那一截也在同一串里，不需要任何分段或布局信息。
+    /// 坐标只留两位小数：0.01pt 远低于可见精度，而每个数字省下的字符在几千点的规模上是实打实的。</summary>
+    private void SyncInkToCanvasDoc()
+    {
+        if (_canvasDoc == null) return;
+        _canvasDoc.Ink.Clear();
+
+        foreach (var page in _pages)
+        {
+            foreach (var a in page.Annotations)
+            {
+                if (a.Type != AnnotationType.Pen) continue;
+
+                var ink = new CanvasInk
+                {
+                    Color = a.ColorHex,
+                    Width = a.Thickness,
+                    Page = a.PageIndex >= 0 ? a.PageIndex : page.PageIndex
+                };
+                var pts = a.GetPointsSnapshot();
+                ink.Pts.Capacity = pts.Length * 2;
+                for (int i = 0; i < pts.Length; i++)
+                {
+                    ink.Pts.Add(Math.Round(pts[i].X, 2));
+                    ink.Pts.Add(Math.Round(pts[i].Y, 2));
+                }
+                if (ink.Pts.Count >= 2) _canvasDoc.Ink.Add(ink);
+            }
+        }
     }
 
     /// <summary>把某份画布盖到当前文档上（null = 撤掉画布）。同一份画布可以盖到任意文档，卡片的页归属
@@ -5901,7 +5546,7 @@ public sealed partial class MainPage : Page
     /// 与显式保存 / 切换文档 / 切换画布 / 退出保存（FlushCanvas）—— 那几处一次写入实测 800 卡 ≈ 9ms。
     /// 暂停期（_canvasSavePaused）只掐掉"自动保存这条链路"（建文件 + 排定时），脏标记照置：
     /// 内容确实还没落盘，于是 Ctrl+S 与关闭时的询问都还有东西可存，不会被上一次的"取消"锁死。</summary>
-    private void MarkCanvasDirty()
+    internal void MarkCanvasDirty()
     {
         _canvasDirty = true;
         HasUnsavedChanges = true;
@@ -5967,6 +5612,10 @@ public sealed partial class MainPage : Page
         if (!_canvasDirty) return true;
         if (_canvasDoc == null) { _canvasSaveError = CanvasSaveError.Invalid; return false; }
         if (!EnsureCanvasFile()) { _canvasSaveError = CanvasSaveError.WriteFailed; return false; }
+
+        // 墨是画布的一部分：每次落盘前把页上的笔迹收进模型。放这里而不是"画完就写"，
+        // 是因为卡片与墨共用同一次写入 —— 一次写盘就该得到一份完整自洽的文件。
+        SyncInkToCanvasDoc();
 
         _canvasAutoSaveTimer?.Stop();   // 这次写入先到，就把可能还在排队的那笔自动保存作废，别再多写一遍
         if (CanvasStore.SaveFile(_currentCanvasPath, _canvasDoc, out CanvasSaveError error))
@@ -6216,12 +5865,12 @@ public sealed partial class MainPage : Page
         DismissToast(gone, animate: true);
     }
 
-    /// <summary>"有未保存内容"的唯一判定点：当前画布脏 / 批注脏 / 托管表里还压着别的画布。
-    /// 分散在各处手写赋值必然会漏掉第三项，而那几份恰恰最容易"已经切走、内容只在内存里"。
+    /// <summary>"有未保存内容"的唯一判定点：当前画布脏 / 托管表里还压着别的画布。
+    /// 分散在各处手写赋值必然会漏掉后一项，而那几份恰恰最容易"已经切走、内容只在内存里"。
     /// 顺带把那枚常驻提示对齐到同一份状态，省得两处各判一次、判出两种结论。</summary>
     private void RefreshUnsavedState()
     {
-        HasUnsavedChanges = _canvasDirty || _annotationsDirty || _unsavedCanvasDocs.Count > 0;
+        HasUnsavedChanges = _canvasDirty || _unsavedCanvasDocs.Count > 0;
         // 提示只在"确实写不进去"时立：普通的"刚改完、还没到 500ms 自动保存"每拖一下就闪一次，
         // 用户很快就不看它了。
         if (_canvasSavePaused || _unsavedCanvasDocs.Count > 0) ShowCanvasUnsavedToast();
@@ -8506,24 +8155,6 @@ public sealed partial class MainPage : Page
         GpuViewer.BeginCanvasEdit(node.Id);
     }
 
-    /// <summary>判定指定文件是否可被覆盖写入。加密文档由调用方另行处理；此处覆盖两类"不能覆盖保存"的普通情形： ① NTFS 只读属性；② 无写权限（属性未标只读但写探测失败，如受限目录）。两者任一成立即不可覆盖。</summary>
-    private static bool IsFileOverwritable(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return true; // 不存在 → 保存时由所在目录决定，此处无法判定，乐观视为可覆盖
-            if ((File.GetAttributes(path) & System.IO.FileAttributes.ReadOnly) != 0) return false;
-            using (File.Open(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
-            {
-                return true;
-            }
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
 }
 
 public sealed class OutlineItemViewModel
@@ -8666,34 +8297,10 @@ public class PdfPageViewModel : INotifyPropertyChanged
     }
 }
 
-public class SavedPoint
+/// <summary>页面上的一条墨迹。只由 Win2D 直接绘制、不被 XAML 绑定，
+/// 所以不实现 INotifyPropertyChanged —— 没有订阅者，广播只是白跑一遍。</summary>
+public class AnnotationViewModel
 {
-    public double X { get; set; }
-    public double Y { get; set; }
-}
-
-public class SavedAnnotation
-{
-    public int PageIndex { get; set; }
-    public AnnotationType Type { get; set; }
-    public double X { get; set; }
-    public double Y { get; set; }
-    public double Width { get; set; }
-    public double Height { get; set; }
-    public string Content { get; set; } = "";
-    public string ColorHex { get; set; } = "#F2C200";
-    public List<SavedPoint> Points { get; set; } = new();
-    public double Thickness { get; set; } = 3.5;
-    public double RotationAngle { get; set; } = 0.0;
-}
-
-public class AnnotationViewModel : INotifyPropertyChanged
-{
-    private double _x;
-    private double _y;
-    private double _width;
-    private double _height;
-    private string _content = "";
     private string _colorHex = "#F2C200";
     private double _thickness = 3.5;
     private PointCollection _pointsCollection = new();
@@ -8737,63 +8344,40 @@ public class AnnotationViewModel : INotifyPropertyChanged
         }
     }
 
-    public AnnotationType Type { get; set; }
-
-    public double X
+    /// <summary>最后一个已收点的坐标（没有点时为 NaN）。落笔时据此判断"这一点够不够远"，不必每帧取快照。</summary>
+    internal Point LastPoint
     {
-        get => _x;
-        set => SetProperty(ref _x, value);
-    }
-
-    public double Y
-    {
-        get => _y;
-        set => SetProperty(ref _y, value);
-    }
-
-    public double Width
-    {
-        get => _width;
-        set => SetProperty(ref _width, value);
-    }
-
-    public double Height
-    {
-        get => _height;
-        set => SetProperty(ref _height, value);
-    }
-
-    public string Content
-    {
-        get => _content;
-        set
+        get
         {
-                if (SetProperty(ref _content, value))
-                {
-                    if (!MainPage.SuppressAnnotationDirty && MainPage.Current != null)
-                    {
-                        MainPage.Current.MarkAnnotationsDirty();
-                    }
-                    if (!MainPage.SuppressAnnotationDirty)
-                        _ = MainPage.Current?.SaveAnnotationsAsync();
-                }
+            lock (PointsLock)
+                return _pointsCollection.Count > 0 ? _pointsCollection[^1] : new Point(double.NaN, double.NaN);
         }
     }
+
+    /// <summary>发起页（0-based）：这条笔的点全部是这一页的局部坐标，画在这一页的变换之下。</summary>
+    public int PageIndex { get; set; } = -1;
+
+    public AnnotationType Type { get; set; }
 
     public string ColorHex
     {
         get => _colorHex;
         set
         {
-                if (SetProperty(ref _colorHex, value))
-                {
-                    if (!MainPage.SuppressAnnotationDirty && MainPage.Current != null)
-                    {
-                        MainPage.Current.MarkAnnotationsDirty();
-                    }
-                    if (!MainPage.SuppressAnnotationDirty)
-                        _ = MainPage.Current?.SaveAnnotationsAsync();
-                }
+            if (_colorHex == value) return;
+            _colorHex = value;
+            MarkInkChanged();
+        }
+    }
+
+    public double Thickness
+    {
+        get => _thickness;
+        set
+        {
+            if (_thickness == value) return;
+            _thickness = value;
+            MarkInkChanged();
         }
     }
 
@@ -8804,41 +8388,18 @@ public class AnnotationViewModel : INotifyPropertyChanged
         {
             lock (PointsLock)
             {
-                if (SetProperty(ref _pointsCollection, value))
-                {
-                    _pointsVersion++;
-                    _pointsSnapshot = null;
-                    _snapshotVersion = -1;
-                }
+                if (ReferenceEquals(_pointsCollection, value)) return;
+                _pointsCollection = value;
+                _pointsVersion++;
+                _pointsSnapshot = null;
+                _snapshotVersion = -1;
             }
         }
     }
 
-    public double Thickness
+    /// <summary>笔的属性被改（颜色 / 粗细）⇒ 画布置脏；加载期间由 SuppressDirtyMarking 抑制。</summary>
+    private static void MarkInkChanged()
     {
-        get => _thickness;
-        set
-        {
-                if (SetProperty(ref _thickness, value))
-                {
-                    if (!MainPage.SuppressAnnotationDirty && MainPage.Current != null)
-                    {
-                        MainPage.Current.MarkAnnotationsDirty();
-                    }
-                    if (!MainPage.SuppressAnnotationDirty)
-                        _ = MainPage.Current?.SaveAnnotationsAsync();
-                }
-        }
-    }
-
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    protected bool SetProperty<T>(ref T storage, T value, [CallerMemberName] string? propertyName = null)
-    {
-        if (Equals(storage, value)) return false;
-        
-        storage = value;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        return true;
+        if (!MainPage.SuppressDirtyMarking) MainPage.Current?.MarkCanvasDirty();
     }
 }
