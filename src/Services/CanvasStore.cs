@@ -79,6 +79,23 @@ public sealed class CanvasFormatMark
     [JsonPropertyName("format")] public int Format { get; set; } = CurrentFormat;
 }
 
+/// <summary>画布写入失败的原因。提示里只分两句：<see cref="TargetReadOnly"/> 是用户自己能立刻解决的
+/// （去掉只读属性就能继续写原件），其余一律说成"无法写入"—— 被占用 / 权限不足 / 磁盘满 / 不是我们的文件，
+/// 对用户是同一件事：这次写不进去，改用副本。
+/// 值分得比提示细，是为了让每个判定点各自归因清楚，不必在调用处反推"为什么失败"。</summary>
+public enum CanvasSaveError
+{
+    None,
+    /// <summary>路径或文档为空（调用方没准备好，属于程序内部错误）。</summary>
+    Invalid,
+    /// <summary>目标文件存在但不带本程序的格式标记：拒绝覆盖。</summary>
+    ForeignFile,
+    /// <summary>目标文件带只读属性：去掉属性即可继续写，是用户自己能立刻解决的一种。</summary>
+    TargetReadOnly,
+    /// <summary>写入抛异常：被占用、权限不足、磁盘已满等。</summary>
+    WriteFailed,
+}
+
 /// <summary>画布文件的磁盘存取。每份画布都是库里的独立文件（<see cref="AppPaths.CanvasDirectory"/> 之下，
 /// 允许任意层子目录），与任何 PDF 都不绑定：同一份画布可以盖到任意文档上，
 /// 所以读写都要显式给出【画布自己的路径】——这里没有任何"由 PDF 路径推出画布路径"的推导。
@@ -138,28 +155,55 @@ public static class CanvasStore
     /// <summary>写回一份画布。先写临时文件再原子替换；目标文件已存在但不是本程序写的
     /// （没有格式标记）就拒绝覆盖，返回 false —— 调用方据此保留脏标记，绝不毁掉别人的文件。</summary>
     public static bool SaveFile(string? canvasPath, CanvasDoc doc)
+        => SaveFile(canvasPath, doc, out _);
+
+    /// <summary>同上，额外给出失败原因：调用方要拿它决定是"换个文件名再写一次"（只读 / 不是我们的文件）
+    /// 还是"这个位置根本写不进去"（占用 / 权限 / 磁盘满）。</summary>
+    public static bool SaveFile(string? canvasPath, CanvasDoc doc, out CanvasSaveError error)
     {
-        if (string.IsNullOrEmpty(canvasPath) || doc == null) return false;
+        error = CanvasSaveError.None;
+        if (string.IsNullOrEmpty(canvasPath) || doc == null) { error = CanvasSaveError.Invalid; return false; }
         doc.Glance ??= new CanvasFormatMark();   // 本程序写的文件必须带标记
-        return TrySaveFile(canvasPath!, doc);
+        return TrySaveFile(canvasPath!, doc, out error);
     }
 
-    private static bool TrySaveFile(string path, CanvasDoc doc)
+    private static bool TrySaveFile(string path, CanvasDoc doc, out CanvasSaveError error)
     {
+        error = CanvasSaveError.None;
+        // 临时文件先声明在外面：写成功、替换失败时它必须被删掉，否则库里会攒下一堆 .tmp。
+        string tmp = path + ".tmp";
         try
         {
             string? dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            // 目标已存在却没有我们的格式标记 ⇒ 不是本程序的文件，绝不覆盖（返回 false，调用方保留脏标记）。
-            if (File.Exists(path) && !HasFormatMarkOnDisk(path)) return false;
+            if (File.Exists(path))
+            {
+                // 0 字节一律放行：FileSavePicker 在用户点"保存"时就先把占位文件建出来了，
+                // 里面没有任何内容，"覆盖"也就谈不上。不放过这一种，另存为会因为自己刚建的空壳
+                // 被判成"不是本程序的文件"而永远写不进去 —— 文件出现了，界面却说无法写入。
+                // 目标已存在且确实有内容、却没有我们的格式标记 ⇒ 不是本程序的文件，绝不覆盖。
+                if (new FileInfo(path).Length > 0 && !HasFormatMarkOnDisk(path))
+                {
+                    error = CanvasSaveError.ForeignFile;
+                    return false;
+                }
+                // 只读单独归因、且在建临时文件【之前】判掉：这是用户自己能立刻解决的一种
+                // （右键→属性→取消只读），混进"被占用/磁盘满"里他就不知道该干什么了。
+                if ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0)
+                {
+                    error = CanvasSaveError.TargetReadOnly;
+                    return false;
+                }
+            }
             // 先写临时文件再原子替换，避免写入中途崩溃留下半截 JSON。
-            string tmp = path + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(doc, JsonOptions));
             File.Move(tmp, path, overwrite: true);
             return true;
         }
         catch (Exception)
         {
+            error = CanvasSaveError.WriteFailed;
+            try { File.Delete(tmp); } catch { }
             return false;
         }
     }

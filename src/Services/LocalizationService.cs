@@ -197,6 +197,7 @@ namespace GlanceRX.Services
                 ["CanvasPanelTitle"] = "Lienzos",
                 ["ToggleCanvasPanel"] = "Panel de lienzos",
                 ["CanvasMissing"] = "Faltan elementos del lienzo",
+                ["CanvasOutsideLibrary"] = "El lienzo actual está fuera de la biblioteca",
                 ["CanvasNewCanvas"] = "Nuevo lienzo",
                 ["CanvasNewFolder"] = "Nueva carpeta",
                 ["CanvasUntitledFolder"] = "Nueva carpeta",
@@ -208,7 +209,14 @@ namespace GlanceRX.Services
                 ["CanvasReveal"] = "Mostrar en el Explorador",
                 ["CanvasCopyPath"] = "Copiar ruta",
                 ["CanvasNameTaken"] = "El nombre no es válido o ya existe un elemento con ese nombre.",
-                ["CanvasOpFailed"] = "No se pudo completar la operación."
+                ["CanvasOpFailed"] = "No se pudo completar la operación.",
+                ["CanvasDetach"] = "Quitar",
+                ["CanvasDetached"] = "Lienzo quitado",
+                ["CanvasSaveReadOnly"] = "El archivo del lienzo es de solo lectura",
+                ["CanvasSaveWrite"] = "No se pudo escribir el archivo del lienzo",
+                ["CanvasSaveAdopted"] = "{0}; se sigue con una copia",
+                ["CanvasSaveNoLibrary"] = "No se pudo escribir en la biblioteca de lienzos. Elige otra ubicación.",
+                ["CanvasUnsaved"] = "Cambios del lienzo sin guardar. Pulsa Ctrl+S para reintentar"
             },
             ["zh"] = new()
             {
@@ -341,6 +349,7 @@ namespace GlanceRX.Services
                 ["CanvasPanelTitle"] = "画布",
                 ["ToggleCanvasPanel"] = "画布面板",
                 ["CanvasMissing"] = "画布有缺失",
+                ["CanvasOutsideLibrary"] = "当前画布在库外",
                 ["CanvasNewCanvas"] = "新建画布",
                 ["CanvasNewFolder"] = "新建文件夹",
                 ["CanvasUntitledFolder"] = "新建文件夹",
@@ -352,7 +361,14 @@ namespace GlanceRX.Services
                 ["CanvasReveal"] = "在文件资源管理器中显示",
                 ["CanvasCopyPath"] = "复制路径",
                 ["CanvasNameTaken"] = "名称无效，或同层已有同名项。",
-                ["CanvasOpFailed"] = "操作失败。"
+                ["CanvasOpFailed"] = "操作失败。",
+                ["CanvasDetach"] = "卸下",
+                ["CanvasDetached"] = "已卸下画布",
+                ["CanvasSaveReadOnly"] = "画布文件是只读的",
+                ["CanvasSaveWrite"] = "画布文件无法写入",
+                ["CanvasSaveAdopted"] = "{0}，已改用副本",
+                ["CanvasSaveNoLibrary"] = "画布库无法写入，请另选保存位置",
+                ["CanvasUnsaved"] = "画布改动未保存，Ctrl+S 重试"
             },
             ["en"] = new()
             {
@@ -485,6 +501,7 @@ namespace GlanceRX.Services
                 ["CanvasPanelTitle"] = "Canvases",
                 ["ToggleCanvasPanel"] = "Canvas panel",
                 ["CanvasMissing"] = "Canvas has missing items",
+                ["CanvasOutsideLibrary"] = "Current canvas is outside the library",
                 ["CanvasNewCanvas"] = "New canvas",
                 ["CanvasNewFolder"] = "New folder",
                 ["CanvasUntitledFolder"] = "New folder",
@@ -496,7 +513,14 @@ namespace GlanceRX.Services
                 ["CanvasReveal"] = "Reveal in File Explorer",
                 ["CanvasCopyPath"] = "Copy path",
                 ["CanvasNameTaken"] = "That name is invalid, or an item with that name already exists.",
-                ["CanvasOpFailed"] = "The operation could not be completed."
+                ["CanvasOpFailed"] = "The operation could not be completed.",
+                ["CanvasDetach"] = "Detach",
+                ["CanvasDetached"] = "Canvas detached",
+                ["CanvasSaveReadOnly"] = "The canvas file is read-only",
+                ["CanvasSaveWrite"] = "The canvas file could not be written",
+                ["CanvasSaveAdopted"] = "{0}; continuing with a copy",
+                ["CanvasSaveNoLibrary"] = "The canvas library is not writable. Choose another location.",
+                ["CanvasUnsaved"] = "Canvas changes not saved. Press Ctrl+S to retry"
             }
         };
 

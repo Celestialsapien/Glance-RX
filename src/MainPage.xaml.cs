@@ -220,6 +220,14 @@ public sealed partial class MainPage : Page
 
     /// <summary>构造常驻胶囊时的主题（深/浅）。图标色是按主题算死的，换主题就得重建。</summary>
     private bool _canvasMissingToastDark;
+
+    /// <summary>左下角那枚常驻的"画布在库外"胶囊（null = 没有）。当前挂着的画布落在画布库树之外时立起来：
+    /// 它只可能来自"库写不进去 → 另存为到别处"。画布照常挂载、可编辑、下次打开还是它，
+    /// 但右侧面板只列库树里的文件 ⇒ 面板里没有它那一行，不给提示用户会以为画布丢了。</summary>
+    private SaveToastItem? _canvasOutsideToast;
+
+    /// <summary>同上：图标色按主题算死，换主题要重建。</summary>
+    private bool _canvasOutsideToastDark;
     private const int SaveToastMax = 5;          // 栈深上限：超出即强制淡出最旧一枚
     private const double SaveToastSlot = 50;
     private const double SaveToastSlideMs = 160;
@@ -380,6 +388,7 @@ public sealed partial class MainPage : Page
         UpdateSidebarBackground();
         // 画布面板的静态文案在这里落一次；树内容随"打开文档"刷新（见 RefreshCanvasTree）。
         if (CanvasPanelHeaderText != null) CanvasPanelHeaderText.Text = LocalizationService.Get("CanvasPanelTitle");
+        if (DetachCanvasButton != null) DetachCanvasButton.Content = LocalizationService.Get("CanvasDetach");
         // 列表的数据源恒为 _canvasRows（拍平后的可见行）：增删都靠差分就地改这个集合，容器与滚动位置才保得住。
         if (CanvasRowList != null) CanvasRowList.ItemsSource = _canvasRows;
         // 拖拽的移动/抬起一律挂在【列表】上，不挂在行上：整个拖拽期间行容器可能被刷新重建，
@@ -478,6 +487,16 @@ public sealed partial class MainPage : Page
         UpdateCanvasRowBackgrounds();
         // 画布缺失胶囊的图标色是按主题算出来的（见 BuildToastCapsule），主题变了要按新主题重建一枚。
         SyncCanvasMissingToast();
+        // "画布在库外"同理（它在内部自己处理主题重建，条件不满足时什么也不做）。
+        SyncCanvasOutsideRootToast();
+        // "画布改动未保存"同理：图标色在构造时算死，换主题要重建（条件满足才会真的建）。
+        if (_canvasUnsavedToast != null)
+        {
+            SaveToastItem stale = _canvasUnsavedToast;
+            _canvasUnsavedToast = null;
+            DismissToast(stale, animate: false);
+            ShowCanvasUnsavedToast();
+        }
     }
 
     /// <summary>改资源里那支画刷的颜色并把它交回调用方缓存 —— 行底色每次都去 Resources 查一遍太浪费，
@@ -672,6 +691,9 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(PrintButton);
         ButtonVisualOverride.Attach(SettingsButton);
         ButtonVisualOverride.Attach(AddBookmarkButton);
+        // 面板标题行那颗"卸下"：静止不要底色（它贴在标题行里，有底色会像一块常驻的脏印），
+        // 只在 hover / 按下时上色 —— 与浮层预设项同一档待遇。
+        ButtonVisualOverride.Attach(DetachCanvasButton, transparentAtRest: true);
 
         // 欢迎页「打开 PDF」按钮：几何驱动 + accent 紫配色，避开原生 VSM flicker。
         ButtonVisualOverride.Attach(OpenPdfButton, accent: true);
@@ -1192,16 +1214,21 @@ public sealed partial class MainPage : Page
             foreach (var p in _pages) p.Annotations.Clear();
         }
         catch { }
-        // 白板同样丢弃：清掉脏标记后 CleanupForExit 的 FlushCanvas 不会再写盘。
+        // 白板同样丢弃：清掉脏标记后 CleanupForExit 的 FlushCanvas 不会再写盘；
+        // 托管表里那几份"切走时没写进去"的也一并作废 —— 用户选的就是"不保存"。
         _annotationsDirty = false;
         _canvasDirty = false;
-        HasUnsavedChanges = false;
+        _canvasSavePaused = false;   // 这一路是"全部放弃"，暂停态与那枚常驻提示也该跟着散场
+        _unsavedCanvasDocs.Clear();
+        RefreshUnsavedState();
     }
 
     public void CleanupForExit()
     {
         // 退出前落白板；"不保存退出"已清掉脏标记，此处不会写。
-        FlushCanvas();
+        // 写不进去时至少留一份库内副本：窗口马上要隐藏、进程马上要终止，这时已经没法再问用户了，
+        // 但"把内容留在盘上"仍然做得到（指针改不改都无所谓，进程随后就结束了）。
+        if (!FlushCanvas() && _canvasDoc != null) TryAdoptRecoveryCopy(_canvasDoc, _currentCanvasPath);
 
         // 目录监听必须在进程退出前释放：句柄不关会让可执行目录被占用。
         DisposeCanvasWatcher();
@@ -1238,8 +1265,10 @@ public sealed partial class MainPage : Page
     {
         if (string.IsNullOrEmpty(_currentPdfPath) || _pages.Count == 0) return false;
 
-        // 白板与 PDF 相互独立：先落白板（失败也继续，PDF 该写还是要写）。
-        FlushCanvas();
+        // 白板与 PDF 相互独立：先落所有画布（含切走时托管的那几份），失败也要让 PDF 继续写，
+        // 但不许静默 —— 这里若吞掉失败，用户会以为"保存"把两样都存好了，实际只有 PDF 落了盘。
+        // 走 await 版：这条路可能弹"另选保存位置"，得等用户答复再继续。
+        await SaveAllCanvasesAsync();
 
         // Cancel page rendering FIRST to release the semaphore and prevent deadlocks!
         if (_pdfRenderCts != null)
@@ -1323,7 +1352,8 @@ public sealed partial class MainPage : Page
                     page.RotationAngle = 0.0;
                 }
                 _annotationsDirty = false;
-                HasUnsavedChanges = false;
+                // 批注落盘了，但白板可能还有没写进去的份（托管表）：标记是同一条，交给同一处统一算。
+                RefreshUnsavedState();
 
                 // 退出流程到此为止：文件已落盘，进程随即终止，下面"重建引擎 + 重排缩略图"
                 // 纯属白烧（MuPDF 初始化与本进程的 TerminateProcess 还容易撞出死锁）。
@@ -1437,12 +1467,13 @@ public sealed partial class MainPage : Page
         // 只有白板改动：PDF 不需要重写，也不该因为文件只读/加密就把用户推进"另存为"。
         if (!_annotationsDirty)
         {
-            bool canvasSaved = FlushCanvas();
-            HasUnsavedChanges = !canvasSaved;
-            if (notify)
-                ShowSaveToast(GlanceRX.Services.LocalizationService.Get(canvasSaved ? "SaveToastSuccess" : "SaveToastFailed"),
-                              canvasSaved ? ToastIconKind.Success : ToastIconKind.Error);
-            return canvasSaved;
+            // 一次把所有画布都收尾：当前这份 + 之前切走时没能写进去、托管在内存里的那几份。
+            // 关窗询问里的"保存并退出"走的就是这条 —— 切到别的画布再关软件，那几份同样会被问到。
+            bool saved = await SaveAllCanvasesAsync();
+            if (saved && notify) ShowSaveToast(LocalizationService.Get("SaveToastSuccess"), ToastIconKind.Success);
+            // 失败时**不退出**：窗口和内存里的画布都留着，他还能按 Ctrl+S 或再点一次关闭重来 ——
+            // 一次误点取消不该等于把这次编辑判死刑。
+            return saved;
         }
 
         // 路由依据"当前文档的原始文件是否可被覆盖"（_canOverwriteOriginal），而非是否带密码。
@@ -1565,7 +1596,8 @@ public sealed partial class MainPage : Page
             await exportService.ExportPdfWithAnnotationsAsync(_currentPdfPath, file.Path, savedList, pageRotations, _currentPdfPassword);
 
             _annotationsDirty = false;
-            HasUnsavedChanges = false;
+            // 同 SaveOriginalPdfSilentAsync：批注清了不等于白板也清了。
+            RefreshUnsavedState();
 
             // 退出流程：文件已导出，不再把引擎切到副本（进程随即结束）。
             // 画布是库里的独立文件、不跟文档改名，故这里无需任何搬运。
@@ -1950,12 +1982,20 @@ public sealed partial class MainPage : Page
 
             // 切换文档前，先保存旧 PDF 的阅读位置/缩放（此时 GpuViewer 仍显示旧文档）。
             SaveCurrentViewState();
-            FlushCanvas();
+            // 旧画布先落盘再换指针；写失败只提示（并落恢复副本），不拦住"打开这份文档"这个动作本身。
+            // 换指针【之前】托管：失败出口可能是异步的，等它回来 _canvasDoc 已经是新文档的了。
+            if (!FlushCanvas())
+            {
+                StashUnsavedCanvas(_currentCanvasPath, _canvasDoc);
+                ReportCanvasSaveFailure();
+            }
+            RetryUnsavedCanvases();   // 别的文档/画布留下的那几份也顺手再试一次
             _currentPdfPath = path;
             _canOverwriteOriginal = true; // 默认可覆盖；引擎初始化成功后按加密/只读重写
             _annotationsDirty = false;
             _canvasDirty = false;
-            HasUnsavedChanges = false;
+            // 新文档自己还没改动，但托管表里可能压着别的画布 —— 不能让一次切文档把它们一起当"已保存"。
+            RefreshUnsavedState();
             _realizedSidebar.Clear();
             _thumbnailQueued.Clear(); // 换文档：丢弃旧文档的缩略图排队（旧任务经 _pdfRenderCts 取消后 Remove/Refill 幂等）
             _sidebarItemHeight = 0;   // 项高实测缓存随新文档重新取（模板不变其实可留，清零更稳）
@@ -5755,27 +5795,85 @@ public sealed partial class MainPage : Page
     private FileSystemWatcher? _canvasWatcher;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _canvasRefreshTimer;
 
+    /// <summary>停手多久之后自动落盘。取值只跟"一次连续操作的间隔"有关：拖动、连续打字都会不断刷新这笔定时，
+    /// 手停下来半秒才真正写一次盘 —— 用户感知是"随手画完就存好了"，而写盘次数仍然是整个操作一次。
+    /// 刻意不设"最长等待上限"：单次写入是整份重写（实测 800 卡 ≈ 9ms），不需要靠强制刷新来摊平长事务。</summary>
+    private const int CanvasAutoSaveDelayMs = 500;
+
+    /// <summary>自动保存定时器。懒建（画布面板没开过的会话不必造），一次性触发：每次置脏都重开。</summary>
+    private DispatcherTimer? _canvasAutoSaveTimer;
+
+    /// <summary>最近一次写入失败的原因：只用来把提示里的那半句话（根因）说准。</summary>
+    private CanvasSaveError _canvasSaveError;
+
+    /// <summary>"另选保存位置"的选择器是否已经开着：自动保存失败可能连着来，叠第二个选择器没有意义。</summary>
+    private bool _canvasSavePromptOpen;
+
+    /// <summary>自动保存已暂停（失败出口里用户取消了"另存为"）。**只停自动重试，不放弃内容**：
+    /// 脏标记照旧保留，所以 Ctrl+S 与关闭时的询问都还能再存一次；左下角同时立一枚常驻"未保存"，
+    /// 直到某次写入真的成功才撤。这样"取消"不是一次性判决，用户不会被一次误点锁死。</summary>
+    private bool _canvasSavePaused;
+
+    /// <summary>左下角那枚常驻"画布改动未保存"。它表示的是一个持续状态而非一次性事件，
+    /// 所以不走 2 秒自动消失那条路（见 ShowCanvasUnsavedToast）。</summary>
+    private SaveToastItem? _canvasUnsavedToast;
+
+    /// <summary>按画布路径暂存的"还没写进磁盘"的内存模型。切画布 / 切文档时，写不进去的那份
+    /// 不会被直接丢掉 —— 只切走一下就把整段编辑作废，代价远大于这点内存（一份 800 卡 ≈ 几十 KB）。
+    /// 切回来时优先用它恢复（脏标记、常驻提示一并回来）；任何一次成功写入（原文件 / 库内副本 /
+    /// 另存为）都把对应项移出本表。键 = 画布文件路径，与 <see cref="_currentCanvasPath"/> 同一套比较规则。</summary>
+    private readonly Dictionary<string, CanvasDoc> _unsavedCanvasDocs = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>白板（Canvas 模式）：从当前画布文件读取卡片与连线，保留模型供交互改写，并把当前数组交给 GpuViewer 渲染。
-    /// 内存模型是唯一真相源，交互只置脏、不落盘；写入时机全在 FlushCanvas（显式保存 / 切换文档 / 切换画布 / 退出保存）。</summary>
+    /// 内存模型是唯一真相源，交互只置脏、不落盘；写入时机在 FlushCanvas（停手自动保存 / 显式保存 / 切换文档 / 切换画布 / 退出保存）。</summary>
     private void LoadCanvasForCurrentDocument()
     {
-        CanvasDoc? doc = null;
-        try { doc = CanvasStore.LoadFile(_currentCanvasPath); }
-        catch { }
+        // 这份画布有"切走时没能写进去"的内存版本：用内存版恢复，别拿磁盘上的旧内容把它盖掉。
+        CanvasDoc? stashed = null;
+        bool pending = !string.IsNullOrEmpty(_currentCanvasPath)
+                       && _unsavedCanvasDocs.TryGetValue(_currentCanvasPath!, out stashed);
+
+        CanvasDoc? doc;
+        if (pending)
+        {
+            doc = stashed;
+        }
+        else
+        {
+            doc = null;
+            try { doc = CanvasStore.LoadFile(_currentCanvasPath); }
+            catch { }
+        }
+
         _canvasDoc = doc ?? new CanvasDoc();
-        _canvasDirty = false;
+        _canvasDirty = pending;
+        // 恢复出来的这份仍然写不进去（上次就是这么失败的）：继续暂停自动重试，
+        // 别再一回来就弹一次另存为 —— 用户可能只是想看看、想改两笔。
+        _canvasSavePaused = pending;
         GpuViewer.SetCanvasData(_canvasDoc.Nodes, _canvasDoc.Edges);
         SyncCanvasMissingToast();
+        SyncCanvasOutsideRootToast();
+        UpdateCanvasDetachButton();
         UpdateCanvasRowBackgrounds();
+        // 托管表里可能还压着别的画布：那就照旧立着"未保存"，别让切一下画布就把提示和关窗询问一起抹掉。
+        RefreshUnsavedState();
     }
 
     /// <summary>把某份画布盖到当前文档上（null = 撤掉画布）。同一份画布可以盖到任意文档，卡片的页归属
-    /// 永远按【当前文档】的页码解释。顺序不可反：先把旧画布写回它自己的文件再换指针，否则旧画布的最后一次编辑会丢。</summary>
+    /// 永远按【当前文档】的页码解释。顺序不可反：先把旧画布写回它自己的文件再换指针，否则旧画布的最后一次编辑会丢。
+    /// 写失败【不阻断切换】：点了一行却没反应比"少存一次"更让人困惑。但失败的那份内容会被托管起来
+    /// （见 StashUnsavedCanvas）—— 切走不是判决，切回来还能接着存。</summary>
     private void ApplyCanvas(string? canvasPath)
     {
         string? next = string.IsNullOrEmpty(canvasPath) ? null : canvasPath;
         if (string.Equals(_currentCanvasPath, next, StringComparison.OrdinalIgnoreCase)) return;
-        FlushCanvas();
+        if (!FlushCanvas())
+        {
+            // 必须在换指针【之前】托管：失败出口可能是异步的（另存为对话框），等它回来指针早已换人，
+            // 那时 _canvasDoc 已经是新画布的了，这份内容就再也找不回来。
+            StashUnsavedCanvas(_currentCanvasPath, _canvasDoc);
+            ReportCanvasSaveFailure();
+        }
         _currentCanvasPath = next;
         LoadCanvasForCurrentDocument();
         SaveCurrentViewState();
@@ -5798,41 +5896,386 @@ public sealed partial class MainPage : Page
         GpuViewer?.SetCanvasData(_canvasDoc?.Nodes, _canvasDoc?.Edges);
     }
 
-    /// <summary>白板改动只置脏，不立即落盘：拖拽、点选、改色都是高频操作，
-    /// 逐次整份重写 JSON 会在 UI 线程上卡住交互。真正写入推迟到显式保存 / 切换文档 / 退出保存（FlushCanvas），
-    /// 而那几处仍是 UI 线程同步整份重写（整份序列化 + tmp + Move，实测 800 卡 ≈ 9 ms），所以只在低频时刻做。</summary>
+    /// <summary>白板改动只置脏 + 排一次自动保存，不立即落盘：拖拽、点选、改色都是高频操作，
+    /// 逐次整份重写 JSON 会在 UI 线程上卡住交互。真正的写入推迟到"手停下 500ms"（AutoSaveCanvas）
+    /// 与显式保存 / 切换文档 / 切换画布 / 退出保存（FlushCanvas）—— 那几处一次写入实测 800 卡 ≈ 9ms。
+    /// 暂停期（_canvasSavePaused）只掐掉"自动保存这条链路"（建文件 + 排定时），脏标记照置：
+    /// 内容确实还没落盘，于是 Ctrl+S 与关闭时的询问都还有东西可存，不会被上一次的"取消"锁死。</summary>
     private void MarkCanvasDirty()
     {
         _canvasDirty = true;
         HasUnsavedChanges = true;
+        if (_canvasSavePaused) return;
+        // 第一次改动就把文件建出来：右侧面板就是画布文件的列表，没有文件就没有那一行，
+        // 用户画了半天却在面板里找不到自己正在编辑的画布。
+        EnsureCanvasFile();
+        RestartCanvasAutoSave();
     }
 
-    /// <summary>把脏掉的白板写回【当前画布自己的文件】。写失败保持脏标记，留给下一次保存重试。
-    /// 当前没盖画布却已经有内容时先自动建一份再写：用户可能在没选画布的情况下就画了，
-    /// 直接丢弃等于把他的工作扔掉。返回"白板已落盘"（无脏标记也算成功）。</summary>
+    /// <summary>确保当前白板有一份自己的文件，没有就立刻在库根建一份，返回"文件已就位"。
+    /// 建文件刻意不放到保存那一刻：面板行、高亮、"正在编辑哪一份"全都依赖这个路径。
+    /// 只增不改内容 —— 真正的卡片数据仍由紧跟着的写入负责。</summary>
+    private bool EnsureCanvasFile()
+    {
+        if (!string.IsNullOrEmpty(_currentCanvasPath)) return true;
+        string? created = CanvasLibrary.CreateEmpty(DefaultCanvasName());
+        if (created == null) return false;
+        _currentCanvasPath = created;
+        AppendCanvasOrder(created);   // 自动建的那份同样排到本层最末
+        RefreshCanvasTree();
+        UpdateCanvasDetachButton();
+        UpdateCanvasRowBackgrounds();
+        // 面板收着的时候不滚：行集合已经同步好了，展开时自然就在；此刻强行 ScrollIntoView
+        // 只会让"露出名字"那条链路对着一堆还没实例化的容器空转十几轮。
+        if (CanvasPanelSplitView is { IsPaneOpen: true }) ScrollCanvasRowIntoView(created);
+        return true;
+    }
+
+    /// <summary>重开自动保存这笔定时：每次置脏都把"手停下多久"重新计时，
+    /// 于是连续拖动 / 连续打字期间一次都不写盘，停手满 500ms 才写一次。</summary>
+    private void RestartCanvasAutoSave()
+    {
+        if (DispatcherQueue == null) return;
+        if (_canvasAutoSaveTimer == null)
+        {
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(CanvasAutoSaveDelayMs) };
+            timer.Tick += (s, e) =>
+            {
+                timer.Stop();               // 一次性：下一次置脏再重开
+                AutoSaveCanvas();
+            };
+            _canvasAutoSaveTimer = timer;
+        }
+        _canvasAutoSaveTimer.Stop();
+        _canvasAutoSaveTimer.Start();
+    }
+
+    /// <summary>自动保存一次。写不进去就走统一失败出口（转挂副本 / 另选位置），不静默 ——
+    /// 静默会让用户一直以为已经存好了，直到关软件时才发现。</summary>
+    private void AutoSaveCanvas()
+    {
+        // 脏标记由 FlushCanvas 自己判：没脏它直接返回成功，这里不必再判一次。
+        if (!FlushCanvas()) ReportCanvasSaveFailure();
+    }
+
+    /// <summary>把脏掉的白板写回【当前画布自己的文件】。写失败保持脏标记（留给失败出口处理），
+    /// 并把原因记进 _canvasSaveError 供提示里的根因用。返回"白板已落盘"（无脏标记也算成功）。
+    /// **不动暂停态**：暂停的解释权只在显式保存（SaveAllCanvasesAsync）。切画布 / 切文档也走这里，
+    /// 若顺手解暂停，用户一旦取消过"另存为"，之后每点一次画布都会被同一个选择器重新拦住一次。</summary>
     private bool FlushCanvas()
     {
         if (!_canvasDirty) return true;
-        if (_canvasDoc == null) return false;
-        if (string.IsNullOrEmpty(_currentCanvasPath))
+        if (_canvasDoc == null) { _canvasSaveError = CanvasSaveError.Invalid; return false; }
+        if (!EnsureCanvasFile()) { _canvasSaveError = CanvasSaveError.WriteFailed; return false; }
+
+        _canvasAutoSaveTimer?.Stop();   // 这次写入先到，就把可能还在排队的那笔自动保存作废，别再多写一遍
+        if (CanvasStore.SaveFile(_currentCanvasPath, _canvasDoc, out CanvasSaveError error))
         {
-            string? created = CanvasLibrary.CreateEmpty(DefaultCanvasName());
-            if (created == null) return false;
-            _currentCanvasPath = created;
-            AppendCanvasOrder(created);   // 自动建的那份同样排到最末
-            RefreshCanvasTree();
+            _canvasSaveError = CanvasSaveError.None;
+            _canvasDirty = false;
+            // 写成功就把"暂停自动保存"解开、把这份从托管表里撤掉：内容已经在盘上了，
+            // 再留着那一份，下次切回来会被当成"还没存"，白提示一次。
+            _canvasSavePaused = false;
+            // 自动保存一落盘，"有未保存内容"就该当场消失：否则停手半秒后内容其实已经写进文件，
+            // 关窗口时还会再问一次"要不要保存" —— 那时既没有可丢的东西，也没有可保的东西。
+            // 批注仍然脏、或托管表里还压着别的画布时不会清：那个标记是所有来源共用的，
+            // 由 RefreshUnsavedState 统一算（顺带撤掉左下角那枚"未保存"）。
+            DropUnsavedCanvas(_currentCanvasPath);
+            UpdateCanvasRowBackgrounds();
+            return true;
         }
+        _canvasSaveError = error;
+        return false;
+    }
+
+    /// <summary>保存失败的统一出口（不阻塞的调用点用）：转挂库内副本，转挂不了就问用户存哪儿。
+    /// 模型与路径在这一刻就取快照：这条路可能弹出选择器、等上好几秒，期间用户完全可能换了画布，
+    /// 那时候再读字段就已经是别人的内容了。</summary>
+    private void ReportCanvasSaveFailure() => _ = ResolveCanvasSaveFailureAsync(_canvasDoc, _currentCanvasPath);
+
+    /// <summary>保存失败的统一出口，返回**内容是否已经落盘**（转挂成功 / 另存成功 = true）。
+    /// 用户取消"另存为"时返回 false —— 调用方（关闭流程）据此不退出，把窗口和内容都留着，
+    /// 让他还能按 Ctrl+S 再试。顺序固定：先试库内副本（不打扰用户、还能继续用面板），
+    /// 实在没地方写才问他存哪。
+    /// 无论哪条路收尾都同步一次托管表：落盘了就撤掉那一项（下次切回来不该再被当成"还没存"），
+    /// 没落盘就当场补一份内存版 —— 失败出口可能是异步的，等它回来指针早已换人，
+    /// 那一刻不托管，这份内容就再也没地方待着（切画布很顺手，一下就丢掉整段编辑）。</summary>
+    private async Task<bool> ResolveCanvasSaveFailureAsync(CanvasDoc? doc, string? failedPath)
+    {
+        if (doc == null) return true;
+        bool saved = TryAdoptRecoveryCopy(doc, failedPath)
+                     || await PromptSaveCanvasElsewhereAsync(doc, failedPath);
+        if (saved) DropUnsavedCanvas(failedPath);
+        else StashUnsavedCanvas(failedPath, doc);
+        return saved;
+    }
+
+    /// <summary>所有"还没落盘"的画布一次性收尾，返回"全部落盘"。这是**唯一会解除暂停**的入口
+    /// （Ctrl+S / 保存并退出）：上一次在"另存为"里点了取消，只作废那之后的自动重试，
+    /// 不许把显式保存也一起废掉。顺序：解除暂停 → 托管表里别的几份先各试一次（磁盘满 / 占用解除后
+    /// 通常一次就全好了）→ 当前这份交给 FlushCanvas（它管脏标记）→ 仍写不进去的逐个走统一失败出口。
+    /// 任一份被用户取消就返回 false —— 调用方（关窗流程）据此不退出，内容仍然在内存里、仍然记脏。</summary>
+    private async Task<bool> SaveAllCanvasesAsync()
+    {
+        _canvasSavePaused = false;
+        RetryUnsavedCanvases();
+
+        if (!FlushCanvas() && !await ResolveCanvasSaveFailureAsync(_canvasDoc, _currentCanvasPath))
+            return false;
+
+        // 快照遍历：下面的失败出口可能往表里补项，边遍历边改会抛。
+        foreach (var pair in _unsavedCanvasDocs.ToList())
+        {
+            // 当前这份已经在上面处理过；再写一次只是把同一份内容写两遍。
+            if (string.Equals(pair.Key, _currentCanvasPath, StringComparison.OrdinalIgnoreCase)) continue;
+            if (CanvasStore.SaveFile(pair.Key, pair.Value, out CanvasSaveError error))
+            {
+                DropUnsavedCanvas(pair.Key);
+                continue;
+            }
+            // 让提示里的根因说的是这一份的失败，而不是上一份留下的。
+            _canvasSaveError = error;
+            if (!await ResolveCanvasSaveFailureAsync(pair.Value, pair.Key)) return false;
+        }
+        return !_canvasDirty && _unsavedCanvasDocs.Count == 0;
+    }
+
+    /// <summary>把改动另存成一份【库内】副本，成功就立刻转挂到它上面。
+    /// 落点两级：原文件所在目录 → 画布库根，两处都在库树内 ⇒ 副本一定在右侧面板里、能高亮、
+    /// 用户能自己点回去。库外一律不落 —— 面板看不见的副本等于"存了但找不到"。
+    /// 转挂是必需的：不转挂的话指针还指着写不进去的那份，之后每次编辑都在同一个失败里打转，
+    /// 而副本被反复覆盖成最新内容（实测现象：回原件一看修改全没了，其实都在副本里）。</summary>
+    private bool TryAdoptRecoveryCopy(CanvasDoc doc, string? failedPath)
+    {
+        // 先把根因取出来：下面成功后会清掉 _canvasSaveError，而提示里要说的正是这一句。
+        string reason = CanvasSaveReason();
+
+        foreach (string dir in RecoveryDirs(failedPath))
+        {
+            string path = RecoveryPath(dir, failedPath);
+            if (!CanvasStore.SaveFile(path, doc)) continue;
+
+            // 已经不是"当前这份"了（用户已经切走、或退出流程已经往下走）：只把副本留在库里，
+            // 绝不把指针改回来 —— 那会把用户刚才选的另一份画布顶掉。
+            if (string.Equals(_currentCanvasPath, failedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _currentCanvasPath = path;
+                _canvasDirty = false;
+                _canvasSaveError = CanvasSaveError.None;
+                AppendCanvasOrder(path);
+                RefreshCanvasTree();
+                UpdateCanvasDetachButton();
+                UpdateCanvasRowBackgrounds();
+                if (CanvasPanelSplitView is { IsPaneOpen: true }) ScrollCanvasRowIntoView(path);
+                SaveCurrentViewState();   // 下次打开直接是副本，不会又回到那份写不进去的原件
+            }
+            ShowSaveToast(string.Format(LocalizationService.Get("CanvasSaveAdopted"), reason),
+                          ToastIconKind.Success);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>副本的两个落点，按优先级：原文件所在目录（同层最好找）→ 画布库根（子目录被锁时的退路）。
+    /// 两处都在库树内 ⇒ "能落盘"与"能在面板里高亮"永远同时成立，不会出现"存了但看不见"。</summary>
+    private static string[] RecoveryDirs(string? failedPath)
+    {
+        string? own = null;
+        if (!string.IsNullOrEmpty(failedPath))
+        {
+            try { own = Path.GetDirectoryName(failedPath); } catch { }
+        }
+        return own != null && !string.Equals(own, CanvasLibrary.Root, StringComparison.OrdinalIgnoreCase)
+            ? new[] { own, CanvasLibrary.Root }
+            : new[] { CanvasLibrary.Root };
+    }
+
+    /// <summary>副本文件名：原名 + " (recovered 2026-11-04 0935)"，与库里处理重名的 "名字 (2)" 同一风格。
+    /// 带时间戳是因为同一份画布可能修好之后过几天又变成只读，不带的话两次副本会互相覆盖。</summary>
+    private static string RecoveryPath(string dir, string? failedPath)
+    {
+        string baseName = "recovered";
+        if (!string.IsNullOrEmpty(failedPath))
+        {
+            try
+            {
+                string n = Path.GetFileNameWithoutExtension(failedPath);
+                if (!string.IsNullOrWhiteSpace(n)) baseName = n;
+            }
+            catch { }
+        }
+
+        string name = $"{baseName} (recovered {DateTime.Now:yyyy-MM-dd HHmm})";
+        string candidate = Path.Combine(dir, name + CanvasStore.Extension);
+        for (int i = 2; File.Exists(candidate) && i < 100; i++)
+            candidate = Path.Combine(dir, $"{name} ({i}){CanvasStore.Extension}");
+        return candidate;
+    }
+
+    /// <summary>把 <see cref="_canvasSaveError"/> 翻成半句话（只写根因，不写"该怎么办"）。
+    /// 只分两类：只读是用户自己能立刻解决的一种（取消只读就能继续用原件），其余都归"无法写入"——
+    /// 被占用 / 权限 / 磁盘满 / 不是我们的文件，对用户是同一件事：这次写不进去，改用副本。</summary>
+    private string CanvasSaveReason() => LocalizationService.Get(
+        _canvasSaveError == CanvasSaveError.TargetReadOnly ? "CanvasSaveReadOnly" : "CanvasSaveWrite");
+
+    /// <summary>库内两处都写不进去时（磁盘满 / 库目录无写权限）唯一的出口：让用户自己挑一个位置存一份。
+    /// 取消**不等于放弃内容** —— 只暂停自动重试（见 PauseCanvasSave），内容仍留在内存里且仍记脏，
+    /// 用户可以按 Ctrl+S 再试一次，关软件时也会照常被问一次。
+    /// 选择器可能落在库外，那是用户自己点的路径，不算"往别处散播"。</summary>
+    private async Task<bool> PromptSaveCanvasElsewhereAsync(CanvasDoc doc, string? failedPath)
+    {
+        if (_canvasSavePromptOpen) return false;   // 选择器已经开着，别叠第二个
+        if (_canvasSavePaused) return false;       // 已暂停：等用户显式保存，别自动重弹
+
+        _canvasSavePromptOpen = true;
+        ShowSaveToast(LocalizationService.Get("CanvasSaveNoLibrary"), ToastIconKind.Error);
+        SuppressPenRing();
         try
         {
-            if (CanvasStore.SaveFile(_currentCanvasPath, _canvasDoc))
+            var picker = new FileSavePicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+            var app = Application.Current as App;
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(app?.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeChoices.Add("Canvas", new List<string> { CanvasStore.Extension });
+            picker.SuggestedFileName = Path.GetFileNameWithoutExtension(
+                string.IsNullOrEmpty(failedPath) ? DefaultCanvasName() : failedPath);
+
+            StorageFile file = await picker.PickSaveFileAsync();
+            if (file == null) { PauseCanvasSave(failedPath); return false; }   // 取消：先存内存，回头再试
+
+            if (!CanvasStore.SaveFile(file.Path, doc))
             {
-                _canvasDirty = false;
-                UpdateCanvasRowBackgrounds();
-                return true;
+                ShowSaveToast(LocalizationService.Get("CanvasSaveWrite"), ToastIconKind.Error);
+                PauseCanvasSave(failedPath);
+                return false;
             }
+
+            // 只有"失败的那份仍然是当前画布"才把指针搬过去：选择器是模态的，但调用点
+            // （切画布 / 切文档）可能已经换了指针，无条件搬会把用户刚选的那份顶掉。
+            if (string.Equals(_currentCanvasPath, failedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _currentCanvasPath = file.Path;
+                _canvasDirty = false;
+                _canvasSaveError = CanvasSaveError.None;
+                _canvasSavePaused = false;
+                // 托管表里那一项由调用方（ResolveCanvasSaveFailureAsync）在落盘成功后撤掉，
+                // 这里只把当前这份的状态对齐；提示与"有未保存"统一由那一次 Refresh 收尾。
+                RefreshUnsavedState();
+                SaveCurrentViewState();
+                UpdateCanvasRowBackgrounds();
+                UpdateCanvasDetachButton();
+                // 选择器可能落在库外（用户自己挑的位置）：那份不会出现在右侧面板里，得说一声。
+                SyncCanvasOutsideRootToast();
+            }
+            ShowSaveToast(LocalizationService.Get("SaveAsToastSuccess"), ToastIconKind.Success);   // 另存为成功
+            return true;
         }
-        catch { }
-        return false;
+        catch
+        {
+            PauseCanvasSave(failedPath);
+            return false;
+        }
+        finally
+        {
+            _canvasSavePromptOpen = false;
+            ResumePenRing();
+        }
+    }
+
+    /// <summary>暂停自动保存：内容仍留在内存、脏标记照旧（所以 Ctrl+S 与关闭询问都还能再存一次），
+    /// 只是不再自动重试、不再反复弹选择器 —— 一次误点取消不该把整个会话的写盘能力锁死。
+    /// 左下角立一枚常驻"未保存"，任何一次写入成功都会把它撤掉。
+    /// 若调用点已经把画布切走，那份内容此刻在托管表里（不是丢掉），提示照立 —— 它仍然没落盘。</summary>
+    private void PauseCanvasSave(string? failedPath)
+    {
+        // 失败的那份已经不是当前画布（用户已经切走）：不该顺手把新画布的自动保存也暂停掉 ——
+        // 那份根本没写失败。它已经在托管表里，提示由 RefreshUnsavedState 一并立起来。
+        if (string.Equals(_currentCanvasPath, failedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _canvasSavePaused = true;
+            _canvasAutoSaveTimer?.Stop();
+        }
+        RefreshUnsavedState();
+    }
+
+    /// <summary>立一枚常驻"画布改动未保存"。它是持续状态而非一次性事件：
+    /// 2 秒就消失的普通提示在这件事上没有意义 —— 用户恰恰是在这段时间里需要知道"还没存"。</summary>
+    private void ShowCanvasUnsavedToast()
+    {
+        if (SaveToastStack == null || _canvasUnsavedToast != null) return;
+        _canvasUnsavedToast = AddToastCapsule(
+            LocalizationService.Get("CanvasUnsaved"), ToastIconKind.Warning, sticky: true);
+    }
+
+    /// <summary>写入真正成功后撤掉那枚常驻提示。</summary>
+    private void ClearCanvasUnsavedToast()
+    {
+        if (_canvasUnsavedToast == null) return;
+        SaveToastItem gone = _canvasUnsavedToast;
+        _canvasUnsavedToast = null;
+        DismissToast(gone, animate: true);
+    }
+
+    /// <summary>"有未保存内容"的唯一判定点：当前画布脏 / 批注脏 / 托管表里还压着别的画布。
+    /// 分散在各处手写赋值必然会漏掉第三项，而那几份恰恰最容易"已经切走、内容只在内存里"。
+    /// 顺带把那枚常驻提示对齐到同一份状态，省得两处各判一次、判出两种结论。</summary>
+    private void RefreshUnsavedState()
+    {
+        HasUnsavedChanges = _canvasDirty || _annotationsDirty || _unsavedCanvasDocs.Count > 0;
+        // 提示只在"确实写不进去"时立：普通的"刚改完、还没到 500ms 自动保存"每拖一下就闪一次，
+        // 用户很快就不看它了。
+        if (_canvasSavePaused || _unsavedCanvasDocs.Count > 0) ShowCanvasUnsavedToast();
+        else ClearCanvasUnsavedToast();
+    }
+
+    /// <summary>把一份写不进去的画布内容托管起来（key = 它自己的文件路径）。
+    /// 切画布 / 切文档都可能把当前模型换掉，托管之后那份内容才有地方待着、切回来才能恢复。</summary>
+    private void StashUnsavedCanvas(string? path, CanvasDoc? doc)
+    {
+        if (doc == null || string.IsNullOrEmpty(path)) return;
+        _unsavedCanvasDocs[path!] = doc;
+        RefreshUnsavedState();
+    }
+
+    /// <summary>某份画布已经落盘（或内容确定作废），从托管表移除。</summary>
+    private void DropUnsavedCanvas(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return;
+        _unsavedCanvasDocs.Remove(path!);
+        RefreshUnsavedState();
+    }
+
+    /// <summary>把托管表里每一份都再试一次写回原路径。换文档 / 退出前调用 ——
+    /// 磁盘满解除之后，这一下通常就全好了，不必再逐份问用户。当前那份跳过：
+    /// 它由 FlushCanvas 负责，那里面还要跟着清脏标记、解暂停、撤提示。</summary>
+    private void RetryUnsavedCanvases()
+    {
+        foreach (var pair in _unsavedCanvasDocs.ToList())
+        {
+            if (string.Equals(pair.Key, _currentCanvasPath, StringComparison.OrdinalIgnoreCase)) continue;
+            if (CanvasStore.SaveFile(pair.Key, pair.Value)) _unsavedCanvasDocs.Remove(pair.Key);
+        }
+        RefreshUnsavedState();
+    }
+
+    /// <summary>卸下当前画布：只断开"这份文档盖着这份画布"这层关系，画布文件本身留在库里不动。
+    /// 卸下后与"从没盖过画布"完全同一条路径 —— 再双击空白处就会新建一份（见 EnsureCanvasFile）。</summary>
+    private void DetachCanvas()
+    {
+        if (string.IsNullOrEmpty(_currentCanvasPath)) return;
+        ApplyCanvas(null);
+        ShowSaveToast(LocalizationService.Get("CanvasDetached"), ToastIconKind.Success);
+    }
+
+    private void DetachCanvas_Click(object sender, RoutedEventArgs e) => DetachCanvas();
+
+    /// <summary>卸下按钮只在"这份文档盖着画布"时出现：没有画布可卸的时候它只会是个失效控件。</summary>
+    private void UpdateCanvasDetachButton()
+    {
+        if (DetachCanvasButton == null) return;
+        DetachCanvasButton.Visibility = string.IsNullOrEmpty(_currentCanvasPath)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     // ---------------- 右侧画布面板（画布库） ----------------
@@ -6126,6 +6569,40 @@ public sealed partial class MainPage : Page
         {
             SaveToastItem gone = _canvasMissingToast;
             _canvasMissingToast = null;
+            DismissToast(gone, animate: true);
+        }
+    }
+
+    /// <summary>当前挂着的画布落在画布库树【之外】时常驻一枚"画布在库外"。
+    /// 这种画布只可能来自"库整个写不进去 → 另存为用户自己挑的位置"：它照常挂载、能继续编辑、
+    /// 下次打开还是它，但右侧面板列的是库树里的文件 ⇒ 面板里根本没有它那一行。
+    /// 不说明白，用户会以为画布丢了或者没保存成功（同样走常驻栈，与"画布缺失"同一套视觉与生命周期）。</summary>
+    private void SyncCanvasOutsideRootToast()
+    {
+        if (SaveToastStack == null) return;
+
+        bool outside = !string.IsNullOrEmpty(_currentCanvasPath)
+                       && !CanvasLibrary.IsInsideRoot(_currentCanvasPath!);
+
+        bool dark = this.ActualTheme == ElementTheme.Dark;
+        // 换主题要重建这一枚：图标色是构造时按主题算死的（底板/描边是 ThemeResource，会自动跟随）。
+        if (_canvasOutsideToast != null && _canvasOutsideToastDark != dark)
+        {
+            SaveToastItem stale = _canvasOutsideToast;
+            _canvasOutsideToast = null;
+            DismissToast(stale, animate: false);
+        }
+
+        if (outside && _canvasOutsideToast == null)
+        {
+            _canvasOutsideToast = AddToastCapsule(
+                LocalizationService.Get("CanvasOutsideLibrary"), ToastIconKind.Warning, sticky: true);
+            _canvasOutsideToastDark = dark;
+        }
+        else if (!outside && _canvasOutsideToast != null)
+        {
+            SaveToastItem gone = _canvasOutsideToast;
+            _canvasOutsideToast = null;
             DismissToast(gone, animate: true);
         }
     }
@@ -7044,6 +7521,9 @@ public sealed partial class MainPage : Page
         }
 
         rows.Add(MenuRow("CanvasRename", "\uE8AC", () => StartCanvasRename(node)));
+        // 卸下只对"此刻盖在文档上的那一份"有意义：别的文件没有可卸的东西，条目会是个空动作。
+        if (!node.IsFolder && string.Equals(node.FullPath, _currentCanvasPath, StringComparison.OrdinalIgnoreCase))
+            rows.Add(MenuRow("CanvasDetach", "\uE738", DetachCanvas));
         rows.Add(MenuRow("CanvasDelete", "\uE74D", () => DeleteCanvasNode(node)));
         rows.Add(SelfDrawnMenuRow.Separator());
         rows.Add(MenuRow("CanvasReveal", "\uE8B7", () => ShellFileOps.RevealInExplorer(node.FullPath, node.IsFolder)));

@@ -1890,6 +1890,19 @@
                                       HorizontalAlignment="Left" VerticalAlignment="Center" Margin="14,0,0,0"
                                       Foreground="{StaticResource SidebarTextBrush}"/>
 
+                            <!-- 卸下当前画布（只在这份文档盖着画布时出现，可见性由 UpdateCanvasDetachButton 写）。
+                                 用文字而不是图标：要表达的是"把画布从这份文档上摘下来"，没有哪个单色字形能一眼读出来；
+                                 标题"画布"很短，这一行右侧本来空着，塞一个 20 高的 ghost 按钮不占任何布局。
+                                 高度 20 + VerticalAlignment=Center：与标题文字中心线对齐，也不撑破这行恒定的 24
+                                 （这行同时是"库根最前"的投放带，高度一变，投放带就跟着变）。 -->
+                            <Button x:Name="DetachCanvasButton" Click="DetachCanvas_Click"
+                                    Style="{StaticResource ButtonNoStateMachineStyle}"
+                                    Visibility="Collapsed" MinWidth="0" Height="20" Padding="6,0"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                    FontSize="11"
+                                    Foreground="{StaticResource SidebarTextMutedBrush}"/>
+
                         </Grid>
 
                         <!-- 资源管理器（vscode 式）：拍平成行的目录树，文件夹在前按名称排、缩进表达层级。
