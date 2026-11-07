@@ -184,6 +184,10 @@ public sealed partial class MainPage : Page
     // 重做栈：撤销时把条目从历史栈移入此处（Ctrl+Y 重做）；新操作开始即清空（重做分支失效，
     private List<EditorHistoryEntry> _annotationRedo = new();
 
+    /// <summary>下一条笔的全局落笔序号（见 <see cref="AnnotationViewModel.ZOrder"/>）。换画布/重开文档时
+    /// 从 0 重排，不跨文档累加 —— 它只用于同一份画布内的层叠先后，值本身没有其它含义。</summary>
+    private int _inkZSeq;
+
     /// 统一撤销/重做条目：把「撤销做什么、重做做什么」封成一对委托。
     private sealed class EditorHistoryEntry
     {
@@ -5128,6 +5132,11 @@ public sealed partial class MainPage : Page
     {
         if (!_isDrawingHighlight || _activeHighlight == null) return;
 
+        // 每次移动都重排自动保存：500ms 的语义是"手停下多久才写盘"，笔还在走就不能写。
+        // ⚠ 不标脏的后果不是"晚一点存"，而是【只存下半条笔】—— 按下时排的那次保存会在笔
+        //   没画完时落盘，此后再不置脏，长笔的尾段就永久停在文件外面。
+        MarkCanvasDirty();
+
         // 点数正比于线条长短而不是采样次数：慢写时手在原地抖，事件照样每帧都来，
         // 全收只会让文件白胖、且后半段全是几乎重合的点。只决定"这一点收不收"、
         // 从不改动已收的点 —— 存下来的折线与屏幕所见逐点一致（与事后抽稀的根本区别，后者会挪点位）。
@@ -5154,17 +5163,21 @@ public sealed partial class MainPage : Page
             double dx = e.X - last.X, dy = e.Y - last.Y;
             if (double.IsNaN(last.X) || dx * dx + dy * dy > 1e-6)
                 _activeHighlight.AppendPoint(new Point(e.X, e.Y));
+            // 抬笔即置脏：整条笔到此才定稿，必须再写一次盘（否则尾段永远停在半截）。
+            MarkCanvasDirty();
         }
 
         _activeHighlight = null;
         GpuViewer.InvalidateOverlayThrottled();
     }
 
-    /// <summary>新起一条笔：它自己记着发起页，于是"这一笔属于哪页"不需要外部再维护一份映射。</summary>
+    /// <summary>新起一条笔：它自己记着发起页，于是"这一笔属于哪页"不需要外部再维护一份映射。
+    /// 落笔序号在这里发放：序号越大越晚落笔、画得越靠上，撤销后再重画也是新的一号。</summary>
     private AnnotationViewModel NewInkStroke(int page, string colorHex, double thickness) => new()
     {
         Type = AnnotationType.Pen,
         PageIndex = page,
+        ZOrder = _inkZSeq++,
         ColorHex = colorHex,
         Thickness = thickness
     };
@@ -5438,6 +5451,7 @@ public sealed partial class MainPage : Page
     private void LoadInkCore(List<CanvasInk>? ink)
     {
         foreach (var p in _pages) p.Annotations.Clear();
+        _inkZSeq = 0;   // 落笔序号按文件里的先后重排：文件已经是按序号写的，见 SyncInkToCanvasDoc
         if (ink == null) return;
 
         foreach (var stroke in ink)
@@ -5462,6 +5476,7 @@ public sealed partial class MainPage : Page
         {
             Type = AnnotationType.Pen,
             PageIndex = page,
+            ZOrder = _inkZSeq++,
             ColorHex = string.IsNullOrEmpty(stroke.Color) ? "#F2C200" : stroke.Color,
             Thickness = stroke.Width > 0 ? stroke.Width : 3.5
         };
@@ -5474,33 +5489,44 @@ public sealed partial class MainPage : Page
 
     /// <summary>把内存里的墨整体写进画布模型（写文件之前调用）。一条笔一条记录、挂在它的发起页上：
     /// 点串里就是整条线，跨页的那一截也在同一串里，不需要任何分段或布局信息。
-    /// 坐标只留两位小数：0.01pt 远低于可见精度，而每个数字省下的字符在几千点的规模上是实打实的。</summary>
+    /// 坐标只留两位小数：0.01pt 远低于可见精度，而每个数字省下的字符在几千点的规模上是实打实的。
+    /// ⚠ 写出顺序按【落笔序号】而不是按页：数组顺序就是下次读回来的绘制顺序，
+    ///   按页写会把文件变成"按页分组"，重开文档后跨页的层级就退回页序了。</summary>
     private void SyncInkToCanvasDoc()
     {
         if (_canvasDoc == null) return;
         _canvasDoc.Ink.Clear();
 
+        var flat = new List<(AnnotationViewModel A, int Page, int Seq)>();
         foreach (var page in _pages)
-        {
             foreach (var a in page.Annotations)
-            {
-                if (a.Type != AnnotationType.Pen) continue;
+                if (a.Type == AnnotationType.Pen) flat.Add((a, page.PageIndex, flat.Count));
+        if (flat.Count == 0) return;
 
-                var ink = new CanvasInk
-                {
-                    Color = a.ColorHex,
-                    Width = a.Thickness,
-                    Page = a.PageIndex >= 0 ? a.PageIndex : page.PageIndex
-                };
-                var pts = a.GetPointsSnapshot();
-                ink.Pts.Capacity = pts.Length * 2;
-                for (int i = 0; i < pts.Length; i++)
-                {
-                    ink.Pts.Add(Math.Round(pts[i].X, 2));
-                    ink.Pts.Add(Math.Round(pts[i].Y, 2));
-                }
-                if (ink.Pts.Count >= 2) _canvasDoc.Ink.Add(ink);
+        // 序号相同时用扫描次序定序（理论上不会发生）：保证同一份内容每次写出来都逐条一致。
+        flat.Sort((x, y) =>
+        {
+            int c = x.A.ZOrder.CompareTo(y.A.ZOrder);
+            return c != 0 ? c : x.Seq.CompareTo(y.Seq);
+        });
+
+        // 按排序结果逐条写成记录；Page 优先取笔自带的发起页，缺失时退回它所在的页集合。
+        foreach (var (a, pageIndex, _) in flat)
+        {
+            var ink = new CanvasInk
+            {
+                Color = a.ColorHex,
+                Width = a.Thickness,
+                Page = a.PageIndex >= 0 ? a.PageIndex : pageIndex
+            };
+            var pts = a.GetPointsSnapshot();
+            ink.Pts.Capacity = pts.Length * 2;
+            for (int i = 0; i < pts.Length; i++)
+            {
+                ink.Pts.Add(Math.Round(pts[i].X, 2));
+                ink.Pts.Add(Math.Round(pts[i].Y, 2));
             }
+            if (ink.Pts.Count >= 2) _canvasDoc.Ink.Add(ink);
         }
     }
 
@@ -8356,6 +8382,11 @@ public class AnnotationViewModel
 
     /// <summary>发起页（0-based）：这条笔的点全部是这一页的局部坐标，画在这一页的变换之下。</summary>
     public int PageIndex { get; set; } = -1;
+
+    /// <summary>全局落笔序号（跨页统一递增）：绘制时按它升序，于是"后画的压在上面"对跨页的笔同样成立。
+    /// 一笔一个号、撤销重做都带着它走，故整条笔的层级不随撤销/重做改变。
+    /// 存盘点按它排序写进画布文件，故重开文档后层级与落笔当时一致。</summary>
+    public int ZOrder { get; set; } = -1;
 
     public AnnotationType Type { get; set; }
 
