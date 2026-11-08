@@ -476,6 +476,64 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
+    /// <summary>把视口移到某张卡片上：装得下就保持当前倍率，装不下就缩到"卡片占视口 80%"（留一圈上下文），
+    /// 然后把卡片中心对到视口中心。矩形是【页局部 PDF 点】（与存储、命中同一空间）。
+    /// 宽高一律用 MakePageXform 实测，不自己乘 96/72 —— 旋转 90/270 时卡片宽高互换，手算必然写偏方向。
+    /// 唯一做不到"完整可见"的情形：卡片在 MinZoom 下仍比视口大，那时只居中、四周允许溢出。</summary>
+    public void GoToCanvasRect(int pageIndex, double x, double y, double w, double h)
+    {
+        var pages = _pages;
+        if (pageIndex < 0 || pageIndex >= pages.Count) return;
+        // 缩放动画进行中收到跳转：先落定当前插值态，避免与弹簧引擎抢视图（与 GoToPage 同一原则）。
+        if (_isSmoothZooming) StopSmoothZoom();
+
+        double vpW = _vpW, vpH = _vpH;
+        if (vpW <= 0 || vpH <= 0) return;
+
+        double cw = Math.Max(1.0, w), ch = Math.Max(1.0, h);
+        double x0 = x, y0 = y, x1 = x + cw, y1 = y + ch;
+
+        // ① 目标倍率：量出 z=1 时卡片在屏幕上的宽高（含 96/72 与旋转带来的宽高互换），
+        //    换算到任意 z 只是乘 z，不必逐档重算。
+        var probe = MakePageXform(ComputePageDest(pageIndex, 1.0, 0, 0), 1.0);
+        var pa = probe.Map(x0, y0);
+        var pb = probe.Map(x1, y1);
+        double cardW = Math.Max(1.0, Math.Abs(pb.X - pa.X));
+        double cardH = Math.Max(1.0, Math.Abs(pb.Y - pa.Y));
+
+        double zCur = _liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor;
+        if (zCur <= 0) zCur = 1.0;
+        double zFit = Math.Min(vpW * 0.8 / cardW, vpH * 0.8 / cardH);
+        double z = Math.Clamp(Math.Min(zCur, zFit), MinZoom, MaxZoom);
+
+        // ② 目标偏移：偏移在屏幕上是纯平移，先按 hOff=vOff=0 求卡片中心的落点，再整体减掉"把它挪到视口中心"的量。
+        //    ComputePageDest 里已含"内容小于视口时居中绘制"的补偿，这里不再单独加 ComputeViewAnchor，
+        //    否则低缩放下会被算成负数、被夹成 0 之后又弹回原处。
+        var xf = MakePageXform(ComputePageDest(pageIndex, z, 0, 0), z);
+        var pc = xf.Map(x0 + cw / 2.0, y0 + ch / 2.0);
+        double targetX = pc.X - vpW / 2.0;
+        double targetY = pc.Y - vpH / 2.0;
+        // 尚未布局时 Spacer 为 NaN ⇒ "> 0" 不成立 ⇒ 当 0 处理，等同"不夹上限"。
+        double docW = Spacer.Width > 0 ? Spacer.Width : 0;
+        double docH = Spacer.Height > 0 ? Spacer.Height : 0;
+        targetX = Math.Clamp(targetX, 0, Math.Max(0, docW * z - vpW));
+        targetY = Math.Clamp(targetY, 0, Math.Max(0, docH * z - vpH));
+
+        // ③ 与 GoToPage 同一套落地顺序：一次原子提交（缩放与偏移同时下发），
+        //    之后立刻按目标播种可见范围并排队渲染，不等 ViewChanged 异步回吐。
+        _scrollH.Reset(targetX);
+        _scrollV.Reset(targetY);
+        SyncLiveView(targetX, targetY, z);
+        AbandonZoomCommitWindow();
+        Viewer.ChangeView(targetX, targetY, (float)z, disableAnimation: true);
+        SetVisibleRangeFor(targetX, targetY, z);
+        QueueVisiblePages();
+        InvalidateBoth();
+        // 与 GoToPage 同尾：跳转可能换了当前页，页码回显 / 侧边栏跟随都要跟着走。
+        NotifyViewState();
+        ViewportChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public void ScrollByArrow(Windows.System.VirtualKey key)
     {
         double notch = 120.0 * WheelScrollFactor;
@@ -5591,11 +5649,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     }
 
     /// <summary>把键盘焦点交给视口宿主（若尚未在它身上）。页面级按键里，Delete/Backspace 走的是 MainPage 上依赖焦点的 KeyDown 路由，鼠标点击画布并不会让 ScrollViewer 自动获焦 ⇒ 需在画布左键 按下时显式补齐（否则首次打开带卡片的 PDF，</summary>
-    private void EnsureViewerFocus()
+    public bool EnsureViewerFocus()
     {
-        if (Viewer == null) return;
-        if (ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), Viewer)) return;
-        Viewer.Focus(FocusState.Programmatic);
+        if (Viewer == null) return false;
+        if (ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), Viewer)) return true;
+        return Viewer.Focus(FocusState.Programmatic);
     }
 
     private void HideCanvasInteraction()

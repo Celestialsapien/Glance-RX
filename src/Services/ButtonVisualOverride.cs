@@ -30,10 +30,12 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
     /// ⚠ 底色绝不能写 null：null 背景的 ContentPresenter 整片不参与命中测试，只有文字能被命中
     /// ⇒ hover / click 只在文字附近生效、扫过文字后才整片可点。
     /// ⚠ 前景也绝不能写 null —— null 是「本地值 = 无画刷」，文字会整段消失（浮层静止时全不可见）。
-    public static void Attach(Button button, bool transparentAtRest = false, bool inPopupTree = false, bool accent = false)
+    /// pressOnly：只画按下档，悬浮档完全不参与上色。用于活在回收容器里的图标按钮 ——
+    /// 容器复用时 hover 状态没有可靠的重算时机，让 hover 不产生视觉输出，残留就无从出现。
+    public static void Attach(Button button, bool transparentAtRest = false, bool inPopupTree = false, bool accent = false, bool pressOnly = false)
     {
         if (button == null) return;
-        new Link(button, transparentAtRest, inPopupTree, accent).Attach();
+        new Link(button, transparentAtRest, inPopupTree, accent, pressOnly).Attach();
     }
 
     // 透明刷：静止档拿它（而非 null）填 ContentPresenter.Background。
@@ -73,12 +75,14 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
         private readonly bool _transparentAtRest;
         private readonly bool _inPopupTree;
         private readonly bool _accent;
+        private readonly bool _pressOnly;
 
-        internal Link(Button button, bool transparentAtRest, bool inPopupTree, bool accent) : base(button)
+        internal Link(Button button, bool transparentAtRest, bool inPopupTree, bool accent, bool pressOnly) : base(button)
         {
             _transparentAtRest = transparentAtRest;
             _inPopupTree = inPopupTree;
             _accent = accent;
+            _pressOnly = pressOnly;
         }
 
         protected override void AttachExtra() { }
@@ -114,15 +118,17 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
             if (_root == null) return;
 
             bool pressed = _button.IsPressed;
+            // pressOnly 项把 hover 恒判为 false：状态机照跑，但既不上色也不因 hover 变化重绘。
+            bool hoverActive = !_pressOnly && _hover;
             if (!_dirty
                 && pressed == _lastPressed
-                && _hover == _lastHover)
+                && hoverActive == _lastHover)
             {
                 return;
             }
             _dirty = false;
             _lastPressed = pressed;
-            _lastHover = _hover;
+            _lastHover = hoverActive;
 
             // 欢迎页「打开 PDF」按钮（accent 模式）：几何驱动上色，不套 GlanceAccentButtonStyle 的原生
             // VSM + BrushTransition —— 点击弹文件选择器时输入上下文切换、且无法判定鼠标是否仍在按钮上，
@@ -136,7 +142,7 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
                     _root.Foreground = Resource("GlanceAccentForegroundPressed") as Brush;
                     _root.BorderBrush = Resource("ControlFillColorTransparentBrush") as Brush;
                 }
-                else if (_hover)
+                else if (hoverActive)
                 {
                     _root.Background = Resource("GlanceAccentBrushPointerOver") as Brush;
                     _root.Foreground = Resource("GlanceAccentForeground") as Brush;
@@ -153,7 +159,7 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
 
             // 与 generic.xaml 的 CommonStates 状态表逐行对应：按下优先于悬停（无 IsChecked 档）。
             // ⚠ 键用 ToggleButton* 的「未选中三档」（App.xaml 主题字典，与亚克力同源、深浅已验收），
-            string suffix = pressed ? "Pressed" : _hover ? "PointerOver" : string.Empty;
+            string suffix = pressed ? "Pressed" : hoverActive ? "PointerOver" : string.Empty;
 
             if (_transparentAtRest && suffix.Length == 0)
             {
@@ -170,10 +176,14 @@ internal class ButtonVisualOverride : VisualOverrideBase<Button>
 
             if (_transparentAtRest)
             {
-                // 缩放胶囊 4 颗 + 浮层预设 8 颗（均 transparentAtRest）的悬浮/点击态。
-                // 同源反色/近胶囊【淡叠加】档。静止完全透明（胶囊=并入亚克力、浮层=菜单项语义）；
-                // ⚠ 边框留 null：淡叠加已自带形状，加描边反而显脏。
-                string key = pressed ? "ZoomPillButtonPressed" : "ZoomPillButtonHover";
+                // transparentAtRest 的悬浮/点击态：静止全透明（胶囊=并入亚克力、浮层=菜单项语义、
+                // 行内图标按钮=融进行里）。胶囊 4 颗 + 浮层预设 8 颗走 ZoomPillButton 淡叠加档；
+                // pressOnly 的行内图标按钮只在按下时进到这里。⚠ 边框留 null：淡叠加已自带形状，加描边反而显脏。
+                // pressOnly 项（书签行 4 颗）没有悬浮档，点击必须换专用画刷：
+                // 胶囊 Pressed 与底色同向叠加，等于没画；专用档同为 5%，只把色相反过来。
+                string key = pressed
+                    ? (_pressOnly ? "BookmarkRowClick" : "ZoomPillButtonPressed")
+                    : "ZoomPillButtonHover";
                 _root.Background = Resource(key + "Background") as Brush;
                 _root.Foreground = Resource("ToggleButtonForeground") as Brush;
                 _root.BorderBrush = null;

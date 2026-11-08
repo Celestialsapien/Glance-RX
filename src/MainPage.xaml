@@ -1490,122 +1490,142 @@
 
 
 
-                    <!-- Sidebar mode switcher: thumbnails / bookmarks / outline
+
+                    <!-- Sidebar mode switcher: thumbnails / bookmarks / outline / board（四颗等宽模式键）。
+
+                         Pane 内容盒 219，列表项由框架左右各内缩 8 ⇒ 可点区域右缘 211；
+
+                         顶部左右各留 8 ⇒ 可用 203 = 4 列 + 3×4 的 ColumnSpacing ⇒ 每列 47.75，
+
+                         容得下 20 的图标 + 左右各 8 的 padding；列宽掉到 37 上下就会裁掉图标右侧。
+
+                         用等分星列而不是写死宽度：面板宽度 / 缩放比变化时无需改数字。
+
+                         「收藏当前页」的黄星放在下面 Section header 行的右端（见那一段注释）：那里本来是空的，
+
+                         放得下一条横跨两列（约 99.5 宽 × 30 高）的长按钮（好点、图标不裁），右沿仍是 211。
+
+                         ⚠ 每颗必须 MinWidth="0" + HorizontalAlignment="Stretch"：
+
+                           ToggleButton 默认样式自带 HorizontalAlignment=Left，不写就各自缩成内容宽、右侧留空。
 
                          ⚠ 全项目 FontIcon 一律用此字体族：'Segoe Fluent Icons' 仅 Win11 自带，
 
-                         写死单字体会在 Win10 落豆腐块。改用 DirectWrite 回退链
+                           写死单字体会在 Win10 落豆腐块。改用 DirectWrite 回退链
 
-                         "Segoe Fluent Icons,Segoe MDL2 Assets"（= WinUI 内建 SymbolThemeFontFamily
+                           "Segoe Fluent Icons,Segoe MDL2 Assets"（= WinUI 内建 SymbolThemeFontFamily
 
-                         的值）：Win11 全取 Fluent、Win10 全取 MDL2 —— 两平台各自观感统一。 -->
+                           的值）：Win11 全取 Fluent、Win10 全取 MDL2 —— 两平台各自观感统一。 -->
 
-                    <Grid Grid.Row="0" Margin="8,8,0,0">
+                    <Grid Grid.Row="0" Margin="8,8,8,0" ColumnSpacing="4">
 
                         <Grid.ColumnDefinitions>
 
-                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+
+                            <ColumnDefinition Width="*"/>
+
+                            <ColumnDefinition Width="*"/>
 
                             <ColumnDefinition Width="*"/>
 
                         </Grid.ColumnDefinitions>
 
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="4">
+                        <!-- 四颗模式键共用同一套状态机接管样式（ToggleButtonNoStateMachineStyle）：
 
-                            <!-- 三颗模式键共用同一套状态机接管样式（ToggleButtonNoStateMachineStyle）：
+                             互斥切换由 ApplySidebarMode() 程序化改 IsChecked，接管器会把每一次
 
-                                 互斥切换由 ApplySidebarMode() 程序化改 IsChecked，接管器会把每一次
+                             (checked, pressed, 坐标几何 hover) 变化瞬间写成颜色，不再被原生
 
-                                 (checked, pressed, 坐标几何 hover) 变化瞬间写成颜色，不再被原生
+                             Storyboard 拖成 83ms 渐变。checked 的主题紫、hover / pressed 光效
 
-                                 Storyboard 拖成 83ms 渐变。各自的 Padding / HorizontalContentAlignment
+                             都由 MainPage_Loaded 里逐颗 ToggleButtonVisualOverride.Attach 提供 ——
 
-                                 是元素本地值，优先级高于样式 setter，模板有 TemplateBinding 接得住。 -->
+                             新加模式键时别忘了把那颗也 Attach 上，否则它只有默认系统外观。 -->
 
-                            <ToggleButton x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" Padding="8,6" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
+                        <ToggleButton Grid.Column="0" x:Name="ModeThumbnailsButton" Click="SidebarMode_Click" Tag="Thumbnails" IsChecked="True" MinWidth="0" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;"/>
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE7C3;"/>
 
-                            </ToggleButton>
+                        </ToggleButton>
 
-                            <ToggleButton x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" Padding="8,6" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
+                        <ToggleButton Grid.Column="1" x:Name="ModeBookmarksButton" Click="SidebarMode_Click" Tag="Bookmarks" MinWidth="0" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE728;"/>
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE728;"/>
 
-                            </ToggleButton>
+                        </ToggleButton>
 
-                            <ToggleButton x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" Padding="8,6" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
+                        <ToggleButton Grid.Column="2" x:Name="ModeOutlineButton" Click="SidebarMode_Click" Tag="Outline" MinWidth="0" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
 
-                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE71D;"/>
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE71D;"/>
 
-                            </ToggleButton>
+                        </ToggleButton>
 
-                        </StackPanel>
+                        <!-- 白板：列出当前画布的卡片（ViewAll 图标 = 一屏多块，读作「卡片总览」）。 -->
+
+                        <ToggleButton Grid.Column="3" x:Name="ModeBoardButton" Click="SidebarMode_Click" Tag="Board" MinWidth="0" Padding="8,6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
+
+                            <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE8A9;"/>
+
+                        </ToggleButton>
+
+                    </Grid>
 
 
 
-                        <!-- 添加书签：单独放在模式按钮右侧的长按钮，外观沿用 Button 默认模板
 
-                             （与 ToggleButton 同一套 ControlFill/ControlStroke/圆角，故与三模式按钮观感一致），
 
-                             内部不写字，只有一枚金色实心五角星（#F2C200 = 画笔色板黄）。
+                    <!-- Section header：左模式名，右「收藏当前页」黄星。
 
-                             Padding="8,6" 与模式按钮完全相同 → 高度恒等。
+                         本行与上方模式键行【共用同一套列】：左右 Margin 8、四等分星列、ColumnSpacing 4，
 
-                             【右沿对齐缩略图可点区域】全部按 XAML 尺寸推导，不依赖截图：
+                         黄星 Grid.Column=2、ColumnSpan=2 ⇒ 左沿精确对齐大纲键左边、右沿对齐白板键右边
 
-                               · Pane 内容盒 = OpenPaneLength 220 − 面板右 BorderThickness 1 = 219
+                         （面板 219 − 右 Margin 8 = 211，与缩略图行内书签星同一坐标），不必写死宽度。
 
-                               · 缩略图 ListView 无左右 Margin → 其容器 ListViewItem 就是"浅灰可点区域"，
+                         标题文字占前两列，左 Margin 8 让文字的视觉左沿仍是 16。
 
-                                 右沿 = 219 − 框架默认项内缩 8 = 211
+                         ⚠ 上下 Margin 只留 4 / 3：按钮本体 30 高不变，整行约 37，给 Row 2 的列表多让出 7；
 
-                               · 本按钮在同一 219 宽的列内 → 右 Margin 取 8，右沿同样落在 211
+                           再压两行按钮就会视觉粘连。 -->
 
-                               · 左 Margin 8（略大于模式按钮间距 4）→ 按 219−138−8 得按钮宽 73
+                    <Grid Grid.Row="1" Margin="8,4,8,3" ColumnSpacing="4">
 
-                             【星形居中奇偶】星形实心横向 21 设备像素（奇数）→ 按钮设备宽也须奇数：
+                        <Grid.ColumnDefinitions>
 
-                             125% 缩放下 73×1.25 = 91.25 → 91 设备像素（奇数）✓，
+                            <ColumnDefinition Width="*"/>
 
-                             星形左右各留 35 设备像素，完全对称（此前 69 逻辑宽 = 87 像素时是 33/33）。
+                            <ColumnDefinition Width="*"/>
 
-                             若换缩放比后两侧不等，只改左 Margin ±0.8（=1 设备像素）即可纠偏，
+                            <ColumnDefinition Width="*"/>
 
-                             右沿对齐不受影响。
+                            <ColumnDefinition Width="*"/>
 
-                             ⚠ HorizontalAlignment="Stretch" 必须显式写：Button 默认样式自带
+                        </Grid.ColumnDefinitions>
 
-                             HorizontalAlignment=Left + VerticalAlignment=Center（贴内容不撑满），
+                        <TextBlock Grid.Column="0" Grid.ColumnSpan="2" x:Name="SidebarHeaderText" Text="Miniaturas" Margin="8,0,0,0" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SidebarTextMutedBrush}" VerticalAlignment="Center"/>
 
-                             不写只会缩在所在列左端、右侧留空。
+                        <!-- 黄星与四颗模式键用【同一个 ToggleButton + 同一个样式 + 同一个视觉接管器】：
 
-                             ⚠ MinWidth="0" 必须保留：Button 默认 MinWidth=120 会撑破 219 宽的侧边栏。 -->
+                             底色 / 描边 / 圆角 / hover / pressed 全部同源，只有尺寸（跨两列、Padding 上下 4）
 
-                        <Button Grid.Column="1" x:Name="AddBookmarkButton" Click="AddBookmark_Click" Style="{StaticResource ButtonNoStateMachineStyle}"
+                             和图标字形 / 颜色不同。IsChecked 恒为 false：它不是模式选择，点击后在 AddBookmark_Click 里复位。 -->
 
-                                Margin="8,0,8,0" Padding="8,6" MinWidth="0"
+                        <ToggleButton Grid.Column="2" Grid.ColumnSpan="2" x:Name="AddBookmarkButton" Click="AddBookmark_Click" IsChecked="False"
 
-                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                      Style="{StaticResource ToggleButtonNoStateMachineStyle}"
 
-                                HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
+                                      MinWidth="0" Padding="8,4"
+
+                                      HorizontalAlignment="Stretch" VerticalAlignment="Center"
+
+                                      HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
 
                             <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE735;" Foreground="#F2C200"/>
 
-                        </Button>
+                        </ToggleButton>
 
                     </Grid>
-
-
-
-                    <!-- Section header -->
-
-                    <Grid Grid.Row="1" Margin="16,12,16,6">
-
-                        <TextBlock x:Name="SidebarHeaderText" Text="Miniaturas" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SidebarTextMutedBrush}" VerticalAlignment="Center"/>
-
-                    </Grid>
-
 
 
                     <!-- Thumbnails -->
@@ -1655,15 +1675,15 @@
 
                                     </Grid>
 
-                                    <!-- 行内书签星：空心(E734，灰边) ↔ 实心(E735，同顶部黄星 #F2C200)。
+                                    <!-- 行内书签星：空心(E734，灰边) ↔ 实心(E735，同标题行黄星 #F2C200)。
 
                                          水平位置写死：HorizontalAlignment=Right 直接贴 ListViewItem
 
                                          内容区右缘 —— 内容区右缘 ≈ 219 − 框架默认项内缩 8 = 211，
 
-                                         与顶部黄星按钮右缘（面板 219 − 右 Margin 8 = 211）同一坐标，
+                                         与 Section header 行右侧黄星按钮右缘（面板 219 − 右 Margin 8 = 211）同一坐标，
 
-                                         见上方 AddBookmarkButton 注释的几何推导。
+                                         见 Section header 里黄星按钮的几何注释。
 
                                          ⚠ 历史教训（2026-09-28）：曾用 C# 运行时测量对齐星心
 
@@ -1765,6 +1785,10 @@
 
                                 <Grid Padding="4,6" ColumnDefinitions="*,Auto,Auto,Auto" HorizontalAlignment="Stretch">
 
+                                <!-- 行高不变量：四颗按钮与编辑框恒 24 高、都行内居中 ⇒ 编辑框显形时隐藏宿主
+                                     撑不高整行，按钮中心在阅读态与编辑态相同，垃圾桶不会上下位移。列宽保留 Auto：
+                                     取消键折叠时该列不占位，笔/勾键随编辑态自然左移一格，垃圾桶右缘恒贴行右端。 -->
+
                                 <!-- Margin 左边 4 与输入框内文字的左内边距一致 ⇒ 进/出编辑态文字不横向跳
                                      （行 Padding 已给 4，输入框再内缩 4 给描边留白，非编辑态必须同步） -->
 
@@ -1772,29 +1796,29 @@
                                                Margin="4,0,0,0"
                                                Foreground="{StaticResource SidebarTextBrush}"/>
 
-                                    <local:SelfDrawnTextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" Submitted="BookmarkEdit_Submitted" Cancelled="BookmarkEdit_Cancelled" CommitRequested="BookmarkEdit_CommitRequested"/>
+                                    <local:SelfDrawnTextBox Grid.Column="0" x:Name="BookmarkEditBox" Text="{x:Bind EditText, Mode=TwoWay}" Visibility="{x:Bind IsEditing, Mode=OneWay}" FontSize="12" Height="24" VerticalAlignment="Center" Submitted="BookmarkEdit_Submitted" Cancelled="BookmarkEdit_Cancelled" CommitRequested="BookmarkEdit_CommitRequested"/>
 
 
 
-                                    <Button Grid.Column="1" Click="BookmarkEdit_Click" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                    <Button Grid.Column="1" Click="BookmarkEdit_Click" Visibility="{x:Bind IsReadOnly, Mode=OneWay}" Padding="4,2" Width="24" Height="24" Background="Transparent" BorderThickness="0" Style="{StaticResource ButtonNoStateMachineStyle}" Loaded="BookmarkRowButton_Loaded" Margin="2,0,0,0">
 
                                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE70F;" FontSize="12"/>
 
                                     </Button>
 
-                                    <Button Grid.Column="1" Click="BookmarkConfirm_Click" Visibility="{x:Bind IsEditing, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                    <Button Grid.Column="1" Click="BookmarkConfirm_Click" Visibility="{x:Bind IsEditing, Mode=OneWay}" Padding="4,2" Width="24" Height="24" Background="Transparent" BorderThickness="0" Style="{StaticResource ButtonNoStateMachineStyle}" Loaded="BookmarkRowButton_Loaded" Margin="2,0,0,0">
 
                                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE73E;" FontSize="12"/>
 
                                     </Button>
 
-                                    <Button Grid.Column="2" Click="BookmarkCancel_Click" Visibility="{x:Bind IsEditing, Mode=OneWay}" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                    <Button Grid.Column="2" Click="BookmarkCancel_Click" Visibility="{x:Bind IsEditing, Mode=OneWay}" Padding="4,2" Width="24" Height="24" Background="Transparent" BorderThickness="0" Style="{StaticResource ButtonNoStateMachineStyle}" Loaded="BookmarkRowButton_Loaded" Margin="2,0,0,0">
 
                                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE711;" FontSize="12"/>
 
                                     </Button>
 
-                                    <Button Grid.Column="3" Click="BookmarkDelete_Click" Padding="6,2" Background="Transparent" BorderThickness="0" Margin="2,0,0,0">
+                                    <Button Grid.Column="3" Click="BookmarkDelete_Click" Padding="4,2" Width="24" Height="24" Background="Transparent" BorderThickness="0" Style="{StaticResource ButtonNoStateMachineStyle}" Loaded="BookmarkRowButton_Loaded" Margin="2,0,0,0">
 
                                         <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE74D;" FontSize="12"/>
 
@@ -1832,6 +1856,46 @@
                         </ListView.ItemTemplate>
 
                     </ListView>
+                    <!-- Board：当前画布里的卡片（白板模式）。
+
+                         排序在 RefreshBoardList 里做（页码 → 靠上 → 靠左），与阅读顺序一致；
+
+                         点击只移动视口、【不选中】卡片 —— 选中会顺带把它置顶（改 nodes 数组并写盘），
+
+                         跳一下就把层级改了不合适。
+
+                         行模板同大纲：纯文字行，走框架默认容器样式 + 容器级 ItemClick
+
+                         （与缩略图 / 书签 / 大纲四条列表同一条路，行内不必有背景也能整行可点）。 -->
+
+                    <ListView Grid.Row="2" x:Name="BoardListView" Visibility="Collapsed" Background="Transparent" Margin="0,0,0,8" IsTabStop="False"
+
+                              SelectionMode="None" IsItemClickEnabled="True" ItemClick="BoardListView_ItemClick">
+
+                        <ListView.ItemTemplate>
+
+                            <DataTemplate x:DataType="local:BoardCardViewModel">
+
+                                <Grid Padding="4,6" ColumnDefinitions="*,Auto" HorizontalAlignment="Stretch">
+
+                                    <TextBlock Grid.Column="0" Text="{x:Bind Title, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SidebarTextBrush}"/>
+
+                                    <TextBlock Grid.Column="1" Text="{x:Bind PageText}" FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource SidebarTextMutedBrush}"/>
+
+                                </Grid>
+
+                            </DataTemplate>
+
+                        </ListView.ItemTemplate>
+
+                    </ListView>
+
+                    <!-- 空态（没挂画布 / 画布是空的 / 卡片全指向不存在的页）：与列表同格、互斥显示，只给一句话；
+                         具体是哪一句由 RefreshBoardList 按当前状态写进 Text。 -->
+
+                    <TextBlock Grid.Row="2" x:Name="BoardEmptyText" Visibility="Collapsed" Margin="16,4,16,0" FontSize="12" TextWrapping="Wrap"
+                               Foreground="{StaticResource SidebarTextMutedBrush}"/>
+
 
                 </Grid>
 
@@ -1891,17 +1955,32 @@
                                       Foreground="{StaticResource SidebarTextBrush}"/>
 
                             <!-- 卸下当前画布（只在这份文档盖着画布时出现，可见性由 UpdateCanvasDetachButton 写）。
-                                 用文字而不是图标：要表达的是"把画布从这份文档上摘下来"，没有哪个单色字形能一眼读出来；
-                                 标题"画布"很短，这一行右侧本来空着，塞一个 20 高的 ghost 按钮不占任何布局。
-                                 高度 20 + VerticalAlignment=Center：与标题文字中心线对齐，也不撑破这行恒定的 24
-                                 （这行同时是"库根最前"的投放带，高度一变，投放带就跟着变）。 -->
-                            <Button x:Name="DetachCanvasButton" Click="DetachCanvas_Click"
-                                    Style="{StaticResource ButtonNoStateMachineStyle}"
-                                    Visibility="Collapsed" MinWidth="0" Height="20" Padding="6,0"
-                                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0"
-                                    HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-                                    FontSize="11"
-                                    Foreground="{StaticResource SidebarTextMutedBrush}"/>
+
+                                 与左栏四颗模式键、标题行黄星【同一套 ToggleButton + 同一个样式 + 同一个视觉接管器】：
+
+                                 底色 / 描边 / 圆角 / hover / pressed 逐档同源，只有尺寸不同；图标 E77A（Unpin）。
+
+                                 无障碍名走 CanvasDetach（本项目所有按钮都不挂悬浮气泡），文案不写进 Content；IsChecked 在点击时复位为 false。
+
+                                 Height=20 + MinHeight=0 + VerticalAlignment=Center：与标题文字中心线对齐，
+
+                                 也不撑破这行恒定的 24（这行同时是"库根最前"的投放带，高度一变，投放带就跟着变）。
+
+                                 FontIcon 字号 12：20 高扣掉描边只剩 18，模式键那档图标字号会裁掉。 -->
+
+                            <ToggleButton x:Name="DetachCanvasButton" Click="DetachCanvas_Click" IsChecked="False"
+
+                                          Style="{StaticResource ToggleButtonNoStateMachineStyle}"
+
+                                          Visibility="Collapsed" MinWidth="0" MinHeight="0" Height="20" Padding="6,0"
+
+                                          HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0"
+
+                                          HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
+
+                                <FontIcon FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets" Glyph="&#xE77A;" FontSize="12"/>
+
+                            </ToggleButton>
 
                         </Grid>
 

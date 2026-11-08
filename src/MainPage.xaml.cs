@@ -124,7 +124,9 @@ public sealed partial class MainPage : Page
 
     private readonly ObservableCollection<BookmarkViewModel> _bookmarks = new();
     private readonly ObservableCollection<OutlineItemViewModel> _outlineItems = new();
-    private enum SidebarMode { Thumbnails, Bookmarks, Outline }
+    // 白板模式列表：只映射"当前画布里有页归属、且页码落在本文档内"的卡片（跳过去能看见的那些）。
+    private readonly ObservableCollection<BoardCardViewModel> _boardCards = new();
+    private enum SidebarMode { Thumbnails, Bookmarks, Outline, Board }
     private SidebarMode _currentSidebarMode = SidebarMode.Thumbnails;
     // （侧边栏开关的阅读位置补偿已整体移到 GpuPageView：CaptureHostResizeAnchor / BeginHostResizeReanchor。
 
@@ -308,6 +310,7 @@ public sealed partial class MainPage : Page
         PageListView.ItemsSource = _pages;
         BookmarkListView.ItemsSource = _bookmarks;
         OutlineListView.ItemsSource = _outlineItems;
+        BoardListView.ItemsSource = _boardCards;
 
         GpuViewer.CurrentPageChanged += (s, idx) =>
         {
@@ -389,7 +392,9 @@ public sealed partial class MainPage : Page
         UpdateSidebarBackground();
         // 画布面板的静态文案在这里落一次；树内容随"打开文档"刷新（见 RefreshCanvasTree）。
         if (CanvasPanelHeaderText != null) CanvasPanelHeaderText.Text = LocalizationService.Get("CanvasPanelTitle");
-        if (DetachCanvasButton != null) DetachCanvasButton.Content = LocalizationService.Get("CanvasDetach");
+        // 图标按钮不写 Content：文案只做无障碍名（不挂悬浮气泡），颜色/光效全交给主题接管器。
+        if (DetachCanvasButton != null)
+            AutomationProperties.SetName(DetachCanvasButton, LocalizationService.Get("CanvasDetach"));
         // 列表的数据源恒为 _canvasRows（拍平后的可见行）：增删都靠差分就地改这个集合，容器与滚动位置才保得住。
         if (CanvasRowList != null) CanvasRowList.ItemsSource = _canvasRows;
         // 拖拽的移动/抬起一律挂在【列表】上，不挂在行上：整个拖拽期间行容器可能被刷新重建，
@@ -667,6 +672,16 @@ public sealed partial class MainPage : Page
         ToggleButtonVisualOverride.Attach(ModeThumbnailsButton);
         ToggleButtonVisualOverride.Attach(ModeBookmarksButton);
         ToggleButtonVisualOverride.Attach(ModeOutlineButton);
+        // 新增的模式键必须逐颗挂上：接管器是按元素注册的，不挂就只剩系统默认外观，
+        // 既没有 hover / pressed 光效，也没有 checked 的主题紫（其余三颗都在上面）。
+        ToggleButtonVisualOverride.Attach(ModeBoardButton);
+        // 标题行黄星复用了模式键的 ToggleButton + 同一套样式，故也走同一个接管器：
+        // 底色 / 描边 / hover / pressed 逐档同源（IsChecked 恒 false ⇒ 不会亮成模式选中态）。
+        ToggleButtonVisualOverride.Attach(AddBookmarkButton);
+        // 右栏标题行的「卸下」同样与模式键同源，只是尺寸小（20 高）；不再走 transparentAtRest 的 ghost 档。
+        // 它默认 Collapsed，模板根要等可见后才实例化；静止色由样式的 ThemeResource 兜住，
+        // 第一次指针 / 点击事件触发 Sync 时接管器会重新解析模板根并接管 hover / pressed。
+        ToggleButtonVisualOverride.Attach(DetachCanvasButton);
         ToggleButtonVisualOverride.Attach(SplitViewToggleButton);
         ToggleButtonVisualOverride.Attach(PenModeButton, key => key switch
         {
@@ -691,11 +706,6 @@ public sealed partial class MainPage : Page
         ButtonVisualOverride.Attach(SaveButton);
         ButtonVisualOverride.Attach(PrintButton);
         ButtonVisualOverride.Attach(SettingsButton);
-        ButtonVisualOverride.Attach(AddBookmarkButton);
-        // 面板标题行那颗"卸下"：静止不要底色（它贴在标题行里，有底色会像一块常驻的脏印），
-        // 只在 hover / 按下时上色 —— 与浮层预设项同一档待遇。
-        ButtonVisualOverride.Attach(DetachCanvasButton, transparentAtRest: true);
-
         // 欢迎页「打开 PDF」按钮：几何驱动 + accent 紫配色，避开原生 VSM flicker。
         ButtonVisualOverride.Attach(OpenPdfButton, accent: true);
 
@@ -858,6 +868,7 @@ public sealed partial class MainPage : Page
             if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeSubtitle");
             if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeOpenButton");
 
+            // 图标按钮只留无障碍名：本项目所有按钮都不挂悬浮气泡。
             if (AddBookmarkButton != null)
                 AutomationProperties.SetName(AddBookmarkButton, GlanceRX.Services.LocalizationService.Get("AddBookmark"));
             ApplySidebarMode(); // refresh header text after localization strings are ready
@@ -1809,6 +1820,7 @@ public sealed partial class MainPage : Page
             {
                 "Bookmarks" => SidebarMode.Bookmarks,
                 "Outline" => SidebarMode.Outline,
+                "Board" => SidebarMode.Board,
                 _ => SidebarMode.Thumbnails,
             };
             ApplySidebarMode();
@@ -1820,6 +1832,7 @@ public sealed partial class MainPage : Page
         ModeThumbnailsButton.IsChecked = _currentSidebarMode == SidebarMode.Thumbnails;
         ModeBookmarksButton.IsChecked = _currentSidebarMode == SidebarMode.Bookmarks;
         ModeOutlineButton.IsChecked = _currentSidebarMode == SidebarMode.Outline;
+        ModeBoardButton.IsChecked = _currentSidebarMode == SidebarMode.Board;
 
         PageListView.Visibility = _currentSidebarMode == SidebarMode.Thumbnails ? Visibility.Visible : Visibility.Collapsed;
         BookmarkListView.Visibility = _currentSidebarMode == SidebarMode.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
@@ -1828,8 +1841,17 @@ public sealed partial class MainPage : Page
         {
             SidebarMode.Bookmarks => GlanceRX.Services.LocalizationService.Get("SidebarBookmarks"),
             SidebarMode.Outline => GlanceRX.Services.LocalizationService.Get("SidebarOutline"),
+            SidebarMode.Board => GlanceRX.Services.LocalizationService.Get("SidebarBoard"),
             _ => GlanceRX.Services.LocalizationService.Get("SidebarThumbnails"),
         };
+
+        // 切到白板模式时重扫一次：卡片可能在别的模式里被改过（自动保存/撤销/换画布都不经过本面板）。
+        if (_currentSidebarMode == SidebarMode.Board) RefreshBoardList();
+        else
+        {
+            BoardListView.Visibility = Visibility.Collapsed;
+            BoardEmptyText.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void PageListView_ItemClick(object sender, ItemClickEventArgs e)
@@ -1970,9 +1992,19 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // 侧边栏头部金色五角星按钮：静默把当前页加为书签。
+    // 白板行跳转：只移动视口，【不选中】卡片（选中会连带把它置顶、改 nodes 顺序并落盘）。
+    private void BoardListView_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is BoardCardViewModel card)
+            GpuViewer?.GoToCanvasRect(card.PageIndex, card.X, card.Y, card.Width, card.Height);
+    }
+
+    // 侧栏标题行右侧的金色五角星：静默把当前页加为书签。
     private void AddBookmark_Click(object sender, RoutedEventArgs e)
     {
+        // 它是 ToggleButton（只为与模式键共用同一套样式/光效），点击会把 IsChecked 自动翻成 true；
+        // 立刻复位，免得黄星亮成"当前模式"的强调紫。同一次输入事件内改回，不会跨帧闪色。
+        if (AddBookmarkButton != null) AddBookmarkButton.IsChecked = false;
         if (_totalPages == 0 || _currentPageIndex < 0 || _currentPageIndex >= _totalPages) return;
         if (_bookmarks.Any(b => b.PageIndex == _currentPageIndex)) return;
         InsertBookmarkSorted(_currentPageIndex,
@@ -1982,7 +2014,7 @@ public sealed partial class MainPage : Page
         ShowSaveToast(GlanceRX.Services.LocalizationService.Get("BookmarkAddedToast"), ToastIconKind.Bookmark);
     }
 
-    /// <summary>Ctrl+D：收藏当前页书签（与侧边栏顶部收藏按钮等效，同样弹收藏气泡）。 有效性守卫（无文档 / 页索引越界 / 已有书签静默早退）由 AddBookmark_Click 自带。</summary>
+    /// <summary>Ctrl+D：收藏当前页书签（与标题行黄星按钮等效，同样弹收藏气泡）。 有效性守卫（无文档 / 页索引越界 / 已有书签静默早退）由 AddBookmark_Click 自带。</summary>
     private void AddBookmark_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         AddBookmark_Click(this, new RoutedEventArgs());
@@ -2026,7 +2058,7 @@ public sealed partial class MainPage : Page
     }
 
     // 书签成员关系的唯一真源是 _bookmarks；缩略图行内的星必须与它保持一致，
-    // 否则从书签列表删除、或从顶部黄星添加后，行内星的两态会与实际书签不符。
+    // 否则从书签列表删除、或从标题行黄星添加后，行内星的两态会与实际书签不符。
     private void SyncBookmarkFlags()
     {
         var marked = new HashSet<int>(_bookmarks.Select(b => b.PageIndex));
@@ -2055,6 +2087,19 @@ public sealed partial class MainPage : Page
         _bookmarks.Insert(at, new BookmarkViewModel { PageIndex = pageIndex, DisplayName = displayName });
     }
 
+    // 书签行按钮活在 DataTemplate 里、没有 x:Name ⇒ MainPage_Loaded 的逐颗注册够不着，
+    // 改由模板的 Loaded 逐颗挂接管器。Tag 只用于保证同一个 Button 实例不重复订阅：
+    // 列表虚拟化回收再挂载时 Loaded 会重来，而接管器自带 Unloaded/Loaded 重注册。
+    private const string BookmarkRowButtonOverrideTag = "BookmarkRowVisualOverride";
+
+    private void BookmarkRowButton_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button b || b.Tag is not null) return;
+        b.Tag = BookmarkRowButtonOverrideTag;
+        // 只画按下档：容器回收复用时悬浮状态没有可靠的重算时机，让它不产生视觉输出。
+        ButtonVisualOverride.Attach(b, transparentAtRest: true, pressOnly: true);
+    }
+
     private void BookmarkEdit_Click(object sender, RoutedEventArgs e)
     {
         if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
@@ -2073,6 +2118,7 @@ public sealed partial class MainPage : Page
         string text = bm.EditText.Trim();
         if (!string.IsNullOrEmpty(text)) bm.DisplayName = text;
         bm.IsEditing = false;
+        RestoreViewerFocusAfterBookmarkEdit();
         _ = SaveBookmarksAsync();
     }
 
@@ -2080,12 +2126,14 @@ public sealed partial class MainPage : Page
     {
         if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
         bm.IsEditing = false;
+        RestoreViewerFocusAfterBookmarkEdit();
     }
 
     private void BookmarkDelete_Click(object sender, RoutedEventArgs e)
     {
         if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
         _bookmarks.Remove(bm);
+        RestoreViewerFocusAfterBookmarkEdit();
         SyncBookmarkFlags();
         _ = SaveBookmarksAsync();
         ShowSaveToast(GlanceRX.Services.LocalizationService.Get("BookmarkRemovedToast"), ToastIconKind.Remove);
@@ -2099,13 +2147,31 @@ public sealed partial class MainPage : Page
 
     private void BookmarkEdit_Cancelled(object sender, RoutedEventArgs e)
     {
-        if (GetBookmarkModel(sender) is BookmarkViewModel bm) bm.IsEditing = false;
+        if (GetBookmarkModel(sender) is not BookmarkViewModel bm) return;
+        bm.IsEditing = false;
+        RestoreViewerFocusAfterBookmarkEdit();
     }
 
     private void BookmarkEdit_CommitRequested(object sender, RoutedEventArgs e)
     {
         // 点 Cancel/Delete 按钮会先把 IsEditing 置假（控件随之折叠、不再可见），故此处按"仍在编辑态"守卫，
         if (GetBookmarkModel(sender) is BookmarkViewModel bm && bm.IsEditing) CommitBookmark(bm);
+    }
+
+    /// 编辑框消失后把键盘焦点交还视口：折叠的自绘编辑框仍持有隐藏宿主的焦点（WinUI 已知行为），
+    /// 字母键会进输入法，页面快捷键也被"焦点在 TextBox 上"的判断挡掉。延迟一拍等框架完成折叠与
+    /// 焦点迁移，再按 GpuPageView 同源手法显式交给 Viewer；焦点已在别处、或又进入编辑时不抢，
+    /// 避免顶掉刚点开的浮层 / 抢走新编辑框的焦点。
+    private void RestoreViewerFocusAfterBookmarkEdit()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            object? focused = FocusManager.GetFocusedElement(XamlRoot);
+            if (focused != null && focused is not TextBox) return;
+            if (_bookmarks.Any(b => b.IsEditing)) return;
+            if (GpuViewer.EnsureViewerFocus()) return;
+            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
+        });
     }
 
     private BookmarkViewModel? GetBookmarkModel(object sender)
@@ -5424,6 +5490,8 @@ public sealed partial class MainPage : Page
         SyncCanvasOutsideRootToast();
         UpdateCanvasDetachButton();
         UpdateCanvasRowBackgrounds();
+        // 换画布 / 换文档都会换掉卡片集合：白板列表在这里跟着重建（RefreshCanvas 只覆盖"改卡片"那条链）。
+        RefreshBoardList();
         // 托管表里可能还压着别的画布：那就照旧立着"未保存"，别让切一下画布就把提示和关窗询问一起抹掉。
         RefreshUnsavedState();
     }
@@ -5565,6 +5633,95 @@ public sealed partial class MainPage : Page
     private void RefreshCanvas()
     {
         GpuViewer?.SetCanvasData(_canvasDoc?.Nodes, _canvasDoc?.Edges);
+        // 只在白板模式可见时重建列表：这条链在拖卡片松手 / 撤销重做时都会跑到，
+        // 列表重建会让 ScrollViewer 回到顶部 —— 面板没开着就没必要付这个代价
+        // （切到白板模式时 ApplySidebarMode 会重扫一次，隐藏期间的改动不会漏）。
+        if (_currentSidebarMode == SidebarMode.Board) RefreshBoardList();
+    }
+
+    /// <summary>重建白板模式的卡片列表。顺序 = 页码 → 靠上 → 靠左（阅读顺序，找卡片最直觉）。
+    /// 只收【带页归属且页码落在本文档内】的卡片：不带 glancePage 的卡片在视口里画不出来，
+    /// 页号越界的卡片既画不出也点不到 —— 列进来就是一条点了没反应的行（越界那张另有左下角常驻提示兜底）。
+    /// 卡片的 x/y/w/h 是【页局部未旋转 PDF 点】，与存储、渲染同一空间，这里原样交给视口换算。</summary>
+    private void RefreshBoardList()
+    {
+        _boardCards.Clear();
+
+        int pages = (int)_totalPages;
+        var nodes = _canvasDoc?.Nodes;
+        int total = nodes?.Count ?? 0;
+        if (nodes != null && pages > 0)
+        {
+            var reachable = new List<CanvasNode>(nodes.Count);
+            foreach (var n in nodes)
+            {
+                if (n != null && n.GlancePage >= 0 && n.GlancePage < pages) reachable.Add(n);
+            }
+
+            reachable.Sort(static (a, b) =>
+            {
+                int cmp = a.GlancePage.CompareTo(b.GlancePage);
+                if (cmp != 0) return cmp;
+                cmp = a.Y.CompareTo(b.Y);
+                if (cmp != 0) return cmp;
+                return a.X.CompareTo(b.X);
+            });
+
+            string untitled = LocalizationService.Get("BoardCardUntitled");
+            string pageFormat = LocalizationService.Get("BoardCardPage");
+            foreach (var n in reachable)
+            {
+                _boardCards.Add(new BoardCardViewModel
+                {
+                    NodeId = n.Id ?? "",
+                    PageIndex = n.GlancePage,
+                    X = n.X, Y = n.Y, Width = n.Width, Height = n.Height,
+                    Title = BoardCardTitle(n.Text, untitled),
+                    PageText = string.Format(pageFormat, n.GlancePage + 1),
+                });
+            }
+        }
+
+        // 空态三句话，别混着说：没挂画布 / 画布是空的 / 有卡片但全都指向不存在的页。
+        bool board = _currentSidebarMode == SidebarMode.Board;
+        bool hasRows = _boardCards.Count > 0;
+        BoardListView.Visibility = board && hasRows ? Visibility.Visible : Visibility.Collapsed;
+        BoardEmptyText.Visibility = board && !hasRows ? Visibility.Visible : Visibility.Collapsed;
+        if (board && !hasRows)
+        {
+            BoardEmptyText.Text = string.IsNullOrEmpty(_currentCanvasPath)
+                ? LocalizationService.Get("BoardEmptyNoCanvas")
+                : total > 0 ? LocalizationService.Get("BoardEmptyNoPages")
+                            : LocalizationService.Get("BoardEmptyNoCards");
+        }
+    }
+
+    /// <summary>卡片编辑框提交文字时只改对应那一行的标题。排序键是 页码/Y/X，改文字不影响顺序，
+    /// 所以不需要整表重建；面板隐藏时这行实例仍在集合里，顺手一起改掉，切回来就是最新的。</summary>
+    private void UpdateBoardCardText(string? nodeId, string? text)
+    {
+        if (string.IsNullOrEmpty(nodeId)) return;
+        foreach (var vm in _boardCards)
+        {
+            if (!string.Equals(vm.NodeId, nodeId, StringComparison.Ordinal)) continue;
+            vm.Title = BoardCardTitle(text, LocalizationService.Get("BoardCardUntitled"));
+            return;
+        }
+    }
+
+    /// <summary>卡片在列表里的标题 = Text 的第一个非空行（卡片正文可多行，180×32 的小卡只露出两行）。
+    /// 空卡片必须给占位文案：留空串会让这一行变成"看不见的一行"，用户以为列表坏了。</summary>
+    private static string BoardCardTitle(string? text, string untitled)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return untitled;
+
+        int nl = text.IndexOf('\n');
+        int cr = text.IndexOf('\r');
+        int cut = nl < 0 ? cr : (cr < 0 ? nl : Math.Min(nl, cr));
+        string first = (cut >= 0 ? text.Substring(0, cut) : text).Trim();
+        if (first.Length == 0) return untitled;
+        // 超长标题只在这里截断：显示侧由 TextTrimming 负责省略号，截断只为不让字符串无界膨胀。
+        return first.Length > 200 ? first.Substring(0, 200) : first;
     }
 
     /// <summary>白板改动只置脏 + 排一次自动保存，不立即落盘：拖拽、点选、改色都是高频操作，
@@ -5942,7 +6099,12 @@ public sealed partial class MainPage : Page
         ShowSaveToast(LocalizationService.Get("CanvasDetached"), ToastIconKind.Success);
     }
 
-    private void DetachCanvas_Click(object sender, RoutedEventArgs e) => DetachCanvas();
+    private void DetachCanvas_Click(object sender, RoutedEventArgs e)
+    {
+        // 与模式键共用 ToggleButton 外观：点击自动翻上的 IsChecked 立刻复位，免得亮成"当前模式"紫。
+        if (DetachCanvasButton != null) DetachCanvasButton.IsChecked = false;
+        DetachCanvas();
+    }
 
     /// <summary>卸下按钮只在"这份文档盖着画布"时出现：没有画布可卸的时候它只会是个失效控件。</summary>
     private void UpdateCanvasDetachButton()
@@ -7198,7 +7360,7 @@ public sealed partial class MainPage : Page
         rows.Add(MenuRow("CanvasRename", "\uE8AC", () => StartCanvasRename(node)));
         // 卸下只对"此刻盖在文档上的那一份"有意义：别的文件没有可卸的东西，条目会是个空动作。
         if (!node.IsFolder && string.Equals(node.FullPath, _currentCanvasPath, StringComparison.OrdinalIgnoreCase))
-            rows.Add(MenuRow("CanvasDetach", "\uE738", DetachCanvas));
+            rows.Add(MenuRow("CanvasDetach", "\uE77A", DetachCanvas));
         rows.Add(MenuRow("CanvasDelete", "\uE74D", () => DeleteCanvasNode(node)));
         rows.Add(SelfDrawnMenuRow.Separator());
         rows.Add(MenuRow("CanvasReveal", "\uE8B7", () => ShellFileOps.RevealInExplorer(node.FullPath, node.IsFolder)));
@@ -7960,6 +8122,9 @@ public sealed partial class MainPage : Page
         string newText = e.Text ?? "";
         if (string.Equals(oldText, newText, StringComparison.Ordinal)) return;
         node.Text = newText;
+        // 侧栏白板列表的行标题是提交时算好的快照，模型改了不会自己跟着变；
+        // 定点推一次通知即可（不必 SetCanvasData，渲染侧拿的是同一批节点引用）。
+        UpdateBoardCardText(e.NodeId, newText);
         PushCanvasHistory(
             undo: () => { node.Text = oldText; RefreshCanvas(); },
             redo: () => { node.Text = newText; RefreshCanvas(); });
@@ -8181,6 +8346,37 @@ public sealed partial class MainPage : Page
         GpuViewer.BeginCanvasEdit(node.Id);
     }
 
+}
+
+/// <summary>白板模式列表的一行。Title 走属性通知：卡片编辑框每 400ms 提交一次文字，
+/// 只改这一行的标题，不整表重建 —— 后者会把列表 ScrollViewer 弹回顶部、打断正在看的上下文。
+/// 其余字段在重建时算好，行内不再推导（x:Bind 一次性绑定即可）。</summary>
+public sealed class BoardCardViewModel : INotifyPropertyChanged
+{
+    private string _title = "";
+
+    public string NodeId { get; set; } = "";      // 与 CanvasNode.Id 对应，供定点更新标题
+    public int PageIndex { get; set; }            // 0-based，与 CanvasNode.GlancePage 同源
+    // 卡片矩形：【页局部未旋转 PDF 点】，与存储 / 渲染同一空间，原样交给视口换算。
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double Width { get; set; }
+    public double Height { get; set; }
+
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (string.Equals(_title, value, StringComparison.Ordinal)) return;
+            _title = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Title)));
+        }
+    }
+
+    public string PageText { get; set; } = "";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class OutlineItemViewModel
