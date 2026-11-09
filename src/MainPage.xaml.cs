@@ -984,6 +984,9 @@ public sealed partial class MainPage : Page
     private void ApplyToolbarAlwaysVisible(bool always)
     {
         _toolbarAlwaysVisible = always;
+        // 显隐模式改变的是「主视图要不要让出顶带」，与工具栏几何无关，必须在这里显式重算两条链路。
+        UpdateViewerTopInset();
+        UpdateCanvasViewportInsets();
         if (TopToolbar == null) return;
 
         if (always)
@@ -3791,6 +3794,7 @@ public sealed partial class MainPage : Page
     {
         if (TopToolbar == null) return;
         CancelToolbarHide();
+        ResetPenCapsuleAfterFade();
         if (TopToolbarHost != null) TopToolbarHost.IsHitTestVisible = true;
         if (TopToolbar.IsHitTestVisible) return;
 
@@ -3811,11 +3815,11 @@ public sealed partial class MainPage : Page
         sb.Children.Add(ya);
         StartToolbarAnim(sb);
 
-        // NOTE: the pen-options capsule is deliberately NOT restored here. Once the toolbar
-        // (pen mode itself is unaffected). Re-showing the bar must not pop the capsule open.
+        // A capsule closed by HideTopToolbar stays closed: re-showing the bar must not pop it
+        // back open. ResetPenCapsuleAfterFade above only clears a fade interrupted mid-flight.
     }
 
-    /// <summary>Runs a toolbar slide animation, stopping any previous one first. A completed Storyboard keeps holding its final value, which would otherwise…</summary>
+    /// <summary>Stops the previous slide before starting a new one: a completed Storyboard keeps holding its final value, which would otherwise override the next animation's writes.</summary>
     private void StartToolbarAnim(Storyboard sb)
     {
         _toolbarAnim?.Stop();
@@ -3823,8 +3827,8 @@ public sealed partial class MainPage : Page
         sb.Begin();
     }
 
-    /// Slides the top toolbar back up and out of view.
-    /// entirely. The toolbar stops intercepting input immediately so it never blocks the
+    /// Slides the top toolbar back up and out of view. The bar and its host stop intercepting
+    /// input immediately, so a hidden toolbar never blocks the content underneath.
     private void HideTopToolbar()
     {
         if (TopToolbar == null) return;
@@ -3835,8 +3839,15 @@ public sealed partial class MainPage : Page
         if (TopToolbarHost != null) TopToolbarHost.IsHitTestVisible = false;
         _pointerInTopToolbar = false;
         _pointerInPenCapsule = false;
-        if (PenOptionsPopup != null)
+        ResetPenCapsuleAfterFade();   // 先收掉上一次淡出留下的半透明状态，再决定是否开始新一轮
+
+        // 胶囊活在独立 Popup 里，工具栏的 Opacity 淡出管不到它。把它的淡出并进同一个 Storyboard，
+        // IsOpen=false 延后到动画结束 —— 立刻关会让 Child 脱树，动画根本没机会播。
+        bool capsuleFading = PenOptionsPopup != null && PenOptionsPopup.IsOpen && PenOptionsCapsule != null;
+        if (!capsuleFading && PenOptionsPopup != null)
             PenOptionsPopup.IsOpen = false;
+        if (capsuleFading)
+            PenOptionsCapsule!.IsHitTestVisible = false;   // 淡出期间别让半透明胶囊继续吃指针
 
         var sb = new Storyboard();
         var ya = new DoubleAnimation
@@ -3844,18 +3855,56 @@ public sealed partial class MainPage : Page
             From = 0,
             To = -TopToolbarHiddenOffset(),
             Duration = new Duration(TimeSpan.FromMilliseconds(UiTransitionMs)),
+            // 退出用 accelerate（先慢后快），与展开的 decelerate 配对：离开时加速才符合动效惯例。
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
         };
         Storyboard.SetTarget(ya, TopToolbarTranslate);
         Storyboard.SetTargetProperty(ya, "Y");
         sb.Children.Add(ya);
+
+        // 同步淡出：60Hz / 150ms 只有 9 帧，accelerate 的末尾单帧位移可达 15px；
+        // 让那几帧在接近透明时经过，人眼便不会把它读成跳动。不设 From，从当前不透明度续接，
+        // 否则工具栏已隐藏时再次收起会闪一下。
+        var fade = new DoubleAnimation
+        {
+            To = 0,
+            Duration = new Duration(TimeSpan.FromMilliseconds(UiTransitionMs))
+        };
+        Storyboard.SetTarget(fade, TopToolbar);
+        Storyboard.SetTargetProperty(fade, "Opacity");
+        sb.Children.Add(fade);
+
+        if (capsuleFading)
+        {
+            var capsuleFade = new DoubleAnimation
+            {
+                To = 0,
+                Duration = new Duration(TimeSpan.FromMilliseconds(UiTransitionMs))
+            };
+            Storyboard.SetTarget(capsuleFade, PenOptionsCapsule);
+            Storyboard.SetTargetProperty(capsuleFade, "Opacity");
+            sb.Children.Add(capsuleFade);
+        }
+
         sb.Completed += (_, __) =>
         {
             // Only park it if nothing re-opened the bar in the meantime.
             if (TopToolbar != null && !TopToolbar.IsHitTestVisible)
                 TopToolbar.Opacity = 0;
+            ResetPenCapsuleAfterFade();
         };
         StartToolbarAnim(sb);
+    }
+
+    /// 胶囊淡出若在结束前被 Stop()，Storyboard.Completed 不会触发：半透明胶囊会连着仍打开的
+    /// Popup 一起挂在屏幕上。以 IsHitTestVisible=false 作「淡出中」标记收尾，幂等；
+    /// 正常打开的胶囊该标志为 true，不会被误关。
+    private void ResetPenCapsuleAfterFade()
+    {
+        if (PenOptionsCapsule == null || PenOptionsCapsule.IsHitTestVisible) return;
+        if (PenOptionsPopup != null) PenOptionsPopup.IsOpen = false;
+        PenOptionsCapsule.Opacity = 1;
+        PenOptionsCapsule.IsHitTestVisible = true;
     }
 
     /// <summary>Distance the bar has to travel to be completely tucked above the clip window.</summary>
@@ -4088,6 +4137,7 @@ public sealed partial class MainPage : Page
         if (TopToolbarHost == null) return;
         TopToolbarHost.Margin = new Thickness(0, -1, 0, 0);
         UpdateTopToolbarClip();
+        UpdateViewerTopInset();
         UpdateCanvasViewportInsets();   // 顶栏几何变了 ⇒ 同步白板胶囊的安全区
     }
 
@@ -4115,6 +4165,7 @@ public sealed partial class MainPage : Page
             _toolbarAnim = null;
             TopToolbarTranslate.Y = -TopToolbarHiddenOffset();
             TopToolbar.Opacity = 0;
+            ResetPenCapsuleAfterFade();   // Stop 会打断胶囊淡出，Completed 不触发
         }
     }
 
@@ -4538,14 +4589,10 @@ public sealed partial class MainPage : Page
     /// 与 UpdateSecondaryPillTopOffset 同一思路：偏移量取自实测的工具栏高度（不硬编码），
     private void UpdateSidebarTopInset()
     {
+        UpdateViewerTopInset();         // 顶栏几何变了 ⇒ 两个 PDF 视图的让位量同批重算
         if (ThumbnailSidebarPanel == null) return;
 
-        double hostTop = TopToolbarHost?.Margin.Top ?? 0;   // 宿主上提 1px 压住标题栏发丝线
-        double barH = TopToolbar?.ActualHeight ?? 0;
-        if (barH <= 0) barH = 48;                           // 首次布局前的兜底，与 TopToolbarHiddenOffset 同值
-
-        // 在工具栏底边之下再留 6px 呼吸空隙，避免标题行紧贴工具栏发丝线。
-        double top = Math.Max(14, hostTop + barH + 6);
+        double top = TopToolbarReservedHeight();
 
         var p = ThumbnailSidebarPanel.Padding;
         if (Math.Abs(p.Top - top) > 0.5)
@@ -4562,6 +4609,35 @@ public sealed partial class MainPage : Page
         UpdateCanvasViewportInsets();   // 顶栏高度变了 ⇒ 白板悬浮胶囊的安全区也要跟着变
     }
 
+    /// 展开工具栏占掉的顶带高度：实测栏高 + 6px 呼吸空隙，最低 14。
+    /// 侧栏、右画布面板与两个 PDF 视图共用同一基准，否则各自的顶线会在同一屏上错开。
+    private double TopToolbarReservedHeight()
+    {
+        double hostTop = TopToolbarHost?.Margin.Top ?? 0;   // 宿主上提 1px 压住标题栏发丝线
+        double barH = TopToolbar?.ActualHeight ?? 0;
+        if (barH <= 0) barH = 48;                           // 首次布局前的兜底，与 TopToolbarHiddenOffset 同值
+        return Math.Max(14, hostTop + barH + 6);
+    }
+
+    /// 常驻显示时把左右两个 PDF 视图整体下移一条工具栏带。PDF 画面、滚动视口与白板浮层
+    /// 同属 GpuPageView，整体移动才不会与页面坐标错位；只挪画面会让覆盖层与页面脱节。
+    /// 自动收起恒为 0：工具栏只在悬停时短暂浮出，收起后本来就不遮挡；若也下移，每次显隐
+    /// 都会重排视口并让阅读位置跳动。
+    private void UpdateViewerTopInset()
+    {
+        double top = _toolbarAlwaysVisible ? TopToolbarReservedHeight() : 0;
+        SetTopMargin(GpuViewer, top);
+        SetTopMargin(GpuViewerRight, top);
+
+        static void SetTopMargin(FrameworkElement? view, double top)
+        {
+            if (view == null) return;
+            var m = view.Margin;
+            if (Math.Abs(m.Top - top) < 0.5) return;
+            view.Margin = new Thickness(m.Left, top, m.Right, m.Bottom);
+        }
+    }
+
     /// 把【盖在 GpuPageView 之上、会吞掉指针】的那层浮层占掉的视口四边量告诉 GpuPageView，
     /// 让白板悬浮胶囊（卡片 / 连线）与文本菜单的视口钳制避开这些带 —— 否则胶囊被钳到它们底下时
     private void UpdateCanvasViewportInsets()
@@ -4573,7 +4649,9 @@ public sealed partial class MainPage : Page
         // 只避让【顶 / 底】两条带：左右两侧只有角上的圆钮占位，为它们整条内缩会把中间的可用宽度也吃掉，
         // 不划算。
         // ⚠ 顶部安全区【仅取工具栏宿主高度本身】，不再把左上「+」/右上「×」圆钮的整条高度并入。
-        double top = BottomOf(TopToolbarHost);
+        // 常驻显示时 GpuViewer 已整体下移到工具栏之下，宿主相对视图的上沿为负：夹到 0，
+        // 否则胶囊会被再让位一次（双重偏移），负值还会把钳制下界推到视口上方。
+        double top = Math.Max(0, BottomOf(TopToolbarHost));
         // 缩放胶囊（BottomZoomPillBorder）靠 Opacity 淡入淡出隐藏，但 Opacity=0 的元素【仍参与命中测试、
         double zoomPillH = BottomZoomPillBorder?.ActualHeight ?? 0;
         if (zoomPillH <= 0 && BottomZoomPillBorder != null && !double.IsNaN(BottomZoomPillBorder.Height))
