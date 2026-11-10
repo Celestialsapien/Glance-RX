@@ -1768,6 +1768,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private bool _isAnnotating;
     private int _annotatingPage = -1;
+    // 标注手势的最后一个视口坐标：PointerCaptureLost 收尾时拿不到指针点，抬笔事件只能复用它。
+    // 橡皮按扫掠段命中，若这里退回 (0,0) 会凭空拉出一条横跨全屏的线段、擦掉沿途所有笔。
+    private Point _lastAnnotVp;
 
     /// <summary>视口坐标 → 命中页 + 页局部坐标（PDF 点，未旋转）。指针不在任何页矩形内时返回 false。
     /// ⚠ 必须与【绘制】同一套视图参数（<see cref="GetViewState"/> + <see cref="_vpW"/><see cref="_vpH"/>）。
@@ -2095,6 +2098,108 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         cache.BoundsVersion = ver;
         bounds = cache.Bounds;
         return true;
+    }
+
+    // 橡皮预览：当前会被整条擦掉的笔。只影响合成阶段的一层加粗半透明线，
+    // 不写进 _annoLayer —— 预览随时撤销，烘进累积层会留下擦不掉的色块。
+    private AnnotationViewModel[] _erasePreview = Array.Empty<AnnotationViewModel>();
+    public bool ErasePreviewActive { get; set; }
+    public double EraseProbeRadiusDip { get; set; } = 5.0;
+    private static readonly Windows.UI.Color ErasePreviewColor = Windows.UI.Color.FromArgb(110, 28, 28, 32);
+    private const double ErasePreviewExtraDip = 4.0;
+
+    /// 替换当前预览集合。整体换引用，渲染线程拿到的永远是某一次完整快照，不会读到半成品；
+    /// 按落笔序排序让同一集合的两次调用稳定命中「无变化」早退，避免每帧白重绘。
+    public void SetErasePreview(IEnumerable<AnnotationViewModel> strokes)
+    {
+        var sorted = new List<AnnotationViewModel>(strokes);
+        sorted.Sort(static (x, y) => x.ZOrder.CompareTo(y.ZOrder));
+        var next = sorted.ToArray();
+        var prev = System.Threading.Volatile.Read(ref _erasePreview);
+        if (prev.Length == next.Length)
+        {
+            bool same = true;
+            for (int i = 0; i < next.Length; i++)
+                if (!ReferenceEquals(prev[i], next[i])) { same = false; break; }
+            if (same) return;
+        }
+        System.Threading.Volatile.Write(ref _erasePreview, next);
+        InvalidateComposite();
+    }
+
+    /// <summary>橡皮扫掠命中：返回被碰到的整条笔。半径按屏幕 DIP 给，逐笔换算到它自己的发起页 ——
+    /// 跨页长笔溢出到别页的那一截同样能被擦到，只用落点页换算会漏掉它。命中判据是扫掠段与
+    /// 【笔的描边带】相交：只判中心线的话，粗笔边缘被碰到却擦不掉。</summary>
+    public List<AnnotationViewModel> EraseSweep(Point fromVp, Point toVp, double radiusDip)
+    {
+        var hits = new List<AnnotationViewModel>();
+        // 直接按页读标注快照，不碰 _inkOrder：那张表由渲染线程重建，而按住 E 时的悬停预览
+        // 每帧都会从 UI 线程调到这里。命中判定只与几何有关，不依赖全局落笔序。
+        for (int page = 0; page < _pages.Count; page++)
+        {
+            var annos = SafeAnnos(page);
+            if (annos == null) continue;
+            foreach (var a in annos)
+            {
+                if (a.Type != AnnotationType.Pen) continue;
+                if (!CanvasViewportToLockedPage(page, fromVp, out double ax, out double ay)) continue;
+                if (!CanvasViewportToLockedPage(page, toVp, out double bx, out double by)) continue;
+                // 半径换算不手算 96/72：把「偏移一个半径的屏幕点」也走同一套页变换，取两点距离。
+                if (!CanvasViewportToLockedPage(page, new Point(fromVp.X + radiusDip, fromVp.Y), out double rx, out double ry)) continue;
+                double r = Math.Sqrt((rx - ax) * (rx - ax) + (ry - ay) * (ry - ay));
+                if (r <= 0) continue;
+                double reach = r + Math.Max(a.Thickness, 0.5) / 2.0;
+
+                CachedAnnoGeometry cache = _annoGeoCache.GetValue(a, _ => new CachedAnnoGeometry());
+                if (!TryStrokeBounds(a, cache, out Rect bounds)) continue;
+                double minX = Math.Min(ax, bx) - reach, maxX = Math.Max(ax, bx) + reach;
+                double minY = Math.Min(ay, by) - reach, maxY = Math.Max(ay, by) + reach;
+                if (bounds.X > maxX || bounds.Y > maxY || bounds.X + bounds.Width < minX || bounds.Y + bounds.Height < minY) continue;
+
+                Point[] pts = a.GetPointsSnapshot();
+                if (pts.Length == 0) continue;
+                if (pts.Length == 1)
+                {
+                    if (PointSegmentDistance(pts[0].X, pts[0].Y, ax, ay, bx, by) <= reach) hits.Add(a);
+                    continue;
+                }
+                for (int i = 1; i < pts.Length; i++)
+                {
+                    if (SegmentDistance(pts[i - 1].X, pts[i - 1].Y, pts[i].X, pts[i].Y, ax, ay, bx, by) <= reach)
+                    {
+                        hits.Add(a);
+                        break;
+                    }
+                }
+            }
+        }
+        return hits;
+    }
+
+    private static double PointSegmentDistance(double px, double py, double ax, double ay, double bx, double by)
+    {
+        double dx = bx - ax, dy = by - ay;
+        double len2 = dx * dx + dy * dy;
+        if (len2 < 1e-12) return Math.Sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
+        double t = Math.Clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0.0, 1.0);
+        double qx = ax + t * dx, qy = ay + t * dy;
+        return Math.Sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy));
+    }
+
+    /// <summary>两线段最短距离：先判相交（相交即 0），否则取四个端点到对方线段的最小距离。
+    /// 共线重叠的情况由端点距离兜住，同样是 0。</summary>
+    private static double SegmentDistance(double p1x, double p1y, double p2x, double p2y,
+                                          double ax, double ay, double bx, double by)
+    {
+        double d1 = (p2x - p1x) * (ay - p1y) - (p2y - p1y) * (ax - p1x);
+        double d2 = (p2x - p1x) * (by - p1y) - (p2y - p1y) * (bx - p1x);
+        double d3 = (bx - ax) * (p1y - ay) - (by - ay) * (p1x - ax);
+        double d4 = (bx - ax) * (p2y - ay) - (by - ay) * (p2x - ax);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+        return Math.Min(
+            Math.Min(PointSegmentDistance(p1x, p1y, ax, ay, bx, by), PointSegmentDistance(p2x, p2y, ax, ay, bx, by)),
+            Math.Min(PointSegmentDistance(ax, ay, p1x, p1y, p2x, p2y), PointSegmentDistance(bx, by, p1x, p1y, p2x, p2y)));
     }
 
     /// <summary>这一页上是否还有笔压在视口里。整条笔挂在发起页、可以越出页框很远（跨到第 3 页之后），
@@ -8438,6 +8543,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             }
         }
 
+        // 橡皮预览盖在标注层之上：命中待擦的整条笔压暗变粗，按下前的悬停与拖拽中都能看出选中了哪条。
+        if (AnnotationsVisible) DrawErasePreview(ds, z, inkPages);
+
         // ---- 白板层：卡片 + 连线。与页位图/标注绘于同一交换链，随页面旋转/缩放。
         if (AnnotationsVisible && HasCanvasContent())
             DrawWhiteboardLayer(ds, z, visible);
@@ -8471,6 +8579,45 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             DrawAnnotation(ds, a);
         }
         ds.Transform = saved;
+    }
+
+    /// 命中待擦的整条笔盖一层加粗半透明线：颜色压暗、面积变粗，用于指示「这条会被整条删掉」。
+    /// 位于标注层之后、白板层之前，页变换按每笔的发起页逐页切换。
+    private void DrawErasePreview(CanvasDrawingSession ds, double z,
+        List<(GpuPageInfo Page, Rect Dest)> visible)
+    {
+        var preview = System.Threading.Volatile.Read(ref _erasePreview);
+        if (preview.Length == 0) return;
+        var saved = ds.Transform;
+        int curPage = -1;
+        foreach (var a in preview)
+        {
+            if (!TryFindPageDest(visible, a.PageIndex, out Rect dest)) continue;
+            if (a.PageIndex != curPage) { ApplyPageTransform(ds, dest, z); curPage = a.PageIndex; }
+            DrawEraseHighlight(ds, a, z);
+        }
+        ds.Transform = saved;
+    }
+
+    private void DrawEraseHighlight(CanvasDrawingSession ds, AnnotationViewModel a, double z)
+    {
+        Point[] pts = a.GetPointsSnapshot();
+        if (pts.Length == 0) return;
+        float thick = (float)Math.Max(a.Thickness, 0.5);
+        // 外扩按屏幕 DIP 给，换回页局部：线宽在页变换里会乘 z，手算 96/72 在旋转/缩放态会偏。
+        float extra = (float)(ErasePreviewExtraDip / Math.Max(z, 0.01));
+        float w = thick + 2f * extra;
+        if (pts.Length == 1)
+        {
+            ds.FillCircle((float)pts[0].X, (float)pts[0].Y, w / 2f, ErasePreviewColor);
+            return;
+        }
+        using var pb = new Microsoft.Graphics.Canvas.Geometry.CanvasPathBuilder(ds);
+        pb.BeginFigure((float)pts[0].X, (float)pts[0].Y);
+        for (int i = 1; i < pts.Length; i++) pb.AddLine((float)pts[i].X, (float)pts[i].Y);
+        pb.EndFigure(Microsoft.Graphics.Canvas.Geometry.CanvasFigureLoop.Open);
+        using var geo = Microsoft.Graphics.Canvas.Geometry.CanvasGeometry.CreatePath(pb);
+        ds.DrawGeometry(geo, Vector2.Zero, ErasePreviewColor, w, PenStrokeStyle);
     }
 
     /// <summary>文档坐标 → 屏幕坐标的居中补偿量：内容小于视口时居中，否则为 0。
@@ -9053,6 +9200,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             {
                 _isAnnotating = true;
                 _annotatingPage = pageIdx;
+                _lastAnnotVp = pt.Position;
                 this.CapturePointer(e.Pointer);
                 StartPenCursorHold();          // 笔画中途停手也保持手势状态（以物理按键为准，避免被 PointerCaptureLost 清掉）
                 AnnotationPointerPressed?.Invoke(this,
@@ -9222,6 +9370,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
     private void Viewer_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        // 按住 E 且还没落笔：用同一套整笔命中做悬停预览，按下前就能看出会擦到哪条。
+        // 手势一旦开始 _isAnnotating 置真，这里让位给 MainPage 累积的待删集合，避免两套来源互相覆盖。
+        if (ErasePreviewActive && AnnotationInputActive && !_isAnnotating)
+        {
+            var probe = e.GetCurrentPoint(Viewer).Position;
+            SetErasePreview(EraseSweep(probe, probe, EraseProbeRadiusDip));
+        }
+
         // 命中元素是滚动条(或其子部件)→视为 chrome，交还真实箭头；其余交给下方画笔逻辑。
 
         // 触发键待接态：引导线动端始终跟手。本机制【不捕获指针】，下面各分支照常跑（仍可翻页、仍可悬停选目标）。
@@ -9348,13 +9504,14 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (_isAnnotating)
         {
             var pt = e.GetCurrentPoint(Viewer);
+            _lastAnnotVp = pt.Position;
             // 整条笔始终按【发起页】换算：坐标可以越出页框（负数 / 超页高都是正常轨迹），
             // 于是同一笔的点串天然连续 —— 跨页、跨页间空隙、越过左右页边，全都只是这条线的延伸，
             // 不需要按页切开、也不需要事后补线；整条随发起页同一套变换绘制，旋转与换布局时更不会拉出假线。
             if (CanvasViewportToLockedPage(_annotatingPage, pt.Position, out double px, out double py))
             {
                 AnnotationPointerMoved?.Invoke(this,
-                    new GpuAnnotationPointerArgs { PageIndex = _annotatingPage, X = px, Y = py });
+                    new GpuAnnotationPointerArgs { PageIndex = _annotatingPage, X = px, Y = py, ViewerPosition = pt.Position });
             }
             e.Handled = true;
             return;
@@ -9598,7 +9755,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             StopPenCursorHold();
             if (CanvasViewportToLockedPage(page, pt.Position, out double px, out double py))
                 AnnotationPointerReleased?.Invoke(this,
-                    new GpuAnnotationPointerArgs { PageIndex = page, X = px, Y = py });
+                    new GpuAnnotationPointerArgs { PageIndex = page, X = px, Y = py, ViewerPosition = pt.Position });
             e.Handled = true;
             return;
         }
@@ -9686,7 +9843,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             _isAnnotating = false;
             _annotatingPage = -1;
             AnnotationPointerReleased?.Invoke(this,
-                new GpuAnnotationPointerArgs { PageIndex = page, X = 0, Y = 0 });
+                new GpuAnnotationPointerArgs { PageIndex = page, X = 0, Y = 0, ViewerPosition = _lastAnnotVp });
         }
     }
 

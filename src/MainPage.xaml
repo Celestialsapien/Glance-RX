@@ -865,7 +865,16 @@
 
                     <ToggleButton x:Name="PenModeButton" Click="PenMode_Click" Padding="10,6" Style="{StaticResource ToggleButtonNoStateMachineStyle}">
 
-                        <SymbolIcon Symbol="Edit"/>
+                        <!-- 两颗图标并排、只切 Visibility：接管器写的是 ContentPresenter 的本地前景，
+                             按钮自身的 Foreground 只是模板绑定源，不随 Checked/Pressed 变化。绑相邻
+                             SymbolIcon 的有效前景，E 的符号才与画笔符号同色，颜色与光效一概不动。 -->
+                        <Grid>
+                            <SymbolIcon x:Name="PenModeGlyphPen" Symbol="Edit"/>
+                            <FontIcon x:Name="PenModeGlyphEraser" Visibility="Collapsed"
+                                      FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                      Glyph="&#xED62;"
+                                      Foreground="{Binding ElementName=PenModeGlyphPen, Path=Foreground}"/>
+                        </Grid>
 
                     </ToggleButton>
 

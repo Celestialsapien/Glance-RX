@@ -136,6 +136,27 @@ public sealed partial class MainPage : Page
     private bool _isDrawingHighlight = false;
     private AnnotationViewModel? _activeHighlight;
 
+    /// 橡皮的有效半径（屏幕 DIP）：不随粗细档、不随缩放变化，判定圆心就是光标热区。
+    private const double EraseRadiusDip = 5.0;
+    /// 橡皮光标的位图边长（像素）：系统按位图原尺寸显示、不缩放，热区取中心。
+    private const int EraseCursorDiameter = 28;
+    /// 虚线外圆环的实线段数；空白段同数，实空等长交替。
+    private const int EraseCursorDashCount = 8;
+    /// 白点外沿相对虚线环内边缘的缩进（像素）；0 = 正好贴住，不留缝也不让环咬进来。
+    private const double EraseCursorDotInset = 0.0;
+
+    // 画笔模式内的临时工具：按住 E 擦、按住 H 短暂用阅读模式，松键即回画笔。
+    // 键状态单独轮询，不能挂在圆环作用域定时器上 —— H 期间圆环定时器会被 ExitPenRingMode 停掉。
+    private bool _tempEraserActive;
+    private bool _tempReadActive;
+    private bool _tempReadCapsuleWasOpen;
+    private Microsoft.UI.Xaml.DispatcherTimer? _tempModeTimer;
+    private readonly HashSet<AnnotationViewModel> _eraseHits = new();
+    private bool _eraseGestureActive;
+    private Point _lastEraseVp;
+
+    private enum PenCursorVariant { Pen, Eraser }
+
     /// <summary>笔画的最小收点间距（页局部 PDF 点）。0.6pt 在 100% 缩放下不到 1 像素：
     /// 慢写时手在原地的抖动会被滤掉，快写几乎不丢点，于是点数 ≈ 线条长度 ÷ 该值，
     /// 而不是跟着采样频率走。只决定"这个点收不收"，从不改动已收的点。</summary>
@@ -245,6 +266,8 @@ public sealed partial class MainPage : Page
     private IntPtr _hRingCursor;        // 当前画笔圆环光标句柄（GDI 资源，需 DestroyIcon 释放）
     private int _ringDiameter;
     private string? _ringColorHex;
+    private PenCursorVariant _ringVariant = PenCursorVariant.Pen;
+    private PenCursorVariant _ringBuiltVariant = PenCursorVariant.Pen;
     private bool _ringInstalled;
     private int _ringSuppressCount;     // 临时抑制圆环的引用计数（如关闭窗口"保存更改"对话框、Ctrl+S 另存为对话框期间，整个窗口恢复原生鼠标）。支持嵌套。
     private Microsoft.UI.Xaml.DispatcherTimer? _ringScopeTimer;
@@ -2661,6 +2684,9 @@ public sealed partial class MainPage : Page
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetCursor(IntPtr hCursor);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetCursor();
+
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr LoadCursor(IntPtr hInstance, int lpCursorName);
 
@@ -3169,9 +3195,27 @@ public sealed partial class MainPage : Page
         {
             IntPtr copy = CopyIcon(_hRingCursor);
             if (copy != IntPtr.Zero && SetSystemCursor(copy, (uint)IDC_ARROW))
+            {
                 _ringInstalled = true;
+                ForceRingCursorDisplay();
+            }
             else if (copy != IntPtr.Zero)
                 DestroyIcon(copy);
+        }
+        catch { }
+    }
+
+    // SetSystemCursor 只换系统光标表里的资源，不改当前已经显示的那一个：框架忙帧不泵 SetCursor 时，
+    // 系统挂出的 busy 指针会一直留在屏幕上，直到鼠标移动触发 WM_SETCURSOR 才被圆环顶掉。
+    // 取箭头槽的当前内容重设一次即可 —— 右键缩放等临时替换箭头槽的光标也照样被正确刷新，不会硬塞圆环；
+    // 框架每帧仍按命中元素重设自己的光标，这里只在当前显示的光标不是箭头槽内容时插一手，不与它反复对拉。
+    private void ForceRingCursorDisplay()
+    {
+        try
+        {
+            IntPtr arrow = LoadCursor(IntPtr.Zero, IDC_ARROW);
+            if (arrow == IntPtr.Zero || GetCursor() == arrow) return;
+            SetCursor(arrow);
         }
         catch { }
     }
@@ -3200,7 +3244,9 @@ public sealed partial class MainPage : Page
         bool shouldRing = IsPointerInRingZone();
         if (shouldRing && !_ringInstalled)
             InstallRingAsSystemCursor();
-        else if (!shouldRing && _ringInstalled)
+        else if (shouldRing)
+            ForceRingCursorDisplay();   // 已装环也要兜底：busy 指针可能在装环之后才被系统挂出
+        else if (_ringInstalled)
         {
             RestoreSystemArrow();
             _ringInstalled = false;
@@ -3595,15 +3641,98 @@ public sealed partial class MainPage : Page
             // ⚠ 不能用 1bpp AND 掩码做二值透明：系统会走"掩码模式"忽略 alpha（黑边 + 上下左右发平）。
             int diameter = (int)Math.Clamp(_activeThickness * 3.0, 14, 20);
             string colorHex = ResolveActiveColorHex();
-            if (_hRingCursor != IntPtr.Zero && _ringDiameter == diameter && _ringColorHex == colorHex)
+            if (_hRingCursor != IntPtr.Zero && _ringDiameter == diameter && _ringColorHex == colorHex
+                && _ringBuiltVariant == _ringVariant)
                 return;
             DestroyRingCursor();
-            var (r, g, b) = ParseRgb(colorHex);
-            _hRingCursor = CreateRingCursorHandle(diameter, r, g, b);
+            if (_ringVariant == PenCursorVariant.Eraser)
+            {
+                _hRingCursor = CreateEraserCursorHandle();
+                // GDI 位图创建失败时不能交出空句柄；白色实线圆环同样是不带主题色的擦除反馈。
+                if (_hRingCursor == IntPtr.Zero) _hRingCursor = CreateRingCursorHandle(diameter, 255, 255, 255);
+            }
+            else
+            {
+                var (r, g, b) = ParseRgb(colorHex);
+                _hRingCursor = CreateRingCursorHandle(diameter, r, g, b);
+            }
             _ringDiameter = diameter;
             _ringColorHex = colorHex;
+            _ringBuiltVariant = _ringVariant;
         }
         catch { }
+    }
+
+    /// 橡皮光标：黑色虚线外圆环 + 贴住其内边缘的实心白点。纯解析几何直接写 BGRA，不经字形光栅化，
+    /// 因此不受字体可用性、字号 hinting 和内部镂空影响；热区取中心，与擦除作用点对齐。
+    /// 白点只有纯色填充 + 0.5px 解析 AA，外沿不叠任何深色描边/投影；必须【先于】虚线环提交，
+    /// 否则环的实线段会咬进白点边缘，看起来像断续黑边。虚线按圆周角度等分实/空段。
+    /// 白点的颜色通道恒 255、只把覆盖率写进 alpha：半透明边缘若把颜色也乘上覆盖率，
+    /// 被按直通 alpha 合成时就会显成灰色，看起来正是一圈描边。黑环恒 0 不受影响。
+    private IntPtr CreateEraserCursorHandle()
+    {
+        const int d = EraseCursorDiameter;
+        const double halfWidth = 1.1;
+        const double margin = 1.0;
+        double ringR = d / 2.0 - halfWidth - margin;
+        double dotR = ringR - halfWidth - EraseCursorDotInset;
+        double center = d / 2.0;
+
+        int stride = d * 4;
+        byte[] color = new byte[stride * d];
+        // 1bpp DIB 扫描行必须按 4 字节对齐；按 2 字节算会让 CreateBitmap 读到的行整体错位。
+        int maskRowBytes = ((d + 31) / 32) * 4;
+        byte[] mask = new byte[maskRowBytes * d];
+
+        for (int y = 0; y < d; y++)
+        {
+            for (int x = 0; x < d; x++)
+            {
+                double dx = x - (center - 0.5), dy = y - (center - 0.5);
+                double dist = Math.Sqrt(dx * dx + dy * dy);
+                int dst = (d - 1 - y) * stride + x * 4;
+
+                // 白点先于虚线环提交：整块纯白，外沿只有 AA 过渡，不带任何深色边。
+                double covDot = Math.Clamp(dotR + 0.5 - dist, 0.0, 1.0);
+                if (covDot > 0)
+                {
+                    color[dst] = 255; color[dst + 1] = 255; color[dst + 2] = 255;
+                    color[dst + 3] = (byte)Math.Round(covDot * 255.0);
+                    continue;
+                }
+
+                double covRing = Math.Clamp(halfWidth + 0.5 - Math.Abs(dist - ringR), 0.0, 1.0);
+                if (covRing <= 0) continue;
+                // 实/空段按角度交替，段边界是径向直边，虚线端帽天然平齐。
+                double ang = Math.Atan2(dy, dx);
+                if (ang < 0) ang += Math.PI * 2;
+                int seg = (int)(ang / (Math.PI * 2) * (EraseCursorDashCount * 2));
+                if ((seg & 1) != 0) continue;
+                color[dst] = 0; color[dst + 1] = 0; color[dst + 2] = 0;
+                color[dst + 3] = (byte)Math.Round(covRing * 255.0);
+            }
+        }
+
+        IntPtr hColor = CreateBitmap(d, d, 1, 32, color);
+        IntPtr hMask = CreateBitmap(d, d, 1, 1, mask);
+        if (hColor == IntPtr.Zero || hMask == IntPtr.Zero)
+        {
+            if (hColor != IntPtr.Zero) DeleteObject(hColor);
+            if (hMask != IntPtr.Zero) DeleteObject(hMask);
+            return IntPtr.Zero;
+        }
+        ICONINFO info = new ICONINFO
+        {
+            fIcon = 0,
+            xHotspot = d / 2,
+            yHotspot = d / 2,
+            hbmMask = hMask,
+            hbmColor = hColor
+        };
+        IntPtr hCursor = CreateIconIndirect(ref info);
+        DeleteObject(hColor);
+        DeleteObject(hMask);
+        return hCursor;
     }
 
     private void DestroyRingCursor()
@@ -3692,6 +3821,14 @@ public sealed partial class MainPage : Page
 
     private void SetEditMode(EditMode mode, bool openPenOptions = true)
     {
+        // 真正离开画笔模式时清掉临时工具状态；H 的临时阅读态借本函数切换，不能在这里被清掉。
+        if (mode != EditMode.Pen && !_tempReadActive)
+        {
+            ApplyTempEraser(false);
+            _eraseGestureActive = false;
+            _eraseHits.Clear();
+            GpuViewer?.SetErasePreview(Array.Empty<AnnotationViewModel>());
+        }
         _currentMode = mode;
         ReadModeButton.IsChecked = (mode == EditMode.Navigate);
         PenModeButton.IsChecked = (mode == EditMode.Pen);
@@ -3738,6 +3875,107 @@ public sealed partial class MainPage : Page
         else
             ExitPenRingMode();
 
+        EnsureTempModeTimer(mode == EditMode.Pen || _tempReadActive);
+    }
+
+    // ── 画笔模式内的临时工具（按住 E 擦 / 按住 H 短暂阅读）─────────────────────────
+
+    /// 物理键状态直接问系统，不靠 KeyDown/KeyUp 自己维护 bool：Alt-Tab、失焦、IME 吞掉 KeyUp 都能自愈。
+    private static bool IsTempKeyDown(VirtualKey key)
+        => (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+
+    // 焦点在文本输入里时 E/H 是打字，不是工具键；按钮/列表不算，否则点过模式键后就再也切不动了。
+    private bool IsTextInputFocused()
+    {
+        try
+        {
+            var focused = FocusManager.GetFocusedElement(XamlRoot);
+            return focused is TextBox or PasswordBox or RichEditBox;
+        }
+        catch { return false; }
+    }
+
+    private void EnsureTempModeTimer(bool running)
+    {
+        if (!running)
+        {
+            _tempModeTimer?.Stop();
+            return;
+        }
+        if (_tempModeTimer == null)
+        {
+            _tempModeTimer = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(25) };
+            _tempModeTimer.Tick += TempModeTimer_Tick;
+        }
+        _tempModeTimer.Start();
+    }
+
+    private void TempModeTimer_Tick(object? sender, object e)
+    {
+        bool blocked = !IsPointerInsideOurWindow() || _ringSuppressCount > 0 ||
+                       IsTextInputFocused() || GpuViewer.IsCanvasEditing;
+
+        if (_tempReadActive)
+        {
+            // 拖拽没结束就松 H：等物理鼠标键全抬起再切回，否则会在 _isDragPanning 中途换掉输入开关。
+            // blocked 只挡「切入」临时模式，不强制「切出」：平移拖出窗口时鼠标仍按着，此刻切回会打断手势。
+            if (!IsTempKeyDown(VirtualKey.H) && !CursorInterop.AnyMouseButtonDown()) EndTempReadMode();
+            return;
+        }
+
+        if (_currentMode != EditMode.Pen) return;
+        // 手势已经在擦或在画时不允许切入临时阅读：输入开关会在拖拽中途被换掉。
+        if (!_eraseGestureActive && !_isDrawingHighlight &&
+            !blocked && IsTempKeyDown(VirtualKey.H))
+        {
+            BeginTempReadMode();
+            return;
+        }
+        // 视觉（符号/光标）始终跟着物理键；擦除行为本身由 _eraseGestureActive 锁到抬笔。
+        ApplyTempEraser(!_tempReadActive && !blocked && IsTempKeyDown(VirtualKey.E));
+    }
+
+    private void BeginTempReadMode()
+    {
+        if (_tempReadActive) return;
+        ApplyTempEraser(false);
+        _tempReadCapsuleWasOpen = PenOptionsPopup?.IsOpen == true;
+        _tempReadActive = true;
+        // 复用阅读模式的整套输入配置：按钮激活态、AnnotationsBackground、AnnotationInputActive、
+        // 默认鼠标（ExitPenRingMode）与双击适应全部跟着切换，不另写一套分支。
+        SetEditMode(EditMode.Navigate);
+    }
+
+    private void EndTempReadMode()
+    {
+        if (!_tempReadActive) return;
+        _tempReadActive = false;
+        // 期间用户可能已自己点了画笔键；别再重复切一次模式，只收掉临时标记。
+        if (_currentMode != EditMode.Pen)
+            SetEditMode(EditMode.Pen, openPenOptions: _tempReadCapsuleWasOpen);
+    }
+
+    /// 只切画笔键里的符号与光标变体；按钮本身、样式、接管器写进去的颜色/光效一概不动。
+    private void ApplyTempEraser(bool on)
+    {
+        if (_tempEraserActive == on) return;
+        _tempEraserActive = on;
+        SetPenModeEraserGlyph(on);
+        _ringVariant = on ? PenCursorVariant.Eraser : PenCursorVariant.Pen;
+        if (_penRingActive) RefreshRingCursor();
+        if (GpuViewer != null)
+        {
+            GpuViewer.ErasePreviewActive = on;
+            GpuViewer.EraseProbeRadiusDip = EraseRadiusDip;
+            if (!on) GpuViewer.SetErasePreview(Array.Empty<AnnotationViewModel>());
+        }
+    }
+
+    private void SetPenModeEraserGlyph(bool on)
+    {
+        if (PenModeGlyphPen == null || PenModeGlyphEraser == null) return;
+        PenModeGlyphPen.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+        PenModeGlyphEraser.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// Positions the pen-options Popup so its capsule drops down just below the Pen button.
@@ -4428,6 +4666,8 @@ public sealed partial class MainPage : Page
     /// <summary>当前处于「激活」态的模式键（阅读 / 画笔 / 白板）恒定保留：它既是当前模式的唯一指示、 又是退出该模式的入口，画笔模式下颜色胶囊还按它的位置定位。故只有「未激活」的模式键可被收纳。</summary>
     private bool IsToolbarItemActiveMode(FrameworkElement el)
     {
+        // H 的临时阅读态会把激活标志翻到阅读键；画笔键仍须留在主栏，否则窄窗口重排会把它收进「…」。
+        if (_tempReadActive && el == PenModeButton) return true;
         if (el == ReadModeButton) return ReadModeButton.IsChecked == true;
         if (el == PenModeButton) return PenModeButton.IsChecked == true;
         if (el == CanvasModeButton) return CanvasModeButton.IsChecked == true;
@@ -5249,6 +5489,19 @@ public sealed partial class MainPage : Page
         if (_currentMode == EditMode.Navigate) return;
         if (e.PageIndex < 0 || e.PageIndex >= _pages.Count) return;
 
+        // 按下瞬间锁定本次手势：中途松 E 或按 H 都不会把「擦」切成「画」，直到抬笔才收尾。
+        // 直接问物理键，不等 25ms 轮询结果 —— 按 E 后立刻落笔、或松 E 后立刻落笔都不能判错。
+        bool erasing = IsTempKeyDown(VirtualKey.E) && !IsTempKeyDown(VirtualKey.H)
+                       && !IsTextInputFocused() && !GpuViewer.IsCanvasEditing;
+        if (erasing)
+        {
+            _eraseGestureActive = true;
+            _eraseHits.Clear();
+            _lastEraseVp = e.ViewerPosition;
+            CollectEraseHits(e.ViewerPosition);
+            return;
+        }
+
         // 落笔即建画布文件：这份画布从此既承载卡片，也承载墨迹，两者共用同一条保存路径
         // （置脏 → 防抖 500ms → 写回画布文件 → 失败出口），不再有"保存时烘进 PDF"这回事。
         MarkCanvasDirty();
@@ -5274,6 +5527,11 @@ public sealed partial class MainPage : Page
     /// 越过左右页边）都只当作同一条线的延伸 —— 不切段、不裁剪、不补线。</summary>
     private void GpuAnnotation_Moved(object? sender, GpuAnnotationPointerArgs e)
     {
+        if (_eraseGestureActive)
+        {
+            CollectEraseHits(e.ViewerPosition);
+            return;
+        }
         if (!_isDrawingHighlight || _activeHighlight == null) return;
 
         // 每次移动都重排自动保存：500ms 的语义是"手停下多久才写盘"，笔还在走就不能写。
@@ -5296,6 +5554,15 @@ public sealed partial class MainPage : Page
 
     private void GpuAnnotation_Released(object? sender, GpuAnnotationPointerArgs e)
     {
+        if (_eraseGestureActive)
+        {
+            CollectEraseHits(e.ViewerPosition);
+            _eraseGestureActive = false;
+            CommitEraseGesture();
+            // 抬笔后预览不再代表待删集合；仍按着 E 时下一次悬停探测会立刻重建。
+            GpuViewer.SetErasePreview(Array.Empty<AnnotationViewModel>());
+            return;
+        }
         if (!_isDrawingHighlight) return;
         _isDrawingHighlight = false;
 
@@ -5313,6 +5580,28 @@ public sealed partial class MainPage : Page
 
         _activeHighlight = null;
         GpuViewer.InvalidateOverlayThrottled();
+    }
+
+    /// 收集一次扫掠命中的整条笔。用上一帧到这一帧的线段而不是当前点，快速拖动才不会从两帧之间漏过去。
+    private void CollectEraseHits(Point vp)
+    {
+        foreach (var a in GpuViewer.EraseSweep(_lastEraseVp, vp, EraseRadiusDip)) _eraseHits.Add(a);
+        _lastEraseVp = vp;
+        GpuViewer.SetErasePreview(_eraseHits);
+    }
+
+    /// 一次拖拽只入一条历史；显隐复用 SetInkStrokeVisible，它自带置脏与整层重烘
+    /// （不整层重烘会留下已擦掉笔的幽灵像素，磁盘也会停在擦除前的状态）。
+    private void CommitEraseGesture()
+    {
+        if (_eraseHits.Count == 0) return;
+        var removed = _eraseHits.ToList();
+        _eraseHits.Clear();
+        foreach (var a in removed) SetInkStrokeVisible(a, false);
+        _annotationRedo.Clear();
+        _annotationHistory.Add(new EditorHistoryEntry(
+            undo: () => { foreach (var a in removed) SetInkStrokeVisible(a, true); },
+            redo: () => { foreach (var a in removed) SetInkStrokeVisible(a, false); }));
     }
 
     /// <summary>新起一条笔：它自己记着发起页，于是"这一笔属于哪页"不需要外部再维护一份映射。
@@ -5597,6 +5886,8 @@ public sealed partial class MainPage : Page
     private void LoadInkCore(List<CanvasInk>? ink)
     {
         foreach (var p in _pages) p.Annotations.Clear();
+        // 预览里存的是笔对象引用：换文档后它们已不在任何页的标注表里，留着会画出幽灵高亮。
+        GpuViewer?.SetErasePreview(Array.Empty<AnnotationViewModel>());
         _inkZSeq = 0;   // 落笔序号按文件里的先后重排：文件已经是按序号写的，见 SyncInkToCanvasDoc
         if (ink == null) return;
 
