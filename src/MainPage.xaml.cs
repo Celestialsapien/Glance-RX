@@ -4849,23 +4849,29 @@ public sealed partial class MainPage : Page
         UpdateCanvasViewportInsets();   // 顶栏高度变了 ⇒ 白板悬浮胶囊的安全区也要跟着变
     }
 
-    /// 展开工具栏占掉的顶带高度：实测栏高 + 6px 呼吸空隙，最低 14。
-    /// 侧栏、右画布面板与两个 PDF 视图共用同一基准，否则各自的顶线会在同一屏上错开。
-    private double TopToolbarReservedHeight()
+    /// 工具栏底边在页面坐标里的位置：宿主上提 1px + 实测栏高，不含呼吸空隙。
+    /// 首次布局前用设计高度兜底，与 TopToolbarHiddenOffset 同值。
+    private double TopToolbarBarHeight()
     {
         double hostTop = TopToolbarHost?.Margin.Top ?? 0;   // 宿主上提 1px 压住标题栏发丝线
         double barH = TopToolbar?.ActualHeight ?? 0;
-        if (barH <= 0) barH = 48;                           // 首次布局前的兜底，与 TopToolbarHiddenOffset 同值
-        return Math.Max(14, hostTop + barH + 6);
+        if (barH <= 0) barH = 48;
+        return Math.Max(14, hostTop + barH);
     }
 
-    /// 常驻显示时把左右两个 PDF 视图整体下移一条工具栏带。PDF 画面、滚动视口与白板浮层
-    /// 同属 GpuPageView，整体移动才不会与页面坐标错位；只挪画面会让覆盖层与页面脱节。
+    /// 侧栏、右画布面板的让位：标题行不能紧贴工具栏发丝线，在工具栏底边之下再留 6px 呼吸空隙。
+    /// 这 6px 只给有标题行的面板用；PDF 视图走 UpdateViewerTopInset 的精确值。
+    private double TopToolbarReservedHeight() => TopToolbarBarHeight() + 6;
+
+    /// 常驻显示时把左右两个 PDF 视图整体下移，顶边再上提 1px 压住工具栏底部的发丝线。
+    /// 少这 1px，发丝线与 PDF 白纸之间就露出窗口底色，深色档下是一条 1px 黑线。
+    /// PDF 画面、滚动视口与白板浮层同属 GpuPageView，整体移动才不会与页面坐标错位；
+    /// 只挪画面会让覆盖层与页面脱节。
     /// 自动收起恒为 0：工具栏只在悬停时短暂浮出，收起后本来就不遮挡；若也下移，每次显隐
     /// 都会重排视口并让阅读位置跳动。
     private void UpdateViewerTopInset()
     {
-        double top = _toolbarAlwaysVisible ? TopToolbarReservedHeight() : 0;
+        double top = _toolbarAlwaysVisible ? TopToolbarBarHeight() - 1 : 0;
         SetTopMargin(GpuViewer, top);
         SetTopMargin(GpuViewerRight, top);
 
