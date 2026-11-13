@@ -443,6 +443,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double targetX = index == pages.Count - 1
                 ? EndScrollOffset(horizontal: true, z)
                 : Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z);
+            // 页首对齐在文档尾部可能超出可滚范围；先钳到上界，避免 ChangeView 落地后再回写一次 _live*。
+            GetScrollBounds(z, out double maxXH, out _, Viewer.ViewportWidth, Viewer.ViewportHeight);
+            targetX = Math.Min(targetX, maxXH);
             // 直接跳：必须把滚动弹簧权威镜像同步到新位置（并同步 _live*），否则后续 GoToPageSmooth
             // 会先弹回旧页再动画过去（Home/End 后首按 PgDn/PgUp 会多跳一次）。
             _scrollH.Reset(targetX);
@@ -463,6 +466,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double targetY = index == pages.Count - 1
                 ? EndScrollOffset(horizontal: false, z)
                 : Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
+            // 同上：尾部页首对齐超出可滚范围时先钳上界，让播种值与 ChangeView 落地值一致。
+            GetScrollBounds(z, out _, out double maxYV, Viewer.ViewportWidth, Viewer.ViewportHeight);
+            targetY = Math.Min(targetY, maxYV);
             _scrollV.Reset(targetY);
             _scrollH.Reset(_liveH);
             SyncLiveView(_liveH, targetY, z);
@@ -1541,6 +1547,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         _rotation = (_rotation + 90) % 360;
         RecomputeLayout(pages);
+        if (haveAnchor)
+        {
+            // 旋转换了 extent，滚动条显隐会跟着改视口；先落地布局再把视口快照统一到实测值，
+            // 否则锚点反解的 centerX/centerY 与 SetVisibleRangeFor 用的不是同一套几何。
+            // 只在锚点有效时刷新：UpdateLayout 会触发 ViewChanged 回写 _live*，
+            // 而页首对齐兜底（GoToPage）要读旋转前的 _live*。
+            try { Viewer.UpdateLayout(); } catch { }
+            double rotVpW = Viewer.ViewportWidth, rotVpH = Viewer.ViewportHeight;
+            if (rotVpW <= 0 || rotVpH <= 0) { rotVpW = 1000; rotVpH = 800; }
+            lock (_lock) { _vpW = rotVpW; _vpH = rotVpH; }
+        }
 
         if (haveAnchor && RestoreViewAnchor(anchor, z, fx, fy, out double hOff, out double vOff))
         {
@@ -1613,8 +1630,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double needCenterX = vpW / 2.0 - (fx - 0.5) * uw;
         double needCenterY = vpH / 2.0 - (fy - 0.5) * uh;
         var lr = p.LayoutRect;
-        hOff = Math.Max(0, centerX + lr.X * z + lr.Width * z / 2.0 - needCenterX);
-        vOff = Math.Max(0, centerY + lr.Y * z + lr.Height * z / 2.0 - needCenterY);
+        // 反解偏移必须落在 ScrollViewer 的合法范围内。只钳下界时 ChangeView 会再钳一次上界，
+        // 而 SyncLiveView / SetVisibleRangeFor 用的是未钳值 ⇒ 落地后 idle 回写让画面再跳一次。
+        GetScrollBounds(z, out double maxH, out double maxV, vpW, vpH);
+        hOff = Math.Clamp(centerX + lr.X * z + lr.Width * z / 2.0 - needCenterX, 0, maxH);
+        vOff = Math.Clamp(centerY + lr.Y * z + lr.Height * z / 2.0 - needCenterY, 0, maxV);
         return true;
     }
 
@@ -2729,9 +2749,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return rows;
     }
 
-    /// <summary>文档首尾虚空的屏幕高度。虚空按文档 DIP 定义，随缩放同比放大。
-    /// 存档的纵向偏移以真实内容顶端为 0，视图内部一律用 ScrollViewer 原生偏移，两者只差这一个量；
-    /// 滚动、缩放、重锚、旋转本身不需要知道它存在。</summary>
+    /// <summary>文档首尾虚空的屏幕高度：按文档 DIP 定义，随缩放同比放大。
+    /// 存档纵向偏移以真实内容顶端为 0，视图内部用 ScrollViewer 原生偏移，两者只差这一个量。</summary>
     private static double EdgePadScaled(double zoom) => EdgeOverscrollDip * zoom;
 
     /// <summary>按当前【布局方向 + 旋转角】计算文档布局（90/270° 交换宽高），并撑出滚动范围。UI 线程调用。 两种方向都是连续布局：所有页首尾相接串在主轴上，交叉轴居中。</summary>
@@ -2739,7 +2758,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         bool swap = _rotation == 90 || _rotation == 270;
         // 首尾虚空属于文档布局：撑高 Spacer 并把页矩形整体下移 pad，
-        // 滚动范围、缩放锚点、可见页与重锚便都由现成公式吃到它，不必另设偏移特例。
+        // 滚动范围、缩放锚点、可见页与重锚便都由现成公式吃到它。
         double pad = EdgeOverscrollDip;
 
         if (_layoutMode == PageLayoutMode.HorizontalContinuous)
