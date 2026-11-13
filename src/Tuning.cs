@@ -77,6 +77,11 @@ PageGap = 16.0                    # 默认 16.0 | default | 区间 [0, 256]
 # Horizontal page gap (DIP). Valid [0, 256], non-negative.
 PageGapHorizontal = 6.0           # 默认 6.0 | default | 区间 [0, 256]
 
+# 文档首尾各一段虚空（文档 DIP，随缩放同比放大）。有效区间 [0, 256]。
+# 虚空属于文档布局：被浮层工具栏盖住的首页内容能滚出来，尾页留有等高对称虚空。
+# Void padding at both ends of the document (document DIP, scales with zoom).
+EdgeOverscrollDip = 50.0          # 默认 50.0 | default | 区间 [0, 256]
+
 # ---------------- 光栅并发 / Raster concurrency ----------------
 # 自动模式并发上限：auto = min(物理核-1, 本值)。有效区间 [1, 1024]，且必须 <= RenderWorkerHardCap。
 # Auto ceiling: auto = min(physical cores - 1, this). Valid [1, 1024]; must be <= HardCap.
@@ -194,6 +199,7 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
         public static double DocMargin = 16.0;              // 文档四周留白 / doc margin around content
         public static double PageGap = 16.0;
         public static double PageGapHorizontal = 6.0;       // 横向连续布局页间距 / horizontal page gap (cross-page feel)
+        public static double EdgeOverscrollDip = 50.0;      // 文档首尾虚空高度（文档 DIP，随缩放同比放大）
 
         // ---------------- 缓存与光栅 / Cache & raster ----------------
         public static int RenderWorkerCap = 16;             // 自动模式上限：auto = min(逻辑核数, 本值)
@@ -324,6 +330,7 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
                 case "DocMargin": DocMargin = ParseDouble(raw, DocMargin); break;
                 case "PageGap": PageGap = ParseDouble(raw, PageGap); break;
                 case "PageGapHorizontal": PageGapHorizontal = ParseDouble(raw, PageGapHorizontal); break;
+                case "EdgeOverscrollDip": EdgeOverscrollDip = ParseDouble(raw, EdgeOverscrollDip); break;
                 case "RenderWorkerCap": RenderWorkerCap = ParseInt(raw, RenderWorkerCap); break;
                 case "RenderWorkerHardCap": RenderWorkerHardCap = ParseInt(raw, RenderWorkerHardCap); break;
                 case "ScrollSpringOmega": ScrollSpringOmega = ParseDouble(raw, ScrollSpringOmega); break;
@@ -401,6 +408,7 @@ ToolbarHideDelayMs = 180          # 默认 180 | default | 区间 [0, 10000]
             DoubleTapIgnoreMs = ClampD(DoubleTapIgnoreMs, 0.0, 2000.0);
             UiTransitionMs = ClampD(UiTransitionMs, 0.0, 2000.0);
             ToolbarHideDelayMs = ClampD(ToolbarHideDelayMs, 0.0, 10000.0);
+            EdgeOverscrollDip = ClampD(EdgeOverscrollDip, 0.0, 256.0);
         }
 
         private static double ParseDouble(string raw, double fallback)

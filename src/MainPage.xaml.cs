@@ -1007,8 +1007,8 @@ public sealed partial class MainPage : Page
     private void ApplyToolbarAlwaysVisible(bool always)
     {
         _toolbarAlwaysVisible = always;
-        // 显隐模式改变的是「主视图要不要让出顶带」，与工具栏几何无关，必须在这里显式重算两条链路。
-        UpdateViewerTopInset();
+        // 主视图几何恒不变：PDF 一直铺到标题栏下沿，工具栏只是浮层。切换显示方式不重排视口，
+        // 阅读位置与已滚出的上下留白都不动；这里只需按新显隐态重算白板胶囊的安全区。
         UpdateCanvasViewportInsets();
         if (TopToolbar == null) return;
 
@@ -4375,7 +4375,6 @@ public sealed partial class MainPage : Page
         if (TopToolbarHost == null) return;
         TopToolbarHost.Margin = new Thickness(0, -1, 0, 0);
         UpdateTopToolbarClip();
-        UpdateViewerTopInset();
         UpdateCanvasViewportInsets();   // 顶栏几何变了 ⇒ 同步白板胶囊的安全区
     }
 
@@ -4829,7 +4828,6 @@ public sealed partial class MainPage : Page
     /// 与 UpdateSecondaryPillTopOffset 同一思路：偏移量取自实测的工具栏高度（不硬编码），
     private void UpdateSidebarTopInset()
     {
-        UpdateViewerTopInset();         // 顶栏几何变了 ⇒ 两个 PDF 视图的让位量同批重算
         if (ThumbnailSidebarPanel == null) return;
 
         double top = TopToolbarReservedHeight();
@@ -4860,29 +4858,8 @@ public sealed partial class MainPage : Page
     }
 
     /// 侧栏、右画布面板的让位：标题行不能紧贴工具栏发丝线，在工具栏底边之下再留 6px 呼吸空隙。
-    /// 这 6px 只给有标题行的面板用；PDF 视图走 UpdateViewerTopInset 的精确值。
+    /// 这 6px 只给有标题行的面板用；PDF 视图是滚动视口，靠上下留白避让浮层，不吃这层静态让位。
     private double TopToolbarReservedHeight() => TopToolbarBarHeight() + 6;
-
-    /// 常驻显示时把左右两个 PDF 视图整体下移，顶边再上提 1px 压住工具栏底部的发丝线。
-    /// 少这 1px，发丝线与 PDF 白纸之间就露出窗口底色，深色档下是一条 1px 黑线。
-    /// PDF 画面、滚动视口与白板浮层同属 GpuPageView，整体移动才不会与页面坐标错位；
-    /// 只挪画面会让覆盖层与页面脱节。
-    /// 自动收起恒为 0：工具栏只在悬停时短暂浮出，收起后本来就不遮挡；若也下移，每次显隐
-    /// 都会重排视口并让阅读位置跳动。
-    private void UpdateViewerTopInset()
-    {
-        double top = _toolbarAlwaysVisible ? TopToolbarBarHeight() - 1 : 0;
-        SetTopMargin(GpuViewer, top);
-        SetTopMargin(GpuViewerRight, top);
-
-        static void SetTopMargin(FrameworkElement? view, double top)
-        {
-            if (view == null) return;
-            var m = view.Margin;
-            if (Math.Abs(m.Top - top) < 0.5) return;
-            view.Margin = new Thickness(m.Left, top, m.Right, m.Bottom);
-        }
-    }
 
     /// 把【盖在 GpuPageView 之上、会吞掉指针】的那层浮层占掉的视口四边量告诉 GpuPageView，
     /// 让白板悬浮胶囊（卡片 / 连线）与文本菜单的视口钳制避开这些带 —— 否则胶囊被钳到它们底下时
@@ -4894,9 +4871,8 @@ public sealed partial class MainPage : Page
 
         // 只避让【顶 / 底】两条带：左右两侧只有角上的圆钮占位，为它们整条内缩会把中间的可用宽度也吃掉，
         // 不划算。
-        // ⚠ 顶部安全区【仅取工具栏宿主高度本身】，不再把左上「+」/右上「×」圆钮的整条高度并入。
-        // 常驻显示时 GpuViewer 已整体下移到工具栏之下，宿主相对视图的上沿为负：夹到 0，
-        // 否则胶囊会被再让位一次（双重偏移），负值还会把钳制下界推到视口上方。
+        // ⚠ 顶部安全区只取工具栏宿主本身：左上「+」/右上「×」圆钮只占角，并入它们的整条高度会把中间可用区也吃掉。
+        // 工具栏淡出到 Opacity=0 时 BottomOf 返回 0，安全区自动放开；显形时按宿主底边让位。
         double top = Math.Max(0, BottomOf(TopToolbarHost));
         // 缩放胶囊（BottomZoomPillBorder）靠 Opacity 淡入淡出隐藏，但 Opacity=0 的元素【仍参与命中测试、
         double zoomPillH = BottomZoomPillBorder?.ActualHeight ?? 0;
