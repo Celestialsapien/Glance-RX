@@ -4882,6 +4882,10 @@ public sealed partial class MainPage : Page
         double zoomPillBottomMargin = BottomZoomPill?.Margin.Bottom ?? 10;
         double bottom = zoomPillH + zoomPillBottomMargin;
         GpuViewer.SetCanvasViewportInsets(0, top, 0, bottom);
+        // 容器上下余量恒等于工具栏底边，任何缩放下首页顶部都能滚出被浮层盖住的部分。
+        double edgePad = TopToolbarBarHeight();
+        GpuViewer.SetEdgePad(edgePad);
+        if (GpuViewerRight != null) GpuViewerRight.SetEdgePad(edgePad);
 
         // 元素在 GpuViewer 坐标系里的上/下沿；不可见 / 已淡出 / 已脱树 ⇒ 0（= 不占边）。
         double BottomOf(FrameworkElement? el)

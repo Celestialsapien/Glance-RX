@@ -129,6 +129,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private double _visRight = 4000;
     private double _dpiScale = 1.0;
 
+    // 容器上下各留的屏幕余量（DIP 屏幕像素），等于常驻工具栏底边高度；只随工具栏尺寸变，不随缩放变。
+    // 余量只进 Spacer 的 extent 与「文档→视口」的平移，LayoutRect 恒为纯 PDF 局部坐标。
+    private double _edgePadPx = 47.0;
+
+    // PDF 内容自身的文档高度（不含容器余量），由 RecomputeLayout 维护。
+    private double _docContentH;
+
     private bool _didInitialFit;
 
     // ================= 统一运动引擎（vsync 帧泵 + 临界阻尼弹簧） =================
@@ -462,10 +469,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         else
         {
-            // 末页保护：无论缩放倍率，最后一页的【页尾】永远贴着视口底部。小缩放下整页短于视口，
+            // 末页保护：页尾贴视口底部；其余页按页顶对齐，小缩放时还要补上容器顶部基准。
             double targetY = index == pages.Count - 1
                 ? EndScrollOffset(horizontal: false, z)
-                : Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
+                : Math.Max(0, EffectiveCenterY(z, Viewer.ViewportHeight)
+                    + (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
             // 同上：尾部页首对齐超出可滚范围时先钳上界，让播种值与 ChangeView 落地值一致。
             GetScrollBounds(z, out _, out double maxYV, Viewer.ViewportWidth, Viewer.ViewportHeight);
             targetY = Math.Min(targetY, maxYV);
@@ -519,11 +527,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var pc = xf.Map(x0 + cw / 2.0, y0 + ch / 2.0);
         double targetX = pc.X - vpW / 2.0;
         double targetY = pc.Y - vpH / 2.0;
-        // 尚未布局时 Spacer 为 NaN ⇒ "> 0" 不成立 ⇒ 当 0 处理，等同"不夹上限"。
-        double docW = Spacer.Width > 0 ? Spacer.Width : 0;
-        double docH = Spacer.Height > 0 ? Spacer.Height : 0;
-        targetX = Math.Clamp(targetX, 0, Math.Max(0, docW * z - vpW));
-        targetY = Math.Clamp(targetY, 0, Math.Max(0, docH * z - vpH));
+        GetScrollBounds(z, out double maxGoX, out double maxGoY, vpW, vpH);
+        targetX = Math.Clamp(targetX, 0, maxGoX);
+        targetY = Math.Clamp(targetY, 0, maxGoY);
 
         // ③ 与 GoToPage 同一套落地顺序：一次原子提交（缩放与偏移同时下发），
         //    之后立刻按目标播种可见范围并排队渲染，不等 ViewChanged 异步回吐。
@@ -597,15 +603,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         float current = Viewer.ZoomFactor;
         if (current <= 0 || Math.Abs(target - current) < 0.001f) return;
 
-        // 视口中心在文档坐标系的位置 → 换算新缩放下的偏移并 clamp 到可滚动范围。
+        // 视口中心在文档坐标系的位置 → 换算新缩放下的偏移并夹到可滚动范围。
+        // 文档坐标必须先扣掉容器顶部基准，否则整页落入视口时锚点算偏。
         double cx = (Viewer.HorizontalOffset + Viewer.ViewportWidth / 2.0) / current;
-        double cy = (Viewer.VerticalOffset + Viewer.ViewportHeight / 2.0) / current;
-        double extentW = (double.IsNaN(Spacer.Width) ? 0 : Spacer.Width) * target;
-        double extentH = (double.IsNaN(Spacer.Height) ? 0 : Spacer.Height) * target;
-        double maxX = Math.Max(0, extentW - Viewer.ViewportWidth);
-        double maxY = Math.Max(0, extentH - Viewer.ViewportHeight);
+        double cy = (Viewer.VerticalOffset + Viewer.ViewportHeight / 2.0
+            - EffectiveCenterY(current, Viewer.ViewportHeight)) / current;
+        GetScrollBounds(target, out double maxX, out double maxY,
+            Viewer.ViewportWidth, Viewer.ViewportHeight);
         double newX = Math.Clamp(cx * target - Viewer.ViewportWidth / 2.0, 0, maxX);
-        double newY = Math.Clamp(cy * target - Viewer.ViewportHeight / 2.0, 0, maxY);
+        double newY = Math.Clamp(cy * target + EffectiveCenterY(target, Viewer.ViewportHeight)
+            - Viewer.ViewportHeight / 2.0, 0, maxY);
 
         Viewer.ChangeView(newX, newY, target, disableAnimation: true);
     }
@@ -626,12 +633,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 用画布视口快照（与偏移配套），不自读 Viewer.* —— 滚动条出现/消失瞬间两者会错开一帧。
         double vpW = _vpW;
         double vpH = _vpH;
+        double cy = EffectiveCenterY(zoom, vpH);
         lock (_lock)
         {
             _visLeft = hOff / zoom;
             _visRight = (hOff + vpW) / zoom;
-            _visTop = vOff / zoom;
-            _visBottom = (vOff + vpH) / zoom;
+            _visTop = (vOff - cy) / zoom;
+            _visBottom = (vOff + vpH - cy) / zoom;
         }
     }
 
@@ -728,13 +736,49 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
+    // 容器总高的屏幕像素：PDF 内容缩放后的高度 + 上下两段固定余量。
+    // 余量是屏幕常量，不随 zoom 变；只有 PDF 那一项随倍率变。
+    private double ExtentScreenH(double zoom) => _docContentH * zoom + 2 * _edgePadPx;
+
+    // PDF 内容顶端在 vOff=0 时的屏幕 Y：取「内容居中补偿」与「固定顶部余量」的较大者，
+    // 保证无论内容比视口矮多少，顶部都至少留 _edgePadPx 像素可滚。
+    private double EffectiveCenterY(double zoom, double vpH)
+        => Math.Max((vpH - _docContentH * zoom) / 2.0, _edgePadPx);
+
+    // 平滑缩放下 Viewer.ZoomFactor 要到落定才变；按每帧插值倍率改 Spacer，原生可滚动范围
+    // 会与解析范围逐帧错开并反复重排。按目标倍率一次排好可避免落定时倍率已变、extent 仍旧夹断偏移。
+    // 右键拖拽逐帧下发真实倍率，必须跟插值走。
+    private double SpacerZoomFor(double zoom)
+        => (_isSmoothZooming && !_zoomFromRightDrag && _zoomAnimTargetFactor > 0)
+            ? _zoomAnimTargetFactor : zoom;
+
+    // ScrollViewer 的 extent = Spacer 文档高度 × 真实倍率。要让屏幕上恒留 2*pad 像素，
+    // 文档高度里必须写 2*pad/zoom（放大镜机制）；这个值随缩放同步，屏幕余量本身恒为 pad。
+    // 只改 Spacer.Height，不重排 LayoutRect，也不触碰 _live*。
+    private void UpdateSpacerExtent(double zoom)
+    {
+        double z = SpacerZoomFor(zoom);
+        if (z <= 0) return;
+        double want = _docContentH + 2 * _edgePadPx / z;
+        if (want <= 0) return;
+        if (double.IsNaN(Spacer.Height) || Math.Abs(Spacer.Height - want) > 0.01)
+            Spacer.Height = want;
+    }
+
+    /// <summary>按当前工具栏底边设置固定的上下屏幕余量。只在布局变化时调用，值不变则直接返回。</summary>
+    public void SetEdgePad(double px)
+    {
+        if (px <= 0 || Math.Abs(px - _edgePadPx) < 0.5) return;
+        _edgePadPx = px;
+        UpdateSpacerExtent(CurrentZoom);
+    }
+
     /// 给定缩放下的合法滚动范围（等价于 ScrollViewer 的 Scrollable{Width,Height}）。
     private void GetScrollBounds(double zoom, out double maxH, out double maxV, double vpW, double vpH)
     {
         double w = double.IsNaN(Spacer.Width) ? 0 : Spacer.Width;
-        double hh = double.IsNaN(Spacer.Height) ? 0 : Spacer.Height;
         maxH = Math.Max(0, w * zoom - vpW);
-        maxV = Math.Max(0, hh * zoom - vpH);
+        maxV = Math.Max(0, ExtentScreenH(zoom) - vpH);
     }
 
     /// 末页/末列对齐用的"文档末端"滚动偏移（缩放后像素，等价 GetScrollBounds 的对应轴上界）。
@@ -747,9 +791,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void GetCenterOffsets(double zoom, out double centerX, out double centerY, double vpW, double vpH)
     {
         double extentW = (double.IsNaN(Spacer.Width) ? 0 : Spacer.Width) * zoom;
-        double extentH = (double.IsNaN(Spacer.Height) ? 0 : Spacer.Height) * zoom;
         centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        centerY = EffectiveCenterY(zoom, vpH);
     }
 
     /// 预测给定缩放落地后 ScrollViewer 的实际视口尺寸（= 控件尺寸 − Auto 滚动条占位）。
@@ -762,7 +805,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double sbW = Math.Max(0, ctrlW - Viewer.ViewportWidth);
         double sbH = Math.Max(0, ctrlH - Viewer.ViewportHeight);
         double cw = (double.IsNaN(Spacer.Width) ? 0 : Spacer.Width) * zoom;
-        double ch = (double.IsNaN(Spacer.Height) ? 0 : Spacer.Height) * zoom;
+        double ch = ExtentScreenH(zoom);
         double vpW = ctrlW, vpH = ctrlH;
         for (int i = 0; i < 2; i++)
         {
@@ -963,6 +1006,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double zp = _zoomAnimCurrentFactor, hp = _zoomAnimCurrentH, vp = _zoomAnimCurrentV;
         if (zp <= 0) zp = _liveZoom > 0 ? _liveZoom : 1.0;
         SetVisRect(hp, vp, zp);
+        // 打断后倍率落在插值态，Spacer 高度必须先改配并排完布局，再下发改倍率的 ChangeView；
+        // 否则 ScrollViewer 仍按旧 extent 夹断偏移。
+        UpdateSpacerExtent(zp);
+        try { Viewer.UpdateLayout(); } catch { }
         CommitViewWithGuard(hp, vp, zp); // 带兜底：视图无变化时不开提交窗口，避免标志卡死锁死输入
         SyncLiveView(hp, vp, zp);
         QueueVisiblePages();
@@ -1217,8 +1264,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             if (IsHorizontalLayout)
             {
-                // 按真实内容高度适应：首尾虚空是滚动余量，不参与倍率计算。
-                double contentH = Spacer.Height - EdgeOverscrollDip * 2;
+                // 按 PDF 内容高度适应：容器上下余量是滚动余量，不参与倍率计算。
+                double contentH = _docContentH;
                 if (double.IsNaN(contentH) || contentH <= 0 || Viewer.ViewportHeight <= 0) return 100;
                 return Math.Clamp(Viewer.ViewportHeight / contentH, MinZoom, MaxZoom) * 100.0;
             }
@@ -1247,7 +1294,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _hostResizeZ0 = z0;
         _hostResizeVpW0 = vpW0;
         _hostResizeDocLeftX = (h0 - cx0) / z0;
-        _hostResizeDocTopY = (v0 - cy0) / z0;
+        // 捕获工具栏底边（屏幕 y=P）那行对应的文档坐标；取视口上缘会让缩放时该行缩进工具栏。
+        _hostResizeDocTopY = (v0 + _edgePadPx - cy0) / z0;
         _hostResizeCaptureValid = true;
     }
 
@@ -1287,8 +1335,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         StopSmoothZoom();
         _zoomAnimCommitting = false;
 
-        // 锚点 = 视口【左缘 × 上缘】= (0,0)：两条要钉的边线本身就取作锚点，
-        _zAnimAnchor = new Point(0, 0);
+        // X 锚视口左缘 (0)，左右边线由 z1 按 vpW 比例缩放钉住。
+        // Y 锚工具栏底边（屏幕 y=P）：它是判断 PDF 是否被遮的判据线，缩放时该行恒不动；
+        // 取视口上缘会让内容缩小时朝 y=0 收缩、缩进工具栏。
+        // 最顶 v0=0 时 contentY=0、v(z)=cy-P=0，PDF 顶边同样停在 y=P。
+        _zAnimAnchor = new Point(0, _edgePadPx);
         _zAnimContentX = _hostResizeDocLeftX;
         _zAnimContentY = _hostResizeDocTopY;
         _zoomAnimTargetFactor = z1;
@@ -1349,10 +1400,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     public void GetCurrentViewState(out double zoomPercent, out double horizontalOffset, out double verticalOffset, out int pageIndex)
     {
         // 直接返回实时镜像：窗口隐藏/卸载时 Viewer.VerticalOffset 会被布局清零，不能读它。
-        // 纵向偏移剥掉首尾虚空，换成以真实内容顶端为 0 的存档坐标；负值表示停在上方虚空区。
+        // 纵向偏移剥掉容器顶部余量，换成以真实内容顶端为 0 的存档坐标；负值表示停在上方余量区。
         zoomPercent = _liveZoom * 100.0;
         horizontalOffset = _liveH;
-        verticalOffset = _liveV - EdgePadScaled(_liveZoom);
+        verticalOffset = _liveV - _edgePadPx;
         pageIndex = CurrentPageIndex;
     }
 
@@ -1406,8 +1457,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var vs = _pendingRestore;
         float target = (float)Math.Clamp(vs.ZoomPercent / 100.0, MinZoom, MaxZoom);
         double h = Math.Max(0, vs.HorizontalOffset);
-        // 存档以真实内容顶端为 0，加回首尾虚空换成 ScrollViewer 原生偏移；负值＝上方虚空区，合法。
-        double v = vs.VerticalOffset + EdgePadScaled(target);
+        // 存档以真实内容顶端为 0，加回容器余量换成 ScrollViewer 原生偏移；负值＝上方余量区，合法。
+        double v = vs.VerticalOffset + _edgePadPx;
 
         // 校验：视口已精确落定到目标（异步 ChangeView 已生效、无后续回拽）→ 直接收尾清除待还原。
         if (Math.Abs(Viewer.ZoomFactor - target) <= 0.002 &&
@@ -1591,9 +1642,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         lock (_lock) { vpW = _vpW; vpH = _vpH; hOff = _liveH; vOff = _liveV; }
         if (vpW <= 0 || vpH <= 0) return false;
 
-        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
-        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        GetCenterOffsets(z, out double centerX, out double centerY, vpW, vpH);
         var lr = pages[pageNo].LayoutRect;
         var dest = new Rect(centerX + lr.X * z - hOff, centerY + lr.Y * z - vOff,
             lr.Width * z, lr.Height * z);
@@ -1618,9 +1667,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (vpW <= 0 || vpH <= 0) return false;
 
         var p = pages[pageNo];
-        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
-        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        GetCenterOffsets(z, out double centerX, out double centerY, vpW, vpH);
 
         // 未旋转页帧的页尺寸（DIP）：旋转不改变页内容尺寸，只是呈现时被交换。
         double uw = p.WidthPoints * 96.0 / 72.0 * z;
@@ -1950,9 +1997,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private Rect ComputePageDest(int pageIdx, double z, double hOff, double vOff)
     {
         double vpW = _vpW, vpH = _vpH;
-        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
-        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        GetCenterOffsets(z, out double centerX, out double centerY, vpW, vpH);
         var lr = _pages[pageIdx].LayoutRect;
         return new Rect(centerX + lr.X * z - hOff, centerY + lr.Y * z - vOff,
             lr.Width * z, lr.Height * z);
@@ -2672,7 +2717,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             var rv = _pendingRestore;
             double rvZ = Math.Clamp(rv.ZoomPercent / 100.0, MinZoom, MaxZoom);
             if (rvZ <= 0) rvZ = 1.0;
-            SyncLiveView(Math.Max(0, rv.HorizontalOffset), rv.VerticalOffset + EdgePadScaled(rvZ), rvZ);
+            SyncLiveView(Math.Max(0, rv.HorizontalOffset), rv.VerticalOffset + _edgePadPx, rvZ);
         }
 
         TryInitialFit();
@@ -2683,7 +2728,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             var rv = _pendingRestore;
             double rvZ = Math.Clamp(rv.ZoomPercent / 100.0, MinZoom, MaxZoom);
             if (rvZ <= 0) rvZ = 1.0;
-            SetVisibleRangeFor(Math.Max(0, rv.HorizontalOffset), rv.VerticalOffset + EdgePadScaled(rvZ), rvZ);
+            SetVisibleRangeFor(Math.Max(0, rv.HorizontalOffset), rv.VerticalOffset + _edgePadPx, rvZ);
         }
         else
         {
@@ -2701,10 +2746,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (pages.Count == 0) return 0;
         double zoom = Math.Clamp(vs.ZoomPercent / 100.0, MinZoom, MaxZoom);
         if (zoom <= 0) zoom = 1.0;
-        // 页矩形已整体下移 pad，推导主轴起点时也要按同一文档坐标加上它。
+        // 页矩形用纯 PDF 局部坐标，存档偏移也以真实内容顶端为 0。
         double lead = IsHorizontalLayout
             ? Math.Max(0, vs.HorizontalOffset) / zoom
-            : vs.VerticalOffset / zoom + EdgeOverscrollDip;
+            : vs.VerticalOffset / zoom;
         int best = pages[pages.Count - 1].Index;
         foreach (var p in pages)
         {
@@ -2749,17 +2794,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         return rows;
     }
 
-    /// <summary>文档首尾虚空的屏幕高度：按文档 DIP 定义，随缩放同比放大。
-    /// 存档纵向偏移以真实内容顶端为 0，视图内部用 ScrollViewer 原生偏移，两者只差这一个量。</summary>
-    private static double EdgePadScaled(double zoom) => EdgeOverscrollDip * zoom;
-
     /// <summary>按当前【布局方向 + 旋转角】计算文档布局（90/270° 交换宽高），并撑出滚动范围。UI 线程调用。 两种方向都是连续布局：所有页首尾相接串在主轴上，交叉轴居中。</summary>
     private void RecomputeLayout(IReadOnlyList<GpuPageInfo> pages)
     {
         bool swap = _rotation == 90 || _rotation == 270;
-        // 首尾虚空属于文档布局：撑高 Spacer 并把页矩形整体下移 pad，
-        // 滚动范围、缩放锚点、可见页与重锚便都由现成公式吃到它。
-        double pad = EdgeOverscrollDip;
+        // 页矩形恒为纯 PDF 局部坐标；容器上下余量只撑高 Spacer，不进页矩形。
 
         if (_layoutMode == PageLayoutMode.HorizontalContinuous)
         {
@@ -2769,7 +2808,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 double h0 = (swap ? p.WidthPoints : p.HeightPoints) * 96.0 / 72.0;
                 maxDipH = Math.Max(maxDipH, h0);
             }
-            double contentH = maxDipH + DocMargin * 2 + pad * 2;
+            double contentH = maxDipH + DocMargin * 2;
             double x = DocMargin;
             foreach (var p in pages)
             {
@@ -2781,7 +2820,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double totalW = x - PageGapHorizontal + DocMargin;
 
             Spacer.Width = Math.Max(totalW, 1);
-            Spacer.Height = contentH;
+            _docContentH = contentH;
+            UpdateSpacerExtent(CurrentZoom);
             return;
         }
 
@@ -2794,7 +2834,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 maxDipW = Math.Max(maxDipW, dipW);
             }
             double contentW = maxDipW + DocMargin * 2;
-            double y = DocMargin + pad;
+            double y = DocMargin;
             foreach (var p in pages)
             {
                 double dipW = (swap ? p.HeightPoints : p.WidthPoints) * 96.0 / 72.0;
@@ -2802,16 +2842,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 p.LayoutRect = new Rect((contentW - dipW) / 2.0, y, dipW, dipH);
                 y += dipH + PageGap;
             }
-            double totalH = y - PageGap + DocMargin + pad;
+            double totalH = y - PageGap + DocMargin;
             Spacer.Width = contentW;
-            Spacer.Height = Math.Max(totalH, 1);
+            _docContentH = Math.Max(totalH, 1);
+            UpdateSpacerExtent(CurrentZoom);
             return;
         }
 
         // 双页 / 书籍：双列对开，移植自 sumatrapdf-master/src/DocumentLayout.cpp
         var rows = CollectFacingRows(pages.Count, _arrangement == PageArrangement.Book);
         double colMax0 = 0, colMax1 = 0;
-        double currPosY = DocMargin + pad;
+        double currPosY = DocMargin;
         foreach (var row in rows)
         {
             double rowMaxDy = 0;
@@ -2863,9 +2904,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
                 }
             }
         }
-        double totalH2 = currPosY - PageGap + DocMargin + pad;
+        double totalH2 = currPosY - PageGap + DocMargin;
         Spacer.Width = Math.Max(contentW2, 1);
-        Spacer.Height = Math.Max(totalH2, 1);
+        _docContentH = Math.Max(totalH2, 1);
+        UpdateSpacerExtent(CurrentZoom);
     }
 
     private void Viewer_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -2882,8 +2924,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         var pages = _pages;
         if (pages.Count == 0) return;
         double viewportMain, contentMain;
-        // 横向胶片条按内容高度适应，须扣掉首尾虚空，否则适应倍率会被虚空拉小。
-        if (IsHorizontalLayout) { viewportMain = Viewer.ViewportHeight; contentMain = Spacer.Height - EdgeOverscrollDip * 2; }
+        // 横向胶片条按 PDF 内容高度适应，容器余量不参与倍率计算。
+        if (IsHorizontalLayout) { viewportMain = Viewer.ViewportHeight; contentMain = _docContentH; }
         else { viewportMain = Viewer.ViewportWidth; contentMain = Spacer.Width; }
         if (viewportMain <= 0 || double.IsNaN(contentMain) || contentMain <= 0) return;
 
@@ -2901,7 +2943,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             // 起点放在真实内容顶端：向上滚即可露出被工具栏盖住的部分。
             // 内容比视口矮时居中补偿会抵消这段偏移，夹到 maxV/2 正好覆盖该情况。
             GetScrollBounds(fit, out _, out double initialMaxV, Viewer.ViewportWidth, Viewer.ViewportHeight);
-            double v0 = Math.Clamp(EdgePadScaled(fit), 0, initialMaxV / 2.0);
+            double v0 = Math.Clamp(_edgePadPx, 0, initialMaxV / 2.0);
             Viewer.ChangeView(0, v0, (float)fit, disableAnimation: true);
             SyncLiveView(0, v0, fit);
         }
@@ -3012,12 +3054,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _vpW = Viewer.ViewportWidth;
         _vpH = Viewer.ViewportHeight;
         if (_vpW <= 0 || _vpH <= 0) { _vpW = 1000; _vpH = 800; }
+        double cy = EffectiveCenterY(z, _vpH);
         lock (_lock)
         {
             _visLeft = hOff / z;
             _visRight = (hOff + _vpW) / z;
-            _visTop = vOff / z;
-            _visBottom = (vOff + _vpH) / z;
+            _visTop = (vOff - cy) / z;
+            _visBottom = (vOff + _vpH - cy) / z;
             _dpiScale = dpi;
         }
     }
@@ -3031,12 +3074,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _vpW = Viewer.ViewportWidth;
         _vpH = Viewer.ViewportHeight;
         if (_vpW <= 0 || _vpH <= 0) { _vpW = 1000; _vpH = 800; }
+        double cy = EffectiveCenterY(zoom, _vpH);
         lock (_lock)
         {
             _visLeft = hOff / zoom;
             _visRight = hOff / zoom + _vpW / zoom;
-            _visTop = vOff / zoom;
-            _visBottom = vOff / zoom + _vpH / zoom;
+            _visTop = (vOff - cy) / zoom;
+            _visBottom = (vOff - cy + _vpH) / zoom;
             _dpiScale = dpi;
         }
     }
@@ -6534,9 +6578,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         out double docX, out double docY)
     {
         double vpW = _vpW, vpH = _vpH;
-        double extentW = Spacer.Width * z, extentH = Spacer.Height * z;
-        double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        GetCenterOffsets(z, out double centerX, out double centerY, vpW, vpH);
         docX = (vp.X - centerX + hOff) / z;
         docY = (vp.Y - centerY + vOff) / z;
     }
@@ -8664,9 +8706,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double vpW = _vpW;
         double vpH = _vpH;
         double extentW = Spacer.Width * z;
-        double extentH = Spacer.Height * z;
         cx = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        cy = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        cy = EffectiveCenterY(z, vpH);
     }
 
     private bool ComputeVisiblePages(out double z, out double hOff, out double vOff,
@@ -8685,8 +8726,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
 
         ComputeViewAnchor(z, out double centerX, out double centerY);
 
-        double topDoc = vOff / z;
-        double bottomDoc = (vOff + vpH) / z;
+        double topDoc = (vOff - centerY) / z;
+        double bottomDoc = (vOff + vpH - centerY) / z;
         double leftDoc = hOff / z;
         double rightDoc = (hOff + vpW) / z;
 
@@ -8803,7 +8844,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         double z = CurrentZoomForKernel;
         double dpi = _dpiScale;
-        double extentW, extentH;
+        double extentW;
         double vpW, vpH;
         double hOff, vOff;
         lock (_lock)
@@ -8811,9 +8852,8 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             vpW = _vpW; vpH = _vpH; hOff = _liveH; vOff = _liveV;
         }
         extentW = Spacer.Width * z;
-        extentH = Spacer.Height * z;
         double centerX = extentW < vpW ? (vpW - extentW) / 2.0 : 0;
-        double centerY = extentH < vpH ? (vpH - extentH) / 2.0 : 0;
+        double centerY = EffectiveCenterY(z, vpH);
         var lr = _pages[pageNo].LayoutRect;
         var dest = new Rect(
             lr.X * z - hOff + centerX,
@@ -9104,7 +9144,11 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     {
         _liveH = h;
         _liveV = v;
-        if (zoom > 0) _liveZoom = zoom;
+        if (zoom > 0)
+        {
+            _liveZoom = zoom;
+            UpdateSpacerExtent(zoom);
+        }
     }
 
     // 把自管偏移同步给 ScrollViewer（驱动原生滚动条/回显）的每帧定时器。
@@ -9614,12 +9658,13 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             // 两条轴都更新可见范围（横向布局下 newH 同样驱动选页）。
             double vpW = _vpW;
             double vpH = _vpH;
+            double cy = EffectiveCenterY(z, vpH);
             lock (_lock)
             {
                 _visLeft = newH / z;
                 _visRight = (newH + vpW) / z;
-                _visTop = newV / z;
-                _visBottom = (newV + vpH) / z;
+                _visTop = (newV - cy) / z;
+                _visBottom = (newV + vpH - cy) / z;
             }
         }
         // 画布按自管偏移即时重画（随鼠标满速跟手）；真实偏移/滚动条交给每帧定时器下发，
