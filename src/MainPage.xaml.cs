@@ -890,6 +890,9 @@ public sealed partial class MainPage : Page
 
             if (WelcomeSubtitleText != null) WelcomeSubtitleText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeSubtitle");
             if (WelcomeOpenButtonText != null) WelcomeOpenButtonText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeOpenButton");
+            if (WelcomeFeatureReadText != null) WelcomeFeatureReadText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeFeatureRead");
+            if (WelcomeFeatureBoardText != null) WelcomeFeatureBoardText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeFeatureBoard");
+            if (WelcomeFeatureInkText != null) WelcomeFeatureInkText.Text = GlanceRX.Services.LocalizationService.Get("WelcomeFeatureInk");
 
             // 图标按钮只留无障碍名：本项目所有按钮都不挂悬浮气泡。
             if (AddBookmarkButton != null)
@@ -1115,34 +1118,45 @@ public sealed partial class MainPage : Page
         {
             StorageFile file = await picker.PickSingleFileAsync();
             if (file != null)
-            {
-                UpdateWindowTitle(file.Name);
-                try
-                {
-                    await LoadPdfAsync(file.Path);
-                }
-                catch (Exception ex)
-                {
-                    var errorDialog = new ContentDialog
-                    {
-                        Title = GlanceRX.Services.LocalizationService.Get("Error"),
-                    Content = string.Format(GlanceRX.Services.LocalizationService.Get("PdfLoadErrorContent"), ex.Message),
-                    CloseButtonText = GlanceRX.Services.LocalizationService.Get("Ok"),
-                    XamlRoot = this.XamlRoot,
-                    RequestedTheme = DialogTheme()
-                };
-                await errorDialog.ShowAsync();
-                // If loading fails, show welcome screen again. Reset the toolbar
-                UpdateWindowTitle(null);
-                WelcomePanel.Visibility = Visibility.Visible;
-                SidebarSplitView.Visibility = Visibility.Collapsed;
-            }
-        }
+                await OpenPdfFileAsync(file);
         }
         finally
         {
             ButtonVisualOverride.SetHoverSuppressed(false);
         }
+    }
+
+    /// <summary>文件选择器与窗口拖放共用的打开路径：加载失败时提示并回到欢迎页。</summary>
+    private async Task OpenPdfFileAsync(StorageFile file)
+    {
+        UpdateWindowTitle(file.Name);
+        try
+        {
+            await LoadPdfAsync(file.Path);
+        }
+        catch (Exception ex)
+        {
+            var errorDialog = new ContentDialog
+            {
+                Title = GlanceRX.Services.LocalizationService.Get("Error"),
+                Content = string.Format(GlanceRX.Services.LocalizationService.Get("PdfLoadErrorContent"), ex.Message),
+                CloseButtonText = GlanceRX.Services.LocalizationService.Get("Ok"),
+                XamlRoot = this.XamlRoot,
+                RequestedTheme = DialogTheme()
+            };
+            await errorDialog.ShowAsync();
+            // If loading fails, show welcome screen again. Reset the toolbar
+            UpdateWindowTitle(null);
+            WelcomePanel.Visibility = Visibility.Visible;
+            SidebarSplitView.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>窗口拖放入口：只接收有本地路径的文件项，加载与失败回退走文件选择器同一条路径。</summary>
+    internal void OpenDroppedPdf(StorageFile file)
+    {
+        if (!string.IsNullOrEmpty(file.Path))
+            _ = OpenPdfFileAsync(file);
     }
 
     private void Open_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

@@ -8,7 +8,8 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="Glance-RX"
     mc:Ignorable="d">
-    <Grid x:Name="WindowRoot" Background="#FF1C1C1C" PointerExited="WindowRoot_PointerExited">
+    <Grid x:Name="WindowRoot" Background="#FF1C1C1C" PointerExited="WindowRoot_PointerExited"
+          AllowDrop="True" DragEnter="WindowRoot_DragEnter" DragOver="WindowRoot_DragOver" Drop="WindowRoot_Drop">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />

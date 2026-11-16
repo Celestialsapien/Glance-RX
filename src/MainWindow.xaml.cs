@@ -20,6 +20,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage;
 using Windows.UI;
 using System;
 using System.Runtime.InteropServices;
@@ -257,6 +259,59 @@ public sealed partial class MainWindow : Window
     {
         // Debounced, not immediate: this also fires when the pointer moves into a Popup
         (RootFrame.Content as MainPage)?.OnWindowPointerExited();
+    }
+
+    /// <summary>窗口级拖放：只认文件项，.pdf 扩展名在 Drop 时再筛；DragEnter/Over 只决定能否落下。</summary>
+    private static bool DragHasFiles(DragEventArgs e)
+        => e.DataView.Contains(StandardDataFormats.StorageItems);
+
+    private void WindowRoot_DragEnter(object sender, DragEventArgs e)
+    {
+        if (!DragHasFiles(e)) return;
+        e.AcceptedOperation = DataPackageOperation.Copy;
+        ApplyDropCaption(e);
+    }
+
+    private void WindowRoot_DragOver(object sender, DragEventArgs e)
+    {
+        if (!DragHasFiles(e)) return;
+        e.AcceptedOperation = DataPackageOperation.Copy;
+        ApplyDropCaption(e);
+    }
+
+    private static void ApplyDropCaption(DragEventArgs e)
+    {
+        var ui = e.DragUIOverride;
+        if (ui == null) return;
+        ui.Caption = GlanceRX.Services.LocalizationService.Get("DropOpenCaption");
+        ui.IsCaptionVisible = true;
+    }
+
+    private async void WindowRoot_Drop(object sender, DragEventArgs e)
+    {
+        var deferral = e.GetDeferral();
+        try
+        {
+            if (!DragHasFiles(e)) return;
+            var items = await e.DataView.GetStorageItemsAsync();
+            StorageFile? pdf = null;
+            foreach (var item in items)
+            {
+                if (item is StorageFile file &&
+                    file.FileType.Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    pdf = file;
+                    break;
+                }
+            }
+            if (pdf != null)
+                (RootFrame.Content as MainPage)?.OpenDroppedPdf(pdf);
+        }
+        catch { }
+        finally
+        {
+            deferral.Complete();
+        }
     }
 
     /// <summary>Losing window activation (alt-tab, clicking another app, opening a system dialog) must retract the top toolbar: no further pointer events re…</summary>
