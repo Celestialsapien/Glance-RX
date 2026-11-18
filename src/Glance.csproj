@@ -29,11 +29,10 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
-  <!-- 仅保留运行时要用的图标：MainWindow.xaml:20 的 ImageIconSource 与
-       MainWindow.xaml.cs:106 的 AppWindow.SetIcon("Assets/AppIcon.ico")。
-       其余 Assets\*.png 原先只服务于具体 MSIX 清单，已随打包一并删除。 -->
+  <!-- 运行时资源：窗口图标与欢迎页品牌图。二者都从 exe 同级的 Assets 目录按相对路径加载。 -->
   <ItemGroup>
     <Content Include="Assets\AppIcon.ico" />
+    <Content Include="Assets\WelcomeBrand.png" />
   </ItemGroup>
 
   <!-- 设计手感调参文件：复制到 exe 同级目录，运行时可由用户直接编辑（无需重新编译）。 -->
