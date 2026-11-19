@@ -92,7 +92,7 @@ Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 ## 系统要求
 
 * **操作系统：** Windows 10 17763（1809）或更高版本。
-* **运行时：** self-contained 分发，**无需另装 .NET 运行时**；支持 x86 / x64 。
+* **运行时：** self-contained 分发，**无需另装 .NET 运行时**；仅支持 64 位（x64）。
 * **开发环境（仅构建时需要）：** .NET 10 SDK、Rust 工具链（MSVC 目标）、Visual Studio 2022（可选）。
 
 ---
