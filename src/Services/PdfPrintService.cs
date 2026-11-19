@@ -45,8 +45,11 @@ public sealed class PdfPrintService : IDisposable
     private readonly IntPtr _hwnd;
     private readonly PdfRenderService _render;
     private readonly IReadOnlyList<PdfPageViewModel> _pages;
+    private readonly CanvasDoc? _canvasDoc;
+    private readonly IReadOnlyList<Rect> _pageLayouts;
     private readonly string _documentTitle;
     private readonly int _currentPage;
+    private readonly bool _annotationsVisible;
 
     private PrintManager? _printManager;
     private PrintDocument? _printDocument;
@@ -80,61 +83,56 @@ public sealed class PdfPrintService : IDisposable
         LineJoin = CanvasLineJoin.Round,
     };
 
-    public PdfPrintService(IntPtr hwnd, PdfRenderService render, IReadOnlyList<PdfPageViewModel> pages, string documentTitle, int currentPage = 0)
+    public PdfPrintService(IntPtr hwnd, PdfRenderService render, IReadOnlyList<PdfPageViewModel> pages,
+        CanvasDoc? canvas, IReadOnlyList<Rect> pageLayouts, string documentTitle, bool annotationsVisible,
+        int currentPage = 0)
     {
         _hwnd = hwnd;
         _render = render ?? throw new ArgumentNullException(nameof(render));
         _pages = pages ?? throw new ArgumentNullException(nameof(pages));
+        _canvasDoc = canvas;
+        _pageLayouts = pageLayouts;
         _documentTitle = documentTitle;
+        _annotationsVisible = annotationsVisible;
         _currentPage = currentPage;
     }
 
-    /// <summary>Show the system print dialog and print. Returns false only when the print UI could not be shown (e.g. no printer installed);</summary>
-    public async Task<bool> ShowPrintDialogAsync()
-    {
-        if (!PrintManager.IsSupported())
-            return false;
+    /// <summary>是否已具备打印前提：系统支持打印 API 且注册表里至少有一个打印目标（虚拟打印机也算）。
+    /// 供调用方在打开任何系统窗口之前做唯一一次前置判定。</summary>
+    public static bool CanPrint() => PrintManager.IsSupported() && HasAnyPrinter();
 
-        // ⚠ PrintManager.IsSupported() 仅表示系统支持打印 API，不表示已安装打印机。
-        // 无打印机时点打印仍会触发 PrintTaskRequested，并在 deferral.Complete() 抛 COMException 使进程崩溃。
-        if (!HasAnyPrinter())
-            return false;
+    /// <summary>打开系统打印预览并等待打印任务结束。调用方须先用 CanPrint() 完成前置判定。
+    /// 系统预览自身的加载与成败属于系统行为：这里不向调用方回传可被误读为"无打印机"的结果，
+    /// 也不弹窗，避免出现"系统预览窗口 + 应用提示框"并存的双窗口。</summary>
+    public async Task ShowPrintDialogAsync()
+    {
+        if (!CanPrint())
+            return;
 
         _dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-
         _printManager = PrintManagerInterop.GetForWindow(_hwnd);
-        _printManager.PrintTaskRequested += OnPrintTaskRequested;
         _tcs = new TaskCompletionSource<bool>();
         _printTaskRequested = false;
 
-        // Create the PrintDocument on the UI thread up front. The PrintTaskSourceRequested
         try
         {
-            EnsurePrintDocument();
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-
-        try
-        {
-            await PrintManagerInterop.ShowPrintUIForWindowAsync(_hwnd);
-
-            // If the user closed the dialog without printing, PrintTaskRequested
-            if (!_printTaskRequested)
-                return true;
-
-            return await _tcs.Task;
-        }
-        catch (Exception)
-        {
-            return false;
+            _printManager.PrintTaskRequested += OnPrintTaskRequested;
+            try
+            {
+                EnsurePrintDocument();
+                await PrintManagerInterop.ShowPrintUIForWindowAsync(_hwnd);
+                // 等打印任务结束再返回：调用方在 finally 释放渲染服务，提前返回会把打印页渲染截断。
+                if (_printTaskRequested)
+                    await _tcs.Task;
+            }
+            catch (Exception)
+            {
+                // 系统打印 UI 的加载与失败由其自身呈现；此处不弹窗，也不向上传播。
+            }
         }
         finally
         {
-            if (_printManager != null)
-                _printManager.PrintTaskRequested -= OnPrintTaskRequested;
+            _printManager.PrintTaskRequested -= OnPrintTaskRequested;
             _printDocument = null;
         }
     }
@@ -626,13 +624,22 @@ public sealed class PdfPrintService : IDisposable
             () => _render.RenderPageBgraAsync(pageIndex, pw, ph, CancellationToken.None))
             .GetAwaiter().GetResult();
 
-        // Bake freehand annotations onto the rendered page (same transform as the
         var page = _pages[(int)pageIndex];
-        if (page.Annotations != null && page.Annotations.Count > 0)
+        // 打印跟随 G 键的批注可见性：屏幕隐藏了笔迹与白板卡片，打印也必须只出纯 PDF 页。
+        if (_annotationsVisible)
         {
+            if (page.Annotations != null && page.Annotations.Count > 0)
+            {
+                try
+                {
+                    pixels = BakeAnnotations(pixels, w, h, page);
+                }
+                catch { }
+            }
             try
             {
-                pixels = BakeAnnotations(pixels, w, h, page);
+                pixels = CanvasPrintBaker.Bake(pixels, w, h, page, _pages,
+                    _canvasDoc, _pageLayouts);
             }
             catch { }
         }

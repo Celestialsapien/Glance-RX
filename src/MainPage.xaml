@@ -1058,6 +1058,29 @@
 
                                     </StackPanel>
 
+
+
+                                    <!-- 应用语言选择器：选项文案在 InitializeLocalization 里按当前语言刷新。
+                                         Tag 存的是给 SetLanguage 的偏好值，显示文字随语言变化而 Tag 不变。 -->
+
+                                    <StackPanel Spacing="6">
+
+                                        <TextBlock x:Name="AppLanguageLabel" Text="App language" FontSize="12" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+
+                                        <ComboBox x:Name="LanguageComboBox" SelectionChanged="LanguageComboBox_SelectionChanged" HorizontalAlignment="Stretch" IsTabStop="False">
+
+                                            <ComboBoxItem x:Name="LanguageSystemItem" Content="System default" Tag="System"/>
+
+                                            <ComboBoxItem x:Name="LanguageChineseItem" Content="Simplified Chinese" Tag="zh"/>
+
+                                            <ComboBoxItem x:Name="LanguageEnglishItem" Content="English" Tag="en"/>
+
+                                            <ComboBoxItem x:Name="LanguageSpanishItem" Content="Spanish" Tag="es"/>
+
+                                        </ComboBox>
+
+                                    </StackPanel>
+
                                 </StackPanel>
 
                             </Flyout>

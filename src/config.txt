@@ -11,11 +11,18 @@
 #   - 想回退某项：直接删掉那一行（或改回"默认"列的值）。
 #     To revert a key: delete its line (or set it back to the default value).
 #
-# ⚠ 安全边界 / Safety: 每个键的【有效区间】已写在对应行尾（如 [0, 256]、(0, 5]）。
+# ⚠ 安全边界 / Safety: 每个键的【有效区间】已写在对应行尾（如 [0, 256]、[1, 200]）。
 #    越界或非法（非数字 / Infinity / NaN）的值会在启动时自动钳到安全范围，不会让程序崩溃；
 #    但钳制会悄悄改变手感，所以请按区间填写。
 #    Out-of-range / invalid values are auto-clamped to a safe range at launch (no crash),
 #    but clamping silently changes feel — so please stay within the stated range.
+#
+# ⚠ 风险分级 / Risk levels:
+#    【手感 / Feel】弹簧 ω、滚轮与缩放步进、动画时长 —— 可放心试，调坏只影响观感。
+#    【时序 / Timing】收敛阈值、提交容差 —— 决定动画"能否落定"，调错会空转吃电池或提前截断。
+#    【核心 / Core】MinZoom/MaxZoom、渲染并发上限 —— 改错触发自动钳制，甚至拖垮渲染性能。
+#    Feel keys are safe to experiment with; timing keys decide whether motion ever settles;
+#    core keys can silently break zoom invariants or throttle rendering.
 #
 # 一键回退（恢复出厂）/ One-click factory reset:
 #   直接删除本文件即可。下次打开 Glance 会以【全部默认值】运行，并在本目录
@@ -26,15 +33,15 @@
 
 
 # ---------------- 缩放范围 / Zoom range ----------------
-# 最小缩放比例。有效区间 (0, MaxZoom)，建议 0.02 ~ 5.0。
-# Min zoom ratio. Valid (0, MaxZoom); recommended 0.02 ~ 5.0.
-# 若 >= MaxZoom 会被自动钳为 MaxZoom×0.5，否则缩放夹取逻辑会抛异常。
-# If >= MaxZoom it is auto-clamped to MaxZoom×0.5, else zoom clamping throws.
-MinZoom = 0.1                     # 默认 0.1 | default | 区间 (0, MaxZoom)
+# 最小缩放比例。有效区间 [0.02, 5.0)，且必须 < MaxZoom。
+# Min zoom ratio. Valid [0.02, 5.0), must be < MaxZoom.
+# 若 >= MaxZoom 会被自动钳为 max(0.02, MaxZoom×0.5)，否则缩放夹取逻辑会抛异常。
+# If >= MaxZoom it is auto-clamped to max(0.02, MaxZoom×0.5), else zoom clamping throws.
+MinZoom = 0.1                     # 默认 0.1 | default | 区间 [0.02, 5.0)
 
-# 最大缩放比例。有效区间 (MinZoom, 16]，建议 0.05 ~ 16.0。
-# Max zoom ratio. Valid (MinZoom, 16]; recommended 0.05 ~ 16.0.
-MaxZoom = 4.0                     # 默认 4.0 | default | 区间 (MinZoom, 16]
+# 最大缩放比例。有效区间 [0.05, 16]，且必须 > MinZoom。
+# Max zoom ratio. Valid [0.05, 16], must be > MinZoom.
+MaxZoom = 4.0                     # 默认 4.0 | default | 区间 [0.05, 16]
 
 
 # ---------------- 布局留白 / Layout margins (DIP) ----------------
@@ -52,25 +59,29 @@ PageGapHorizontal = 6.0           # 默认 6.0 | default | 区间 [0, 256]
 
 
 # ---------------- 光栅并发 / Raster concurrency ----------------
-# 自动模式并发上限：auto = min(物理核-1, 本值)。有效区间 [1, 1024]，且必须 <= RenderWorkerHardCap。
+# 自动模式并发上限：auto = min(物理核数-1, 本值)。有效区间 [1, 1024]，且必须 <= RenderWorkerHardCap。
 # Auto ceiling: auto = min(physical cores - 1, this). Valid [1, 1024]; must be <= HardCap.
-# 低于 1 会被钳为 1，否则 Math.Clamp(...,1,Cap) 抛异常。
-# Below 1 clamps to 1, else Math.Clamp(...,1,Cap) throws.
+# ⚠ 高风险：调大不会更快（超过物理核数-1 后完全无效）；调太小(如 1)会明显拖慢大文档渲染。
+# ⚠ High risk: raising it never helps (capped by physical cores - 1); lowering it slows rendering.
 RenderWorkerCap = 16              # 默认 16 | default | 区间 [1, 1024]
 
 # 绝对硬上限（并发不可能超过此值）。有效区间 [1, 1024]，且必须 >= RenderWorkerCap。
 # Absolute hard ceiling. Valid [1, 1024]; must be >= Cap (else auto-raised to Cap).
-# 低于 1 会被钳为 1，否则 Math.Clamp 抛异常。/ Below 1 clamps to 1, else throws.
+# ⚠ 高风险：仅在显式指定 workerCount 时参与钳制（当前所有调用点都不指定）；
+# ⚠ 调到 1024 会让线程抢占 CPU/内存带宽，反而整体变慢。建议保持默认 24。
+# ⚠ High risk: only active when workerCount is supplied explicitly (no current caller does);
+# ⚠ 1024 lets threads thrash CPU/memory bandwidth. Keep the default 24.
 RenderWorkerHardCap = 24          # 默认 24 | default | 区间 [1, 1024]
 
 
 # ---------------- 统一运动引擎弹簧 ω (rad/s) / Motion springs ----------------
 # 99% 收敛时长 ≈ 6.6/ω。想更快只调 ω，不要动下方收敛阈值。
 # ~99% settle time ≈ 6.6/ω. Want faster? Raise ω only; leave settle thresholds alone.
-# 以下三个 ω 的有效区间均为 (0, 200] rad/s，必须 > 0：
-# All three omegas valid (0, 200] rad/s, must be > 0:
-#   ω <= 0 时弹簧退化为瞬切（负值本应指数发散、画面乱跳）。
-#   ω <= 0 makes the spring snap instantly (negative would diverge).
+# 以下三个 ω 的有效区间均为 [1, 200] rad/s（<=0 会被钳为 1）：
+# All three omegas valid [1, 200] rad/s (<=0 clamped to 1):
+#   ω 越小越拖沓（ω=1 收敛约 6.6 秒），越大越接近瞬切、可能过冲。
+#   Low ω = sluggish (ω=1 ≈ 6.6s settle), high ω ≈ instant with overshoot.
+# ⚠ 不要用下方收敛阈值来补偿这里的不适，那会破坏落定判定。
 
 # 滚轮滚动弹簧硬度：≈315ms 收敛，跟手且顺滑。
 # Wheel scroll spring: ~315ms settle, responsive & smooth.
@@ -102,45 +113,50 @@ ZoomButtonStep = 10.0             # 默认 10.0 | default | 区间 [0.5, 100]
 # ---------------- 收敛阈值（按"屏幕看得见"判定） / Settle thresholds ----------------
 # 残差 ≤ 约 1~2 屏幕像素即落定，消除"看着停了其实还在跑"的拖尾。
 # Settle when residual ≤ ~1-2 on-screen px; kills the "looks stopped but still running" tail.
-# 以下四个阈值的有效区间均为 (0, 上限]，必须 > 0：阈值 = 0 时判定要求精确相等，
-# 动画/滚动永远到不了，帧泵空转（吃电池）。/ All four valid (0, cap], must be > 0; =0 never settles.
+# 以下四个阈值的有效下限见各行，必须 > 0：阈值 = 0 时判定要求精确相等，
+# 动画/滚动永远到不了，帧泵空转（吃电池）；调太大则提前落定、出现错位跳动。
+# All four valid within per-line ranges, must be > 0; =0 never settles (frame pump spins).
+# Too large settles early and looks like a snap/jump.
 
-# 滚动收敛残差(px)。有效区间 (0, 50]。
-# Scroll settle residual (px). Valid (0, 50].
-ScrollSettlePx = 1.5              # 默认 1.5 | default | 区间 (0, 50]
+# 滚动收敛残差(px)。有效区间 [0.1, 50]。
+# Scroll settle residual (px). Valid [0.1, 50].
+ScrollSettlePx = 1.5              # 默认 1.5 | default | 区间 [0.1, 50]
 
-# 滚动收敛速度(px/帧)。有效区间 (0, 1000]。
-# Scroll settle velocity (px/frame). Valid (0, 1000].
-ScrollSettleVel = 40.0            # 默认 40.0 | default | 区间 (0, 1000]
+# 滚动收敛速度(px/帧)。有效区间 [0.1, 1000]。
+# Scroll settle velocity (px/frame). Valid [0.1, 1000].
+ScrollSettleVel = 40.0            # 默认 40.0 | default | 区间 [0.1, 1000]
 
-# 缩放收敛残差(log 空间)。有效区间 (0, 0.5]。
-# Zoom settle residual (log space). Valid (0, 0.5].
-ZoomSettleLog = 0.002             # 默认 0.002 | default | 区间 (0, 0.5]
+# 缩放收敛残差(log 空间)。有效区间 [1e-4, 0.5]。
+# Zoom settle residual (log space). Valid [1e-4, 0.5].
+ZoomSettleLog = 0.002             # 默认 0.002 | default | 区间 [1e-4, 0.5]
 
-# 缩放收敛速度。有效区间 (0, 5]。
-# Zoom settle velocity. Valid (0, 5].
-ZoomSettleVel = 0.08              # 默认 0.08 | default | 区间 (0, 5]
+# 缩放收敛速度。有效区间 [1e-3, 5]。
+# Zoom settle velocity. Valid [1e-3, 5].
+ZoomSettleVel = 0.08              # 默认 0.08 | default | 区间 [1e-3, 5]
 
 
 # ---------------- 提交落地（ChangeView 异步窗口） / Commit window ----------------
 # 缩放/偏移经 ScrollViewer.ChangeView 异步落地，下面是容差与兜底。
 # Zoom/offset land asynchronously via ChangeView; tolerances & safety net below.
+# ⚠ 这四项是内部时序兜底，不是手感参数：调小 → 补发失效、落点错位；
+# ⚠ 调大 → 长时间等待或多轮补发抖动。非必要请勿改动。
+# ⚠ Internal timing fallbacks, not feel knobs: too small breaks landing, too large adds waits/jitter.
 
-# 缩放提交容差。有效区间 (0, 0.1]。
-# Zoom commit epsilon. Valid (0, 0.1].
-CommitZoomEps = 0.001             # 默认 0.001 | default | 区间 (0, 0.1]
+# 缩放提交容差。有效区间 [1e-5, 0.1]。
+# Zoom commit epsilon. Valid [1e-5, 0.1].
+CommitZoomEps = 0.001             # 默认 0.001 | default | 区间 [1e-5, 0.1]
 
-# 偏移提交容差(px)。有效区间 (0, 50]。
-# Offset commit epsilon (px). Valid (0, 50].
-CommitOffsetEps = 1.5             # 默认 1.5 | default | 区间 (0, 50]
+# 偏移提交容差(px)。有效区间 [0.1, 50]。
+# Offset commit epsilon (px). Valid [0.1, 50].
+CommitOffsetEps = 1.5             # 默认 1.5 | default | 区间 [0.1, 50]
 
 # 最大补发偏移次数（整数）。有效区间 [0, 64]，非负。
 # Max commit nudges (int). Valid [0, 64], non-negative.
 MaxCommitNudges = 4               # 默认 4 | default | 区间 [0, 64]
 
-# 提交落地超时(墙钟兜底 ms)。有效区间 (0, 10000]，> 0。
-# Commit wait deadline (ms). Valid (0, 10000], > 0.
-CommitWaitDeadlineMs = 250.0      # 默认 250.0 | default | 区间 (0, 10000]
+# 提交落地超时(墙钟兜底 ms)。有效区间 [1, 10000]，> 0。
+# Commit wait deadline (ms). Valid [1, 10000], > 0.
+CommitWaitDeadlineMs = 250.0      # 默认 250.0 | default | 区间 [1, 10000]
 
 
 # ---------------- 锚点 / 双击 / Anchor & double-tap ----------------
@@ -154,8 +170,8 @@ DoubleTapIgnoreMs = 150.0         # 默认 150.0 | default | 区间 [0, 2000]
 
 
 # ---------------- UI / 工具栏 / UI & toolbar ----------------
-# 工具栏滑入滑出时长(ms)。有效区间 [0, 2000]，非负。
-# Toolbar slide-in/out duration (ms). Valid [0, 2000], non-negative.
+# 工具栏滑入滑出时长(ms)。有效区间 [0, 2000]，非负；0 = 瞬切无动画。
+# Toolbar slide-in/out duration (ms). Valid [0, 2000], non-negative; 0 = instant, no animation.
 UiTransitionMs = 150              # 默认 150 | default | 区间 [0, 2000]
 
 # 鼠标离开工具栏区域后，自动隐藏的延迟(ms)。有效区间 [0, 10000]，非负。

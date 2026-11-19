@@ -66,6 +66,22 @@ public class SettingsService
         }
     }
 
+    /// <summary>界面语言偏好："System" = 跟随系统，或 zh / es / en。
+    /// 空串 / 未知值一律当作跟随系统——设置文件被人手改坏时也只会退回默认语言，不会白屏。</summary>
+    public string Language
+    {
+        get => string.IsNullOrEmpty(_data.Language) ? "System" : _data.Language;
+        set
+        {
+            string v = string.IsNullOrEmpty(value) ? "System" : value;
+            if (_data.Language != v)
+            {
+                _data.Language = v;
+                Save();
+            }
+        }
+    }
+
     /// <summary>资源管理器里被展开的文件夹（绝对路径）。跨会话记住 —— 下次打开应用，库还摊成离开时的样子。</summary>
     public IReadOnlyList<string> CanvasExpandedFolders => _data.CanvasExpandedFolders;
 
@@ -171,6 +187,8 @@ public class SettingsService
         public string AppTheme { get; set; } = "Default";
 
         public bool ToolbarAlwaysVisible { get; set; }
+
+        public string Language { get; set; } = "System";
 
         /// <summary>资源管理器里已展开的文件夹路径。旧设置文件没有这一项 ⇒ 反序列化后即为空列表。</summary>
         public List<string> CanvasExpandedFolders { get; set; } = new();

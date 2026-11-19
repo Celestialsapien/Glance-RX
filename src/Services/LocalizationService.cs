@@ -1,4 +1,4 @@
-// Glance-RX - a high-performance PDF reader
+﻿// Glance-RX - a high-performance PDF reader
 // Copyright (C) 2026 Adrian
 //
 // This program is free software: you can redistribute it and/or modify
@@ -26,6 +26,24 @@ namespace GlanceRX.Services
 
         static LocalizationService()
         {
+            DetectSystemLanguage();
+        }
+
+        /// <summary>把语言切到用户选的值。只有 zh/es/en 被接受，其余一律回退到系统探测结果——
+        /// 设置文件里存的是这三个标签之一，不会出现未知值；仍做防御是为了让非法值回到可读界面而非空串。</summary>
+        public static void SetLanguage(string? preferred)
+        {
+            if (preferred == "zh" || preferred == "es" || preferred == "en")
+            {
+                CurrentLanguage = preferred;
+                return;
+            }
+            DetectSystemLanguage();
+        }
+
+        private static void DetectSystemLanguage()
+        {
+            CurrentLanguage = "en";
             try
             {
                 var languages = Windows.System.UserProfile.GlobalizationPreferences.Languages;
@@ -91,12 +109,17 @@ namespace GlanceRX.Services
                 ["CanvasInlineCode"] = "Código en línea",
                 ["CanvasHighlight"] = "Resaltado",
                 ["CanvasClearFormatting"] = "Borrar formato",
-                ["GuideKeyBoldDesc"] = "Al editar una tarjeta: poner la selección en negrita (pulsa otra vez para quitar)",
-                ["GuideKeyItalicDesc"] = "Al editar una tarjeta: poner la selección en cursiva (pulsa otra vez para quitar)",
-                ["GuideKeyInlineCodeDesc"] = "Al editar una tarjeta: marcar la selección como código en línea (pulsa otra vez para quitar)",
-                ["GuideKeyStrikeDesc"] = "Al editar una tarjeta: tachar la selección (pulsa otra vez para quitar)",
-                ["GuideKeyHighlightDesc"] = "Al editar una tarjeta: resaltar la selección (pulsa otra vez para quitar)",
+                ["GuideKeyBoldDesc"] = "Al editar una tarjeta: poner la selección en negrita.",
+                ["GuideKeyItalicDesc"] = "Al editar una tarjeta: poner la selección en cursiva.",
+                ["GuideKeyInlineCodeDesc"] = "Al editar una tarjeta: marcar la selección como código en línea.",
+                ["GuideKeyStrikeDesc"] = "Al editar una tarjeta: tachar la selección.",
+                ["GuideKeyHighlightDesc"] = "Al editar una tarjeta: resaltar la selección.",
                 ["LayoutToggle"] = "Cambiar diseño",
+                ["AppLanguage"] = "Idioma de la aplicación",
+                ["LanguageSystem"] = "Predeterminado del sistema",
+                ["LanguageChinese"] = "Chino simplificado",
+                ["LanguageEnglish"] = "Inglés",
+                ["LanguageSpanish"] = "Español",
                 ["MoreTools"] = "Más herramientas",
                 ["PrintPages"] = "Páginas",
                 ["PrintPagesAll"] = "Todas",
@@ -131,6 +154,8 @@ namespace GlanceRX.Services
                 ["GuideClose"] = "Cerrar",
                 ["GuideMousePanGesture"] = "Arrastre izq.",
                 ["GuideMousePanDesc"] = "Mantén pulsado el botón izquierdo y arrastra para desplazar la página.",
+                ["GuideMouseDropGesture"] = "Arrastrar PDF",
+                ["GuideMouseDropDesc"] = "Suelta un archivo PDF en la ventana para abrirlo.",
                 ["GuideMouseRightZoomGesture"] = "Arrastre der. ↑↓",
                 ["GuideMouseRightZoomDesc"] = "Zoom continuo: hacia arriba amplía, hacia abajo reduce.",
                 ["GuideMouseDoubleClickGesture"] = "Doble clic",
@@ -144,10 +169,10 @@ namespace GlanceRX.Services
                 ["GuideMousePenDrawGesture"] = "Modo lápiz: arrastre",
                 ["GuideMousePenDrawDesc"] = "Escribe o dibuja trazos de anotación sobre la página.",
                 ["GuideKeyOpenDesc"] = "Abrir un archivo PDF.",
-                ["GuideKeySaveDesc"] = "Guardar los cambios de las anotaciones.",
+                ["GuideKeySaveDesc"] = "Guardar el lienzo (trazos y tarjetas); el PDF no se modifica.",
                 ["GuideKeyPrintDesc"] = "Imprimir el PDF actual.",
-                ["GuideKeyUndoDesc"] = "Deshacer la última anotación (admite varios pasos).",
-                ["GuideKeyRedoDesc"] = "Rehacer las anotaciones deshechas (admite varios pasos).",
+                ["GuideKeyUndoDesc"] = "Deshacer la última acción de trazo o tarjeta (varios pasos).",
+                ["GuideKeyRedoDesc"] = "Rehacer la acción deshecha (varios pasos).",
                 ["GuideKeyBookmarkDesc"] = "Añadir un marcador en la página actual.",
                 ["GuideKeyZoomInDesc"] = "Ampliar la vista.",
                 ["GuideKeyZoomOutDesc"] = "Reducir la vista.",
@@ -160,6 +185,11 @@ namespace GlanceRX.Services
                 ["GuideKeyLastPageDesc"] = "Ir a la última página.",
                 ["GuideKeyFitDesc"] = "Ajustar al ancho (o a la altura en disposición horizontal).",
                 ["GuideKeyToggleAnnotsDesc"] = "Mostrar u ocultar las anotaciones dibujadas.",
+                ["GuideKeyReadModeDesc"] = "Cambiar al modo de lectura.",
+                ["GuideKeyPenModeDesc"] = "Cambiar al modo lápiz para dibujar sobre la página.",
+                ["GuideKeyCanvasModeDesc"] = "Cambiar al modo pizarra para notas y tarjetas.",
+                ["GuideKeyTempEraserDesc"] = "Mantén E en modo lápiz: borrador temporal de trazo completo; suelta para volver a dibujar.",
+                ["GuideKeyTempReadDesc"] = "Mantén H en modo lápiz: desplazar temporalmente como en lectura; suelta para volver a dibujar.",
                 ["WelcomeSubtitle"] = "Leer, anotar y usar la pizarra, todo en una vista.",
                 ["WelcomeOpenButton"] = "Abrir Documento PDF",
                 ["WelcomeFeatureRead"] = "Lectura de PDF",
@@ -248,12 +278,17 @@ namespace GlanceRX.Services
                 ["CanvasInlineCode"] = "行内代码",
                 ["CanvasHighlight"] = "高亮",
                 ["CanvasClearFormatting"] = "清除格式",
-                ["GuideKeyBoldDesc"] = "白板卡片编辑时加粗选中文字（再按一次取消）",
-                ["GuideKeyItalicDesc"] = "白板卡片编辑时把选中文字设为斜体（再按一次取消）",
-                ["GuideKeyInlineCodeDesc"] = "白板卡片编辑时给选中文字加行内代码标记（再按一次取消）",
-                ["GuideKeyStrikeDesc"] = "白板卡片编辑时给选中文字加删除线（再按一次取消）",
-                ["GuideKeyHighlightDesc"] = "白板卡片编辑时高亮选中文字（再按一次取消）",
+                ["GuideKeyBoldDesc"] = "白板卡片编辑时加粗选中文字。",
+                ["GuideKeyItalicDesc"] = "白板卡片编辑时把选中文字设为斜体。",
+                ["GuideKeyInlineCodeDesc"] = "白板卡片编辑时给选中文字加行内代码标记。",
+                ["GuideKeyStrikeDesc"] = "白板卡片编辑时给选中文字加删除线。",
+                ["GuideKeyHighlightDesc"] = "白板卡片编辑时高亮选中文字。",
                 ["LayoutToggle"] = "切换布局",
+                ["AppLanguage"] = "应用语言",
+                ["LanguageSystem"] = "跟随系统",
+                ["LanguageChinese"] = "简体中文",
+                ["LanguageEnglish"] = "英语",
+                ["LanguageSpanish"] = "西班牙语",
                 ["MoreTools"] = "更多工具",
                 ["PrintPages"] = "打印范围",
                 ["PrintPagesAll"] = "全部",
@@ -288,6 +323,8 @@ namespace GlanceRX.Services
                 ["GuideClose"] = "关闭",
                 ["GuideMousePanGesture"] = "左键拖拽",
                 ["GuideMousePanDesc"] = "按住鼠标左键拖动，平移页面视图。",
+                ["GuideMouseDropGesture"] = "拖入 PDF",
+                ["GuideMouseDropDesc"] = "把 PDF 文件拖到窗口上松开即可打开。",
                 ["GuideMouseRightZoomGesture"] = "右键上下拖拽",
                 ["GuideMouseRightZoomDesc"] = "连续缩放：向上放大、向下缩小。",
                 ["GuideMouseDoubleClickGesture"] = "双击页面",
@@ -301,10 +338,10 @@ namespace GlanceRX.Services
                 ["GuideMousePenDrawGesture"] = "画笔模式：左键拖动",
                 ["GuideMousePenDrawDesc"] = "在页面上书写或绘制批注笔画。",
                 ["GuideKeyOpenDesc"] = "打开 PDF 文件。",
-                ["GuideKeySaveDesc"] = "保存批注修改。",
+                ["GuideKeySaveDesc"] = "保存画布（笔迹与白板卡片），不会修改 PDF。",
                 ["GuideKeyPrintDesc"] = "打印当前 PDF。",
-                ["GuideKeyUndoDesc"] = "撤销上一笔批注（可连续撤销多步）。",
-                ["GuideKeyRedoDesc"] = "重做被撤销的批注（可连续重做）。",
+                ["GuideKeyUndoDesc"] = "撤销上一步笔迹或卡片操作（可连续多步）。",
+                ["GuideKeyRedoDesc"] = "重做被撤销的操作（可连续多步）。",
                 ["GuideKeyBookmarkDesc"] = "为当前页添加书签。",
                 ["GuideKeyZoomInDesc"] = "放大视图。",
                 ["GuideKeyZoomOutDesc"] = "缩小视图。",
@@ -317,6 +354,11 @@ namespace GlanceRX.Services
                 ["GuideKeyLastPageDesc"] = "跳到末页。",
                 ["GuideKeyFitDesc"] = "按布局适应页面（纵向=适应宽度，横向=适应高度）。",
                 ["GuideKeyToggleAnnotsDesc"] = "显示或隐藏画笔批注。",
+                ["GuideKeyReadModeDesc"] = "切换到阅读模式。",
+                ["GuideKeyPenModeDesc"] = "切换到画笔模式，在页面上书写批注。",
+                ["GuideKeyCanvasModeDesc"] = "切换到白板模式，添加卡片与连线。",
+                ["GuideKeyTempEraserDesc"] = "画笔模式下按住 E 临时橡皮（整笔擦），松开恢复画笔。",
+                ["GuideKeyTempReadDesc"] = "画笔模式下按住 H 临时平移阅读，松开恢复画笔。",
                 ["WelcomeSubtitle"] = "阅读、批注与白板，尽在一个视图。",
                 ["WelcomeOpenButton"] = "打开PDF文档",
                 ["WelcomeFeatureRead"] = "PDF 阅读",
@@ -405,12 +447,17 @@ namespace GlanceRX.Services
                 ["CanvasInlineCode"] = "Inline code",
                 ["CanvasHighlight"] = "Highlight",
                 ["CanvasClearFormatting"] = "Clear formatting",
-                ["GuideKeyBoldDesc"] = "While editing a card: bold the selection (press again to remove)",
-                ["GuideKeyItalicDesc"] = "While editing a card: italicize the selection (press again to remove)",
-                ["GuideKeyInlineCodeDesc"] = "While editing a card: mark the selection as inline code (press again to remove)",
-                ["GuideKeyStrikeDesc"] = "While editing a card: strike through the selection (press again to remove)",
-                ["GuideKeyHighlightDesc"] = "While editing a card: highlight the selection (press again to remove)",
+                ["GuideKeyBoldDesc"] = "While editing a card: bold the selection.",
+                ["GuideKeyItalicDesc"] = "While editing a card: italicize the selection.",
+                ["GuideKeyInlineCodeDesc"] = "While editing a card: mark the selection as inline code.",
+                ["GuideKeyStrikeDesc"] = "While editing a card: strike through the selection.",
+                ["GuideKeyHighlightDesc"] = "While editing a card: highlight the selection.",
                 ["LayoutToggle"] = "Switch layout",
+                ["AppLanguage"] = "App language",
+                ["LanguageSystem"] = "System default",
+                ["LanguageChinese"] = "Simplified Chinese",
+                ["LanguageEnglish"] = "English",
+                ["LanguageSpanish"] = "Spanish",
                 ["MoreTools"] = "More tools",
                 ["PrintPages"] = "Pages",
                 ["PrintPagesAll"] = "All",
@@ -445,6 +492,8 @@ namespace GlanceRX.Services
                 ["GuideClose"] = "Close",
                 ["GuideMousePanGesture"] = "Left-drag",
                 ["GuideMousePanDesc"] = "Hold the left button and drag to pan the page view.",
+                ["GuideMouseDropGesture"] = "Drop a PDF",
+                ["GuideMouseDropDesc"] = "Drop a PDF file onto the window to open it.",
                 ["GuideMouseRightZoomGesture"] = "Right-drag up/down",
                 ["GuideMouseRightZoomDesc"] = "Continuous zoom: drag up to enlarge, down to reduce.",
                 ["GuideMouseDoubleClickGesture"] = "Double-click",
@@ -458,10 +507,10 @@ namespace GlanceRX.Services
                 ["GuideMousePenDrawGesture"] = "Pen mode: left-drag",
                 ["GuideMousePenDrawDesc"] = "Write or draw annotation strokes on the page.",
                 ["GuideKeyOpenDesc"] = "Open a PDF file.",
-                ["GuideKeySaveDesc"] = "Save annotation changes.",
+                ["GuideKeySaveDesc"] = "Save the canvas (ink and cards); the PDF is never modified.",
                 ["GuideKeyPrintDesc"] = "Print the current PDF.",
-                ["GuideKeyUndoDesc"] = "Undo the last annotation stroke (multiple steps supported).",
-                ["GuideKeyRedoDesc"] = "Redo undone annotations (multiple steps supported).",
+                ["GuideKeyUndoDesc"] = "Undo the last ink or card action (multiple steps supported).",
+                ["GuideKeyRedoDesc"] = "Redo the undone action (multiple steps supported).",
                 ["GuideKeyBookmarkDesc"] = "Add a bookmark for the current page.",
                 ["GuideKeyZoomInDesc"] = "Zoom in.",
                 ["GuideKeyZoomOutDesc"] = "Zoom out.",
@@ -474,6 +523,11 @@ namespace GlanceRX.Services
                 ["GuideKeyLastPageDesc"] = "Jump to the last page.",
                 ["GuideKeyFitDesc"] = "Fit the page to the viewport (width in vertical layout, height in horizontal).",
                 ["GuideKeyToggleAnnotsDesc"] = "Show or hide pen annotations.",
+                ["GuideKeyReadModeDesc"] = "Switch to reading mode.",
+                ["GuideKeyPenModeDesc"] = "Switch to pen mode to draw on the page.",
+                ["GuideKeyCanvasModeDesc"] = "Switch to whiteboard mode for cards and links.",
+                ["GuideKeyTempEraserDesc"] = "Hold E in pen mode for temporary whole-stroke erasing; release to draw again.",
+                ["GuideKeyTempReadDesc"] = "Hold H in pen mode to temporarily pan like reading mode; release to draw again.",
                 ["WelcomeSubtitle"] = "Read, annotate and sketch, all in one view.",
                 ["WelcomeOpenButton"] = "Open PDF Document",
                 ["WelcomeFeatureRead"] = "PDF reading",

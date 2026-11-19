@@ -119,6 +119,10 @@ public sealed partial class MainPage : Page
     private string _currentPdfPath = "";
     private string? _currentPdfPassword;
     private SettingsService _settingsService = new();
+
+    /// <summary>设置初始化期间屏蔽下拉的 SelectionChanged：用代码设 SelectedIndex 也会同步触发事件，
+    /// 不加屏蔽会在首启时把当前偏好重写一遍，并重复刷新整页文案。</summary>
+    private bool _initializingSettingsControls;
     private bool _toolbarAlwaysVisible;
     private uint _totalPages = 0;
 
@@ -282,6 +286,10 @@ public sealed partial class MainPage : Page
     {
         Current = this;
         this.InitializeComponent();
+
+        // 语言偏好必须先于任何本地化文本落盘：构造函数后面就有 Get() 生成的文案，
+        // 若等到 Loaded 再切，首帧会闪一下系统默认语言。设置服务在字段初始化器里已就绪。
+        LocalizationService.SetLanguage(_settingsService.Language);
 
         // 主视觉树内按钮：一律不可 Tab 聚焦（彻底关掉 Tab/方向键落到按钮的路径，兜底）。
         SetButtonsNonTabStop();
@@ -881,6 +889,12 @@ public sealed partial class MainPage : Page
             if (ToolbarAlwaysItem != null) ToolbarAlwaysItem.Content = GlanceRX.Services.LocalizationService.Get("ToolbarAlwaysVisible");
             if (ToolbarAutoHideItem != null) ToolbarAutoHideItem.Content = GlanceRX.Services.LocalizationService.Get("ToolbarAutoHide");
 
+            if (AppLanguageLabel != null) AppLanguageLabel.Text = GlanceRX.Services.LocalizationService.Get("AppLanguage");
+            if (LanguageSystemItem != null) LanguageSystemItem.Content = GlanceRX.Services.LocalizationService.Get("LanguageSystem");
+            if (LanguageChineseItem != null) LanguageChineseItem.Content = GlanceRX.Services.LocalizationService.Get("LanguageChinese");
+            if (LanguageEnglishItem != null) LanguageEnglishItem.Content = GlanceRX.Services.LocalizationService.Get("LanguageEnglish");
+            if (LanguageSpanishItem != null) LanguageSpanishItem.Content = GlanceRX.Services.LocalizationService.Get("LanguageSpanish");
+
             if (GuideButtonText != null) GuideButtonText.Text = GlanceRX.Services.LocalizationService.Get("GuideTitle");
             if (GuideTitleText != null) GuideTitleText.Text = GlanceRX.Services.LocalizationService.Get("GuideTitle");
             if (GuideMouseSectionText != null) GuideMouseSectionText.Text = GlanceRX.Services.LocalizationService.Get("GuideMouseSection");
@@ -898,14 +912,41 @@ public sealed partial class MainPage : Page
             if (AddBookmarkButton != null)
                 AutomationProperties.SetName(AddBookmarkButton, GlanceRX.Services.LocalizationService.Get("AddBookmark"));
             ApplySidebarMode(); // refresh header text after localization strings are ready
+
+            // 改完各下拉项的 Content 后必须重选一次：ComboBox 折叠态的文字由内部 ContentPresenter
+            // 缓存，改 Content 不会触发它重取，展开下拉重建容器才刷新（用户视角就是"点开一次才变")。
+            bool saved = _initializingSettingsControls;
+            _initializingSettingsControls = true;
+            try
+            {
+                RefreshComboBoxSelection(ThemeComboBox);
+                RefreshComboBoxSelection(LayoutViewComboBox);
+                RefreshComboBoxSelection(ToolbarDisplayComboBox);
+                RefreshComboBoxSelection(LanguageComboBox);
+            }
+            finally
+            {
+                _initializingSettingsControls = saved;
+            }
         }
         catch { }
+    }
+
+    /// <summary>强制 ComboBox 重取选中项文字。先清空选择再设回，逼折叠态的 ContentPresenter 重新绑定；
+    /// 调用方需屏蔽各 SelectionChanged，避免把一次纯显示刷新当成用户改了设置。</summary>
+    private static void RefreshComboBoxSelection(ComboBox? combo)
+    {
+        if (combo == null || combo.SelectedIndex < 0) return;
+        int idx = combo.SelectedIndex;
+        combo.SelectedIndex = -1;
+        combo.SelectedIndex = idx;
     }
 
     private void InitializeSettings()
     {
         try
         {
+            _initializingSettingsControls = true;
             string themeStr = _settingsService.AppTheme;
 
             // Set ComboBox index
@@ -932,6 +973,20 @@ public sealed partial class MainPage : Page
                 ToolbarDisplayComboBox.SelectedIndex = _toolbarAlwaysVisible ? 0 : 1;
             }
 
+            // 语言下拉初始选中项按保存的偏好匹配 Tag；偏好由构造函数已应用到 LocalizationService，
+            // 这里只负责让下拉显示与之一致。未知偏好落回"跟随系统"（索引 0）。
+            if (LanguageComboBox != null)
+            {
+                string pref = _settingsService.Language;
+                LanguageComboBox.SelectedIndex = pref switch
+                {
+                    "zh" => 1,
+                    "en" => 2,
+                    "es" => 3,
+                    _ => 0,
+                };
+            }
+
             if (Enum.TryParse(themeStr, out ElementTheme theme))
             {
                 var mainWindow = (Application.Current as App)?.MainWindow;
@@ -954,10 +1009,15 @@ public sealed partial class MainPage : Page
 
         }
         catch { }
+        finally
+        {
+            _initializingSettingsControls = false;
+        }
     }
 
         private void ThemeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_initializingSettingsControls) return;
         if (ThemeComboBox == null) return;
         
         if (ThemeComboBox.SelectedItem is ComboBoxItem selectedItem && selectedItem.Tag is string themeStr)
@@ -988,6 +1048,7 @@ public sealed partial class MainPage : Page
 
         private void LayoutViewComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_initializingSettingsControls) return;
         if (LayoutViewComboBox == null) return;
         if (LayoutViewComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr && int.TryParse(tagStr, out int idx))
         {
@@ -1000,10 +1061,29 @@ public sealed partial class MainPage : Page
 
         private void ToolbarDisplayComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_initializingSettingsControls) return;
         if (ToolbarDisplayComboBox == null) return;
         bool always = ToolbarDisplayComboBox.SelectedIndex == 0;
         _settingsService.ToolbarAlwaysVisible = always;
         ApplyToolbarAlwaysVisible(always);
+    }
+
+    /// <summary>切换界面语言：先写入 LocalizationService 再整页重刷文案。
+    /// 重刷分两路——InitializeLocalization 覆盖设置/指南/欢迎页/侧边栏头；构造期单独落文案的
+    /// 画布面板标题、Detach 无障碍名、白板空态三句则在此补齐，否则切语言后会残留旧文案。</summary>
+    private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initializingSettingsControls) return;
+        if (LanguageComboBox == null || LanguageComboBox.SelectedItem is not ComboBoxItem item) return;
+        if (item.Tag is not string pref) return;
+
+        LocalizationService.SetLanguage(pref);
+        _settingsService.Language = pref;
+
+        InitializeLocalization();
+        if (CanvasPanelHeaderText != null) CanvasPanelHeaderText.Text = LocalizationService.Get("CanvasPanelTitle");
+        if (DetachCanvasButton != null) AutomationProperties.SetName(DetachCanvasButton, LocalizationService.Get("CanvasDetach"));
+        RefreshBoardList();
     }
 
     /// <summary>应用「工具栏显示方式」设置。 常驻显示：取消待收起计时并强制展开工具栏，后续所有收起请求被守卫拦截。 鼠标移开便收起：恢复原有自动收起行为（立即请求一次收起，指针仍在本身上时不收）。</summary>
@@ -1029,7 +1109,7 @@ public sealed partial class MainPage : Page
     /// <summary>本地化缩写，仅用于构建指南行，避免每行重复全限定名。</summary>
     private static string Loc(string key) => GlanceRX.Services.LocalizationService.Get(key);
 
-    /// 构建指南内容。两条itum都以【源码】为准而非凭记忆抄先手： · 鼠标行 ↔ GpuPageView.xaml.
+    /// <summary>指南行只列源码里真正绑定的键与手势；键帽标签是符号，不进本地化字典。</summary>
     private void BuildGuideRows()
     {
         if (GuideMouseItems != null)
@@ -1037,6 +1117,7 @@ public sealed partial class MainPage : Page
             GuideMouseItems.ItemsSource = new List<GuideRow>
             {
                 new() { Gesture = Loc("GuideMousePanGesture"),         Description = Loc("GuideMousePanDesc") },
+                new() { Gesture = Loc("GuideMouseDropGesture"),        Description = Loc("GuideMouseDropDesc") },
                 new() { Gesture = Loc("GuideMousePenDrawGesture"),     Description = Loc("GuideMousePenDrawDesc") },
                 new() { Gesture = Loc("GuideMouseWheelGesture"),       Description = Loc("GuideMouseWheelDesc") },
                 new() { Gesture = Loc("GuideMouseCtrlWheelGesture"),   Description = Loc("GuideMouseCtrlWheelDesc") },
@@ -1048,7 +1129,6 @@ public sealed partial class MainPage : Page
 
         if (GuideKeyboardItems != null)
         {
-            // 按键标签是【符号】而非可译散文（键帽上写的就是 Ctrl、Home、End），故不进本地化字典；
             GuideKeyboardItems.ItemsSource = new List<GuideRow>
             {
                 new() { Gesture = "Ctrl + O",         Description = Loc("GuideKeyOpenDesc") },
@@ -1057,6 +1137,11 @@ public sealed partial class MainPage : Page
                 new() { Gesture = "Ctrl + 0",         Description = Loc("GuideKeyZoomResetDesc") },
                 new() { Gesture = "F",                Description = Loc("GuideKeyFitDesc") },
                 new() { Gesture = "G",                Description = Loc("GuideKeyToggleAnnotsDesc") },
+                new() { Gesture = "V",                Description = Loc("GuideKeyReadModeDesc") },
+                new() { Gesture = "B",                Description = Loc("GuideKeyPenModeDesc") },
+                new() { Gesture = "N",                Description = Loc("GuideKeyCanvasModeDesc") },
+                new() { Gesture = "E",                Description = Loc("GuideKeyTempEraserDesc") },
+                new() { Gesture = "H",                Description = Loc("GuideKeyTempReadDesc") },
                 new() { Gesture = "↑ ↓ ← →", Description = Loc("GuideKeyArrowsDesc") },
                 new() { Gesture = "Space",            Description = Loc("GuideKeySpaceViewportDesc") },
                 new() { Gesture = "PageDown",         Description = Loc("GuideKeyNextPageDesc") },
@@ -1174,6 +1259,15 @@ public sealed partial class MainPage : Page
     {
         if (string.IsNullOrEmpty(_currentPdfPath) || _pages.Count == 0) return;
 
+        // 打印前提＝系统支持打印 API 且注册表里至少有一个打印目标（虚拟打印机也算）。
+        // 前置判定失败：只弹一次明确的"无打印机"提示，绝不打开会卡加载的系统打印预览，
+        // 让同一种情况始终只有一种表现；判定成功后系统预览的成败交给系统，不再叠加提示。
+        if (!GlanceRX.Services.PdfPrintService.CanPrint())
+        {
+            await ShowPrintErrorDialog("NoPrinterTitle", "NoPrinterContent");
+            return;
+        }
+
         var app = Application.Current as App;
         IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(app?.MainWindow);
 
@@ -1188,13 +1282,12 @@ public sealed partial class MainPage : Page
             int currentPage = PageListView.SelectedIndex;
             if (currentPage < 0) currentPage = 0;
 
-            var printService = new GlanceRX.Services.PdfPrintService(hwnd, printRender, _pages, docTitle, currentPage);
+            var pageLayouts = GpuViewer.PageInfos.Select(p => p.LayoutRect).ToArray();
+            var printService = new GlanceRX.Services.PdfPrintService(
+                hwnd, printRender, _pages, _canvasDoc, pageLayouts, docTitle,
+                GpuViewer.AnnotationsVisible, currentPage);
 
-            bool shown = await printService.ShowPrintDialogAsync();
-            if (!shown)
-            {
-                await ShowPrintErrorDialog("NoPrinterTitle", "NoPrinterContent");
-            }
+            await printService.ShowPrintDialogAsync();
         }
         catch (Exception ex)
         {
@@ -2669,6 +2762,9 @@ public sealed partial class MainPage : Page
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -3297,11 +3393,42 @@ public sealed partial class MainPage : Page
         catch { return false; }
     }
 
+    // 指针是否落在窗口的非客户区边框（可拖拽改尺寸的 resize 带）。该处系统挂的是双箭头光标，
+    // 圆环一旦装到箭头槽就会盖住它，必须与标题栏一样排除。用窗口矩形减客户区矩形求四边带宽，
+    // 避免手写 SM_CXSIZEFRAME 在 DPI / 主题变化时算错；ClientToScreen 给出客户区真实屏幕原点。
+    private bool IsPointerOverResizeBorder()
+    {
+        try
+        {
+            if (!GetCursorPos(out POINT p)) return false;
+            if (!GetWindowRect(_hWnd, out RECT wr)) return false;
+            if (!GetClientRect(_hWnd, out RECT cr)) return false;
+            POINT origin = new POINT { X = 0, Y = 0 };
+            if (!ClientToScreen(_hWnd, ref origin)) return false;
+
+            int cw = cr.Right - cr.Left;
+            int ch = cr.Bottom - cr.Top;
+            if (cw <= 0 || ch <= 0) return false;
+            int left = wr.Right - wr.Left - cw;
+            int top = wr.Bottom - wr.Top - ch;
+            // 只认正常态的薄边框；异常值（最大化/最小化/尚未布局）一律不排除，免得整窗都变原生光标。
+            if (left < 0 || left > 64 || top < 0 || top > 64) return false;
+
+            int crLeft = origin.X;
+            int crTop = origin.Y;
+            int crRight = crLeft + cw;
+            int crBottom = crTop + ch;
+            return p.X < crLeft || p.X >= crRight || p.Y < crTop || p.Y >= crBottom;
+        }
+        catch { return false; }
+    }
+
     // 作用域判定（含标题栏/已展开工具栏/已展开画笔颜色胶囊排除）：在本窗口且前台、且不在上述任一区域 → 显示圆环；
     // 否则（离开窗口/Alt-Tab 切走/位于标题栏/位于已展开工具栏/位于已展开画笔颜色胶囊）→ 还原原生光标。
     private bool IsPointerInRingZone()
     {
         if (!IsPointerInsideOurWindow()) return false;
+        if (IsPointerOverResizeBorder()) return false;
         if (IsPointerOverTitleBar()) return false;
         if (IsPointerOverExpandedToolbar()) return false;
         if (IsPointerOverPenOptions()) return false;
@@ -3562,15 +3689,19 @@ public sealed partial class MainPage : Page
         catch { return null; }
     }
 
-    // 指针当前是否落在【右上角设置菜单】区域（设置菜单含主题下拉框，非涂画区，恢复原生光标）。
+    // 指针当前是否落在【展开的浮层菜单】区域（设置菜单、工具栏溢出菜单等，非涂画区，恢复原生光标）。
     private bool IsPointerOverSettingsFlyout()
     {
-        if (SettingsFlyout == null || !SettingsFlyout.IsOpen) return false;
         if (!GetCursorPos(out POINT p)) return false;
 
-        RECT? r = GetSettingsFlyoutScreenRect();
-        if (r != null && PointInScreenRect(p, r.Value)) return true;
+        if (SettingsFlyout != null && SettingsFlyout.IsOpen)
+        {
+            RECT? r = GetSettingsFlyoutScreenRect();
+            if (r != null && PointInScreenRect(p, r.Value)) return true;
+        }
 
+        // 所有展开的Popup都按浮层处理（工具栏"..."里的ToolbarMoreFlyout展开时SettingsFlyout并未打开，
+        // 不能把这段遍历锁在SettingsFlyout.IsOpen里）；画笔颜色胶囊单独有自己的判定，这里跳过避免重复。
         if (XamlRoot != null)
         {
             foreach (var popup in Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(XamlRoot))
