@@ -684,6 +684,9 @@ public sealed partial class MainPage : Page
     {
         SubscribeToWindowStateChanges();
         InitializeSettings();
+        // 常驻显示偏好必须在这里真正应用：InitializeSettings 只把值读进字段，而工具栏 XAML 默认是收起的。
+        // 不补这一步，重开软件后工具栏仍是收起态，直到某个指针事件才显示（表现为"触发一次才常驻"）。
+        if (_toolbarAlwaysVisible) ApplyToolbarAlwaysVisible(true);
         InitializeLocalization();
         UpdateTopToolbarMargin();
 
