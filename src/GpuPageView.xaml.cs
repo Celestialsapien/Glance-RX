@@ -271,14 +271,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double zOld = (_liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor);
             if (zOld <= 0) zOld = 1.0;
             double vpW = _vpW, vpH = _vpH;
-            double cx = _liveH / zOld + vpW / 2.0 / zOld;
-            double cy = _liveV / zOld + vpH / 2.0 / zOld;
+            // 视口中心对应的文档坐标必须剥掉切换前布局的居中补偿：渲染是 screen = center + doc*z - off，
+            // 不剥的话切换后同一页点会因两端 TopOffset/居中量不同而漂移。
+            GetCenterOffsets(zOld, out double centerXOld, out double centerYOld, vpW, vpH);
+            double docCenterX = (_liveH + vpW / 2.0 - centerXOld) / zOld;
+            double docCenterY = (_liveV + vpH / 2.0 - centerYOld) / zOld;
             double pageLocalX = 0, pageLocalY = 0;
             if (anchor >= 0 && anchor < _pages.Count)
             {
                 var ar = _pages[anchor].LayoutRect;
-                pageLocalX = cx - ar.X;
-                pageLocalY = cy - ar.Y;
+                pageLocalX = docCenterX - ar.X;
+                pageLocalY = docCenterY - ar.Y;
             }
             // 先按【旧布局】判定当前是否处于"适应"缩放（适应宽度/适应高度）。
             double oldFit = FitToViewportPercent;
@@ -332,14 +335,17 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             double zOld = (_liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor);
             if (zOld <= 0) zOld = 1.0;
             double vpW = _vpW, vpH = _vpH;
-            double cx = _liveH / zOld + vpW / 2.0 / zOld;
-            double cy = _liveV / zOld + vpH / 2.0 / zOld;
+            // 视口中心对应的文档坐标必须剥掉切换前布局的居中补偿：渲染是 screen = center + doc*z - off，
+            // 不剥的话切换后同一页点会因两端 TopOffset/居中量不同而漂移。
+            GetCenterOffsets(zOld, out double centerXOld, out double centerYOld, vpW, vpH);
+            double docCenterX = (_liveH + vpW / 2.0 - centerXOld) / zOld;
+            double docCenterY = (_liveV + vpH / 2.0 - centerYOld) / zOld;
             double pageLocalX = 0, pageLocalY = 0;
             if (anchor >= 0 && anchor < _pages.Count)
             {
                 var ar = _pages[anchor].LayoutRect;
-                pageLocalX = cx - ar.X;
-                pageLocalY = cy - ar.Y;
+                pageLocalX = docCenterX - ar.X;
+                pageLocalY = docCenterY - ar.Y;
             }
             double oldFit = FitToViewportPercent;
             double curZoomPercent = (_liveZoom > 0 ? _liveZoom : Viewer.ZoomFactor) * 100.0;
@@ -421,23 +427,39 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         if (vpW <= 0 || vpH <= 0) { vpW = 1000; vpH = 800; }
         double cx = pages[anchor].LayoutRect.X + pageLocalX;
         double cy = pages[anchor].LayoutRect.Y + pageLocalY;
-        // 【两轴都按中心对齐】只设主轴会丢失交叉轴的页内偏移（纵向转横向时 v 被置 0 → 跳到页顶端；
-        double h = Math.Max(0, cx * z - vpW / 2.0);
-        double v = Math.Max(0, cy * z - vpH / 2.0);
+        // 【两轴都按视口中心对齐】落点必须加回新布局的居中补偿（与切换前反解同一公式）：
+        // 否则纵横切换时同一页点会因两端 TopOffset/居中量不同而漂移，缩小时尤其明显。
+        GetCenterOffsets(z, out double centerXNew, out double centerYNew, vpW, vpH);
+        double h = Math.Max(0, cx * z + centerXNew - vpW / 2.0);
+        double v = Math.Max(0, cy * z + centerYNew - vpH / 2.0);
 
-        // 【布局切换防夹断】RecomputeLayout 已改 Spacer 尺寸，但 ScrollViewer 的可滚动范围要等
+        // 【布局切换防夹断】RecomputeLayout 已改 Spacer 尺寸，但 ScrollViewer 的可滚动范围要等下一轮布局才刷新。
         try { Viewer.UpdateLayout(); } catch { }
-        // 记录本次播种的目标（供布局切换稳定窗口判定"真实到达"）。布局再布局可能微调吊平，
-        _layoutTargetH = h;
-        _layoutTargetV = v;
+        GetScrollBounds(z, out double maxH, out double maxV, vpW, vpH);
+        double ch = Math.Clamp(h, 0, maxH);
+        double cv = Math.Clamp(v, 0, maxV);
+        // 目标越界（靠近边缘切布局时常见：横向 maxV=0，而 v 来自切换前布局的页内位置）：
+        // 未夹断的偏移会被 ScrollViewer 再钳一次，稳定窗口等不到该目标 ⇒ 看门狗瞬时跳变。
+        // 越界时画布留在切换前的位置，用滚动弹簧丝滑过渡到合法落点（与滚轮同一条动画路径）。
+        // 延迟重锚时弹簧可能仍在途：沿用弹簧当前位置，避免与直写 ChangeView 抢视图。
+        bool settling = _isWheelScrolling;
+        bool clipped = Math.Abs(h - ch) > 0.5 || Math.Abs(v - cv) > 0.5;
+        bool useSpring = clipped || settling;
+        double drawH = settling ? _scrollH.Value : (clipped ? _liveH : ch);
+        double drawV = settling ? _scrollV.Value : (clipped ? _liveV : cv);
+
+        // 稳定窗口目标用合法落点（ScrollViewer 真正能到的位置），否则永远 landed=false。
+        _layoutTargetH = ch;
+        _layoutTargetV = cv;
         _layoutTargetZoom = z;
-        Viewer.ChangeView(h, v, z, disableAnimation: true);
-        SyncLiveView(h, v, z);
+        Viewer.ChangeView(drawH, drawV, z, disableAnimation: true);
+        SyncLiveView(drawH, drawV, z);
+        if (useSpring) SettleLayoutOffsetTo(ch, cv);
         // 同步播种动画当前态，避免随后的双击/缩放读到陈旧值而闪回。
         _zoomAnimCurrentFactor = z;
-        _zoomAnimCurrentH = h;
-        _zoomAnimCurrentV = v;
-        SetVisibleRangeFor(h, v, z);
+        _zoomAnimCurrentH = drawH;
+        _zoomAnimCurrentV = drawV;
+        SetVisibleRangeFor(drawH, drawV, z);
         QueueVisiblePages();
         InvalidateBoth();
         NotifyViewState();
@@ -747,11 +769,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     // 容器总高的屏幕像素。纵向 = 内容 + 上下虚空各 P；横向 = 纯内容高（零虚空），fit 后 extent 恰等于视口 ⇒ 无可滚范围。
     private double ExtentScreenH(double zoom) => _docContentH * zoom + (IsHorizontalLayout ? 0.0 : 2 * _edgePadPx);
 
-    // PDF 内容顶端在 vOff=0 时的屏幕 Y。
-    // 纵向：居中补偿与固定上余量的较大者（=P）。
-    // 横向：恒为 TopOffset——常驻 P（贴工具栏底）/ 收回 0（贴标题栏底），无居中项、无虚空。
+    // PDF 内容顶端在 vOff=0 时的屏幕 Y：可滚区间内恒为 TopOffset（纵向=P，横向=常驻 P / 收回 0），
+    // 内容连同容器装得下视口时才退回居中补偿。缩小时必须下移居中，否则整页钉在工具栏底、下方空一大片。
     private double EffectiveCenterY(double zoom, double vpH)
-        => IsHorizontalLayout ? TopOffset : Math.Max((vpH - _docContentH * zoom) / 2.0, _edgePadPx);
+        => Math.Max((vpH - _docContentH * zoom) / 2.0, TopOffset);
 
     // 平滑缩放下 Viewer.ZoomFactor 要到落定才变；按每帧插值倍率改 Spacer，原生可滚动范围
     // 会与解析范围逐帧错开并反复重排。按目标倍率一次排好可避免落定时倍率已变、extent 仍旧夹断偏移。
@@ -1093,6 +1114,18 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         _isWheelScrolling = true;
     }
 
+    /// <summary>布局切换落点越界时，用滚动弹簧从当前画布位置丝滑过渡到合法落点。复用滚轮同一条弹簧路径，
+    /// 避免"等看门狗到期瞬时跳变"。弹簧每帧夹到合法范围并下发 ChangeView，落定后自然收尾。</summary>
+    private void SettleLayoutOffsetTo(double targetH, double targetV)
+    {
+        AbandonZoomCommitWindow();
+        EnsureScrollSprings();               // 以当前 _live*（切换前的画布位置）为弹簧起点
+        // ch/cv 已在布局重排后按新 extent 夹过；StepScrollFrame 每帧还会再夹一次。
+        _scrollH.Target = targetH;
+        _scrollV.Target = targetV;
+        EnsureFramePump();
+    }
+
     /// <summary>把一次滚轮位移并入滚动目标。只改目标、【不碰速度】：连发滚轮时目标持续向前延伸， 弹簧的速度是连续累积上去的 → 一条越滚越快、松手后平滑收住的曲线。 旧的 lerp 每来一档都从 0 重新起速再急停，速度曲线是一串锯齿，那就是"跳跃感"的来源。</summary>
     private void AddWheelScroll(double dh, double dv)
     {
@@ -1382,7 +1415,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // X 锚视口左缘 (0)，左右边线由 z1 按 vpW 比例缩放钉住。
         // Y 锚顶端偏移所在行（纵向=工具栏底边 P；横向=TopOffset）：它是判断 PDF 是否被遮的判据线，缩放时该行恒不动；
         // 取视口上缘会让内容缩小时朝 y=0 收缩、缩进工具栏。
-        // 最顶 v0=0 时 contentY=0、v(z)=cy-TopOffset=0，PDF 顶边同样停在 y=TopOffset。
+        // 内容矮于视口时 cy 退回居中补偿、maxV=0 ⇒ v 被夹到 0，PDF 顶边随 cy 居中下移而非贴工具栏底。
         _zAnimAnchor = new Point(0, TopOffset);
         _zAnimContentX = _hostResizeDocLeftX;
         _zAnimContentY = _hostResizeDocTopY;
