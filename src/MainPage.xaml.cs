@@ -684,6 +684,10 @@ public sealed partial class MainPage : Page
     {
         SubscribeToWindowStateChanges();
         InitializeSettings();
+        // 把工具栏显示方式尽早推给两个视图：横向顶垫依赖它（常驻=P / 收回=0），
+        // 必须在首次 fit 之前定好，否则收回模式下会把 PDF 顶端错误地留出 P。
+        GpuViewer.SetToolbarAlwaysVisible(_toolbarAlwaysVisible);
+        if (GpuViewerRight != null) GpuViewerRight.SetToolbarAlwaysVisible(_toolbarAlwaysVisible);
         // 常驻显示偏好必须在这里真正应用：InitializeSettings 只把值读进字段，而工具栏 XAML 默认是收起的。
         // 不补这一步，重开软件后工具栏仍是收起态，直到某个指针事件才显示（表现为"触发一次才常驻"）。
         if (_toolbarAlwaysVisible) ApplyToolbarAlwaysVisible(true);
@@ -5030,10 +5034,16 @@ public sealed partial class MainPage : Page
         double zoomPillBottomMargin = BottomZoomPill?.Margin.Bottom ?? 10;
         double bottom = zoomPillH + zoomPillBottomMargin;
         GpuViewer.SetCanvasViewportInsets(0, top, 0, bottom);
-        // 容器上下余量恒等于工具栏底边，任何缩放下首页顶部都能滚出被浮层盖住的部分。
+        // 纵向余量 = 工具栏底边，任何缩放下首页顶部都能滚出被浮层盖住的部分；
+        // 横向的顶/底垫由 GpuViewer 依布局与工具栏模式自行决定（SetToolbarAlwaysVisible 内）。
         double edgePad = TopToolbarBarHeight();
         GpuViewer.SetEdgePad(edgePad);
-        if (GpuViewerRight != null) GpuViewerRight.SetEdgePad(edgePad);
+        GpuViewer.SetToolbarAlwaysVisible(_toolbarAlwaysVisible);
+        if (GpuViewerRight != null)
+        {
+            GpuViewerRight.SetEdgePad(edgePad);
+            GpuViewerRight.SetToolbarAlwaysVisible(_toolbarAlwaysVisible);
+        }
 
         // 元素在 GpuViewer 坐标系里的上/下沿；不可见 / 已淡出 / 已脱树 ⇒ 0（= 不占边）。
         double BottomOf(FrameworkElement? el)
