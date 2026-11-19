@@ -22,6 +22,26 @@ Glance-RX 是一款改良自 jonas1ara 的 Glance 的高性能 PDF 阅读器，�
 
 **图文指南**：不想读文字？点开[图文说明书（长图）](docs/Glance-RX-图文指南.png)，用一张长图讲清每个功能怎么用。软件设置里也附带**操作指南**。
 
+<details>
+<summary><strong>📷 实机截图（点击展开）</strong></summary>
+
+| 手绘批注 | 大纲导航 |
+|:---:|:---:|
+| <img width="440" src="docs/0000.png" alt="手绘批注"> | <img width="440" src="docs/0001.png" alt="大纲导航"> |
+| 七色笔迹直接写在 PDF 上，配黄星书签与画布面板 | 大纲树按章节跳转长文档 |
+
+| 白板卡片 + 连线 | 分屏对比 |
+|:---:|:---:|
+| <img width="440" src="docs/0002.png" alt="白板卡片与连线"> | <img width="440" src="docs/0003.png" alt="分屏对比"> |
+| 便签卡片、连线与笔迹高亮批注 | 并排对照两个 PDF，中间同步滚动 |
+
+| 横向杂志布局 |
+|:---:|
+| <img width="900" src="docs/0004.png" alt="横向杂志布局"> |
+| 横向连续排版，大幅面杂志跨页铺满视口 |
+
+</details>
+
 ---
 
 ## 核心特性
