@@ -34,18 +34,64 @@ if (-not (Test-Path $NativeDir)) {
     exit 1
 }
 
-# MuPDF (mupdf-sys) requires a specific MSVC platform toolset and libclang for
-# bindgen. v145 matches MSVC 14.5x (VS2025/18).
-if (-not $env:MUPDF_MSVC_PLATFORM_TOOLSET) {
-    $env:MUPDF_MSVC_PLATFORM_TOOLSET = "v145"
+# MuPDF (mupdf-sys) 用 MSVC PlatformToolset 编译，bindgen 还需要 libclang.dll。
+# 取值优先级：外部显式环境变量 > 项目内 .cargo/config.toml > 本机自动探测。
+# config.toml 被 git 忽略，新克隆的机器没有它，所以必须能在缺配置时自行探测，
+# 否则 mupdf-sys 会拿默认 v142 报 MSB8020（它的版本表只认到 VS17/v143）。
+$configToml = Join-Path $NativeDir ".cargo\config.toml"
+$configHasToolset = $false
+$configHasClang = $false
+if (Test-Path $configToml) {
+    $cfgText = Get-Content $configToml -Raw
+    $configHasToolset = $cfgText -match 'MUPDF_MSVC_PLATFORM_TOOLSET'
+    $configHasClang = $cfgText -match 'LIBCLANG_PATH'
+    Write-Host "  Build env: .cargo/config.toml found; its values apply unless overridden above."
+} else {
+    Write-Host "  Build env: no .cargo/config.toml; auto-detecting local MSVC toolset and libclang."
 }
-if (-not $env:LIBCLANG_PATH) {
-    $vsBase = Join-Path $env:ProgramFiles "Microsoft Visual Studio"
-    $clangCandidates = @(
-        "D:\new\Microsoft Visual Studio\18\Community\VC\Tools\Llvm\x64\bin"
-    )
-    if (Test-Path $vsBase) {
-        $clangCandidates += Get-ChildItem -Path $vsBase -Recurse -Filter "libclang.dll" -ErrorAction SilentlyContinue |
+
+$vsPath = $null
+if ((-not $env:MUPDF_MSVC_PLATFORM_TOOLSET -and -not $configHasToolset) -or
+    (-not $env:LIBCLANG_PATH -and -not $configHasClang)) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $vsPath = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1)
+        if ($vsPath) { $vsPath = $vsPath.Trim() }
+    }
+    if ($vsPath) {
+        Write-Host "  Visual Studio: $vsPath"
+    }
+}
+
+if (-not $env:MUPDF_MSVC_PLATFORM_TOOLSET -and -not $configHasToolset) {
+    # MSVC 工具集目录 14.3x -> v143, 14.4x -> v144, 14.5x -> v145（取 minor 的十位）。
+    if ($vsPath) {
+        $msvcRoot = Join-Path $vsPath "VC\Tools\MSVC"
+        if (Test-Path $msvcRoot) {
+            $minor = Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { if ($_.Name -match '^14\.(\d+)\.') { [int]$Matches[1] } } |
+                Sort-Object -Descending | Select-Object -First 1
+            if ($null -ne $minor) {
+                $env:MUPDF_MSVC_PLATFORM_TOOLSET = "v14" + [string][math]::Floor($minor / 10)
+            }
+        }
+    }
+    if (-not $env:MUPDF_MSVC_PLATFORM_TOOLSET) {
+        Write-Host "ERROR: cannot detect the MSVC platform toolset."
+        Write-Host "  Install Visual Studio 2022/2025 with 'Desktop development with C++' (MSVC v143/v145),"
+        Write-Host "  or copy native/glance-native/.cargo/config.toml.example to config.toml"
+        Write-Host "  and set MUPDF_MSVC_PLATFORM_TOOLSET there."
+        exit 1
+    }
+}
+
+if (-not $env:LIBCLANG_PATH -and -not $configHasClang) {
+    $clangCandidates = @()
+    if ($vsPath) { $clangCandidates += Join-Path $vsPath "VC\Tools\Llvm\x64\bin" }
+    $clangCandidates += Join-Path $env:ProgramFiles "LLVM\bin"
+    $clangCandidates += Join-Path ${env:ProgramFiles(x86)} "LLVM\bin"
+    if ($vsPath -and (Test-Path $vsPath)) {
+        $clangCandidates += Get-ChildItem -Path $vsPath -Recurse -Filter "libclang.dll" -ErrorAction SilentlyContinue |
             Select-Object -First 1 -ExpandProperty DirectoryName
     }
     foreach ($c in $clangCandidates) {
@@ -53,6 +99,13 @@ if (-not $env:LIBCLANG_PATH) {
             $env:LIBCLANG_PATH = $c
             break
         }
+    }
+    if (-not $env:LIBCLANG_PATH) {
+        Write-Host "ERROR: cannot find libclang.dll (bindgen in mupdf-sys needs it)."
+        Write-Host "  Install LLVM, or enable the C++ build tools' LLVM component in Visual Studio,"
+        Write-Host "  or copy native/glance-native/.cargo/config.toml.example to config.toml"
+        Write-Host "  and set LIBCLANG_PATH there."
+        exit 1
     }
 }
 

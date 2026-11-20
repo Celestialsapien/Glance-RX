@@ -126,7 +126,7 @@ Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 
 * **操作系统：** Windows 10 17763（1809）或更高版本。
 * **运行时：** self-contained 分发，**无需另装 .NET 运行时**；仅支持 64 位（x64）。
-* **开发环境（仅构建时需要）：** .NET 10 SDK、Rust 工具链（MSVC 目标）、Visual Studio 2022（可选）。
+* **开发环境（仅构建时需要）：** .NET 10 SDK、Rust 1.85+、Visual Studio 2022/2025 的「使用 C++ 的桌面开发」工作负载（提供 MSVC v143/v145 与 libclang）。NuGet 与 cargo 依赖在首次构建时自动下载。
 
 ---
 
@@ -135,9 +135,13 @@ Glance-RX 采用 **C# 前端 + Rust 原生后端** 的混合架构：
 
 ### 前置条件
 
-* **.NET 10 SDK** —— [dotnet.microsoft.com](https://dotnet.microsoft.com)
-* **Rust 1.70+**（需 MSVC 目标工具集，`mupdf-sys` 还需 `libclang`）—— [rustup.rs](https://rustup.rs)
-* **Visual Studio 2022**（可选）
+编译需要本机装好以下三样，缺一不可：
+
+* **.NET 10 SDK** —— [dotnet.microsoft.com](https://dotnet.microsoft.com)。WinAppSDK / Win2D / PDFsharp 等 NuGet 包会在首次 `dotnet build` 时自动还原，无需手动下载。
+* **Rust 1.85 或更高** —— [rustup.rs](https://rustup.rs)。后端 `Cargo.toml` 声明 `edition = "2024"`，1.70 之类的旧版本无法编译；安装时选 MSVC 目标（Windows 默认即是）。
+* **Visual Studio 2022 或 2025，勾选「使用 C++ 的桌面开发」工作负载** —— 提供 MSVC 工具集（v143 / v145）和 `libclang.dll`（mupdf-sys 的 bindgen 生成绑定所需）。VS 的 LLVM 组件随该工作负载安装。
+
+依赖来源：MuPDF 等 Rust crate 由 `cargo` 自动下载、`Cargo.lock` 已随仓库提交；原生产物 `glance_native.dll` 不入库，由构建脚本现场编译。因此**首次构建必须联网**，且原生编译耗时较长（脚本设了 1 小时看门狗）。
 
 ### 构建
 
@@ -151,8 +155,11 @@ dotnet build src/Glance.csproj -c Release
 dotnet run --project src/Glance.csproj
 ```
 
-> 若 `cargo build` 因 MSVC 工具集或 `libclang` 报错，参考 `native/glance-native/.cargo/config.toml.example`，
-> 将 `MUPDF_MSVC_PLATFORM_TOOLSET` 与 `LIBCLANG_PATH` 指向本机实际路径。真正的 `config.toml` 已被 git 忽略，**切勿提交**。
+> `dotnet build` 会自动运行 `src/build/build-native.ps1` 编译 Rust 后端（release 模式）。脚本优先读取环境变量，其次读 `native/glance-native/.cargo/config.toml`，两者都没有时用 `vswhere` 自动探测本机 VS 的 MSVC 工具集与 libclang 路径。
+>
+> **只有自动探测失败、或你在 C# 构建之外单独运行 `cargo build` 时**，才需要手动配置：复制 `native/glance-native/.cargo/config.toml.example` 为同目录的 `config.toml`，把 `MUPDF_MSVC_PLATFORM_TOOLSET`（VS2022→v143 / VS2025→v145）和 `LIBCLANG_PATH`（指向含 `libclang.dll` 的目录）改成你机器的实际值。该文件被 git 忽略，**切勿提交**。
+>
+> 若报 `MSB8020: ... v142 ...`，是 toolset 没探测对，按上条手动指定；若报找不到 `libclang.dll`，确认已装 VS 的 C++ 工作负载或独立 LLVM，并在 shell 里设 `LIBCLANG_PATH`。
 
 > 本工程为**非打包应用**（`WindowsPackageType=None`），不需要证书或 MSIX 打包步骤。
 

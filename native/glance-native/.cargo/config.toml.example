@@ -1,19 +1,35 @@
-# Template for the local cargo build-environment override.
+# Local cargo build-environment override for mupdf-sys (MuPDF bindings).
 #
-# Copy this file to `config.toml` (same directory) and adjust the values to YOUR
-# machine. The real `config.toml` is git-ignored on purpose — never commit a file
-# that contains absolute local paths.
+# WHAT THIS IS FOR
+#   mupdf-sys 0.8 needs two machine-specific values to compile on Windows:
+#     - MUPDF_MSVC_PLATFORM_TOOLSET: its VS version table stops at VS17 (v143);
+#       VS18 falls into a v142 fallback and fails with MSB8020.
+#     - LIBCLANG_PATH: bindgen needs libclang.dll to generate the FFI bindings.
+#
+# DO YOU NEED TO CREATE THIS FILE?
+#   Usually NO. src/build/build-native.ps1 (invoked automatically by dotnet build)
+#   reads these from your environment if set, otherwise auto-detects the installed
+#   Visual Studio toolset and libclang. Create this file only when auto-detection
+#   fails on your machine, or when you build the Rust crate directly with `cargo build`
+#   outside of the C# build (cargo does not run the PowerShell detector).
+#
+# HOW TO USE
+#   Copy this file to `config.toml` in the same directory, then edit the values below
+#   to match YOUR machine. The real config.toml is git-ignored on purpose: it holds
+#   absolute local paths and must never be committed.
+#
+#   If you set these variables in your shell environment, those values win over this
+#   file, so you can override individual entries without editing it.
 
-# The mupdf-sys build script recognizes MSVC platform toolsets only up to v143 and
-# otherwise falls back to v142, which fails with
-#   "MSB8020: The build tools for v142 (Platform Toolset = 'v142') cannot be found"
-# on newer Visual Studio installs. Set the toolset that matches YOUR installed VS:
-#   VS 2022            -> "v143"
-#   VS 17 / 18 preview -> "v145" (or whatever your install provides)
 [env]
+# Toolset that matches your installed MSVC:
+#   VS 2022 -> "v143"   (MSVC 14.3x)
+#   VS 2025 -> "v145"   (MSVC 14.5x)
+# Leave unset if mupdf-sys already picks the right one on your machine.
 MUPDF_MSVC_PLATFORM_TOOLSET = "v143"
 
-# bindgen (used by mupdf-sys to generate Rust bindings) needs libclang. Point this
-# at the LLVM/clang that ships with your Visual Studio, or any LLVM install, e.g.:
+# Directory that CONTAINS libclang.dll (not the dll file itself). Common locations:
 #   "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"
+#   "C:\\Program Files\\LLVM\\bin"
+# The PowerShell detector searches these for you; set this only if it cannot find one.
 LIBCLANG_PATH = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"
