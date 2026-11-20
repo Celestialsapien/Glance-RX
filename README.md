@@ -16,7 +16,7 @@ Glance-RX 是一款改良自 jonas1ara 的 Glance 的高性能 PDF 阅读器，�
 **免安装便携版，解压即用**（self-contained，x64，无需另装 .NET 运行时）：
 
 - **GitHub Releases**：[Glance-RX](https://github.com/Celestialsapien/Glance-RX/releases/latest)
-- **蓝奏云**：[https://wwbxv.lanzouw.com/ij7Yc4gn66de](https://wwbxv.lanzouw.com/ij7Yc4gn66de)　提取码：`cn6g`
+- **蓝奏云**：[https://wwbxv.lanzouw.com/b01i614cxc](https://wwbxv.lanzouw.com/b01i614cxc)　提取码：`cn6g`
 
 > 首次运行若出现 SmartScreen「Windows 已保护你的电脑」，这是未签名新文件的信誉提示、并非病毒，点「更多信息」→「仍要运行」即可。
 
