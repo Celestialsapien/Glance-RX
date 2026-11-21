@@ -343,6 +343,9 @@ public sealed partial class MainPage : Page
         OutlineListView.ItemsSource = _outlineItems;
         BoardListView.ItemsSource = _boardCards;
 
+        // 焦点落在视口内时（点一下 PDF 就会）Page 级加速器收不到导航键：两条入口共用同一份实现。
+        GpuViewer.NavKeySink = HandleNavKey;
+
         GpuViewer.CurrentPageChanged += (s, idx) =>
         {
             _currentPageIndex = idx;
@@ -2400,22 +2403,26 @@ public sealed partial class MainPage : Page
     private void PrevPage_Click(object sender, RoutedEventArgs e)
     {
         DefocusPageNumberInput();
-        if (_totalPages > 0 && _currentPageIndex > 0)
-        {
-            NavigateToPage(_currentPageIndex - 1, smooth: true);
-        }
+        StepPageByView(-1);
     }
 
     private void NextPage_Click(object sender, RoutedEventArgs e)
     {
         DefocusPageNumberInput();
-        if (_totalPages > 0 && _currentPageIndex < _totalPages - 1)
-        {
-            NavigateToPage(_currentPageIndex + 1, smooth: true);
-        }
+        StepPageByView(+1);
     }
- 
-    private void NavigateToPage(int index, bool smooth = false)
+
+    /// <summary>翻一页 / 翻一排（键盘与上一页·下一页按钮共用）：目标由视图按当前【显示位置】算，
+    /// 不能由页码 ±1 —— 页码取整且布局切换后会落后，算出的落点会与当前位置重合（按了不动）；
+    /// 对开/书籍布局同排两页共用起点，索引 +1 也会原地打转。到首/末页时视图返回 -1，原地不动。</summary>
+    private void StepPageByView(int direction)
+    {
+        if (_totalPages <= 0) return;
+        int index = GpuViewer.NextPageFromView(direction);
+        if (index >= 0) GpuViewer.GoToPageSmooth(index);
+    }
+
+    private void NavigateToPage(int index)
     {
         if (index >= 0 && _totalPages > 0 && index < _totalPages)
         {
@@ -2424,11 +2431,7 @@ public sealed partial class MainPage : Page
             PageNumberInput.Text = (index + 1).ToString();
             PageListView.SelectedIndex = index;
 
-            // 上一页/下一页按钮：逐页弹簧动画（与 PageUp/PageDown 同源），不加遮罩。
-            if (smooth)
-                GpuViewer.GoToPageSmooth(index);
-            else
-                GpuViewer.GoToPage(index);
+            GpuViewer.GoToPage(index);
         }
     }
 
@@ -5831,37 +5834,45 @@ public sealed partial class MainPage : Page
         args.Handled = true;
     }
 
-    /// 阅读区键盘导航（与焦点无关，走 KeyboardAccelerator 全局分发）。
+    /// 键盘加速器入口：焦点不在视口内时走这里（焦点在视口内时由 GpuViewer 的隧道路由接管）。
     private void Nav_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (HandleNavKey(sender.Key)) args.Handled = true;
+    }
+
+    /// <summary>导航键的唯一实现：键盘加速器与视口隧道路由共用。返回是否已消费该键。
+    /// ⚠ 焦点落在视口内时（点一下 PDF 就会）加速器收不到键 —— ScrollViewer 的类处理先把翻页键滚掉并标 Handled，
+    /// 所以 GpuViewer 会用 Root_PreviewKeyDown 把同一份逻辑再走一遍。</summary>
+    private bool HandleNavKey(VirtualKey key)
     {
         // 焦点在文本输入 / 按钮 / 列表等原生可交互控件上时，交还原生行为
         // ⚠ 必须含 RichEditBox：白板卡片的编辑宿主就是 RichEditBox，光标被它吃掉时加速器不会触发，
         var focused = FocusManager.GetFocusedElement(XamlRoot);
         if (focused is TextBox or PasswordBox or RichEditBox or ButtonBase or ComboBox
             or ListViewBase or HyperlinkButton)
-            return;
+            return false;
 
-        if (GpuViewer == null || _totalPages <= 0) return;
+        if (GpuViewer == null || _totalPages <= 0) return false;
 
-        switch (sender.Key)
+        switch (key)
         {
             case VirtualKey.Up:
             case VirtualKey.Down:
             case VirtualKey.Left:
             case VirtualKey.Right:
-                GpuViewer.ScrollByArrow(sender.Key);
+                GpuViewer.ScrollByArrow(key);
                 break;
 
             case VirtualKey.Space:
-                GpuViewer.ScrollViewportDown();
+                GpuViewer.ScrollViewportForward();
                 break;
 
             case VirtualKey.PageDown:
-                GpuViewer.GoToPageSmooth(_currentPageIndex + 1);
+                StepPageByView(+1);
                 break;
 
             case VirtualKey.PageUp:
-                GpuViewer.GoToPageSmooth(_currentPageIndex - 1);
+                StepPageByView(-1);
                 break;
 
             case VirtualKey.Home:
@@ -5872,10 +5883,10 @@ public sealed partial class MainPage : Page
                 break;
 
             default:
-                return;
+                return false;
         }
 
-        args.Handled = true;
+        return true;
     }
 
     /// 模式切换快捷键 V/B/N（见构造函数注册的 KeyboardAccelerator，输入管理器全局分发、与焦点无关）。

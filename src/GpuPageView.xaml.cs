@@ -325,6 +325,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         {
             if (_arrangement == value) return;
 
+            // 横向连续布局恒定单列密堆积，RecomputeLayout 的横向分支根本不读排版：只记住值并通知宿主，
+            // 不进稳定窗口、不重排、不重锚（否则页码会被冻结一帧，视图还会被无意义地重新对中）。
+            // 切回纵向时由 LayoutMode 的重排统一按新排版落定。
+            if (IsHorizontalLayout)
+            {
+                _arrangement = value;
+                ArrangementChanged?.Invoke(this, value);
+                return;
+            }
+
             int anchor = CurrentPageIndex;
             // 【布局切换稳定窗口】与 LayoutMode 共用，防止重排期间 ViewChanged 把夹断偏移当权威写回。
             _layoutSwitchInFlight = true;
@@ -479,7 +489,7 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             // 末列保护（横向布局）：最后一列的【右缘】永远贴着视口右端（与纵向末页同理），
             double targetX = index == pages.Count - 1
                 ? EndScrollOffset(horizontal: true, z)
-                : Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z);
+                : LeftAlignOffset(pages[index].LayoutRect.Left, z);
             // 页首对齐在文档尾部可能超出可滚范围；先钳到上界，避免 ChangeView 落地后再回写一次 _live*。
             GetScrollBounds(z, out double maxXH, out _, Viewer.ViewportWidth, Viewer.ViewportHeight);
             targetX = Math.Min(targetX, maxXH);
@@ -499,11 +509,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
         else
         {
-            // 末页保护：页尾贴视口底部；其余页按页顶对齐，小缩放时还要补上容器顶部基准。
+            // 末页保护：页尾贴视口底部；其余页页顶对齐到屏幕最上沿（标题栏下沿）。
             double targetY = index == pages.Count - 1
                 ? EndScrollOffset(horizontal: false, z)
-                : Math.Max(0, EffectiveCenterY(z, Viewer.ViewportHeight)
-                    + (pages[index].LayoutRect.Top - PageGap / 2.0) * z);
+                : TopAlignOffset(pages[index].LayoutRect.Top, z);
             // 同上：尾部页首对齐超出可滚范围时先钳上界，让播种值与 ChangeView 落地值一致。
             GetScrollBounds(z, out _, out double maxYV, Viewer.ViewportWidth, Viewer.ViewportHeight);
             targetY = Math.Min(targetY, maxYV);
@@ -589,12 +598,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         }
     }
 
-    /// <summary>空格：下翻一个视口（视口高度的弹簧滚动，与缩放无关）。 一次 = 当前视口正下方那一屏；连点无缝接续；到末屏由 AddWheelScroll 的弹簧自夹到底。</summary>
-    public void ScrollViewportDown()
+    /// <summary>空格：沿【主滚动轴】前进一个视口 —— 纵向向下移一屏高，横向向右移一屏宽。
+    /// 主轴由布局决定（横向连续沿 X 串页），写死 Y 轴在横向布局下只会撞到"无可滚范围"，一次都不动。
+    /// 到末屏由弹簧自夹到底，连点无缝接续。</summary>
+    public void ScrollViewportForward()
     {
-        if (_vpH <= 0) return;
-        // 下滚 = 正 dv（与 ScrollByArrow 的 Down 同向，因 WheelScrollFactor 为负，Down 实际传 +|notch|）。
-        AddWheelScroll(0, _vpH);
+        if (IsHorizontalLayout)
+        {
+            if (_vpW > 0) AddWheelScroll(_vpW, 0);
+        }
+        else if (_vpH > 0) AddWheelScroll(0, _vpH);
     }
 
     public void GoToPageSmooth(int index)
@@ -609,17 +622,66 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         // 页位置错位 → 缩放中按空格/PageUp/PageDn 终点乱飞（滚轮/方向键只加固定 notch 不依赖页布局故不踩此坑，
         double z = CurrentZoom;
         if (z <= 0) z = 1.0;
-        // 末页/末列：同 GoToPage 的末页保护，把结尾钉在视口末端，避免小缩放下瞬移（大缩放下结果不变）。
+        // 末页/末列：同 GoToPage 的末页保护，把结尾钉在视口末端；其余页与 Home/End 用同一条落点约定
+        // （纵向页顶贴屏幕最上沿、横向页左缘贴视口左缘），不再留"上方露出工具栏高度上一页"的偏移。
         double target = index == pages.Count - 1
             ? EndScrollOffset(IsHorizontalLayout, z)
             : (IsHorizontalLayout
-                ? Math.Max(0, (pages[index].LayoutRect.Left - PageGapHorizontal / 2.0) * z)
-                : Math.Max(0, (pages[index].LayoutRect.Top - PageGap / 2.0) * z));
+                ? LeftAlignOffset(pages[index].LayoutRect.Left, z)
+                : TopAlignOffset(pages[index].LayoutRect.Top, z));
         // 复用滚轮弹簧：以"当前【显示位置】(_live* 权威镜像) → 该页起点"的差量作为一次滚动步进，
         // 关键：差量基准必须用 _live*（当前真实显示偏移），【不能】用弹簧 _scroll*.Target —— 缩放/
         if (IsHorizontalLayout) AddWheelScroll(target - _liveH, 0);
         else                     AddWheelScroll(0, target - _liveV);
     }
+
+    /// <summary>沿主轴取与当前显示位置相邻的页索引：direction &gt; 0 取下一页，否则取上一页；没有相邻页返回 -1。
+    /// ⚠ 翻页目标不能由"页码 ± 1"算：页码是取整到页的显示值，布局切换后它可能仍停在上一页，
+    /// 于是算出的落点与当前位置重合 —— 弹簧位移 0，连按也只前进一页，且不会自愈。
+    /// 当前页按"与主轴可见区重叠最长"判定（与页码回显同一条判据）；对开/书籍同排两页共用主轴起点，
+    /// 故前进落在下一排首列、后退落在上一排首列（整排跳）。</summary>
+    public int NextPageFromView(int direction)
+    {
+        var pages = _pages;
+        if (pages.Count == 0) return -1;
+        double z = CurrentZoom;
+        if (z <= 0) z = 1.0;
+        bool horiz = IsHorizontalLayout;
+        // 主轴可见区：纵向的页坐标以内容顶端为原点，可见区顶端须扣掉居中/顶端偏移。
+        double lead = horiz ? _liveH : _liveV - EffectiveCenterY(z, _vpH);
+        double span = horiz ? _vpW : _vpH;
+
+        int cur = 0;
+        double bestOverlap = double.NegativeInfinity;
+        for (int i = 0; i < pages.Count; i++)
+        {
+            double ov = Math.Min(AxisEnd(pages[i], z), lead + span) - Math.Max(AxisStart(pages[i], z), lead);
+            if (ov > bestOverlap) { bestOverlap = ov; cur = i; }
+        }
+
+        double s0 = AxisStart(pages[cur], z);
+        if (direction > 0)
+        {
+            for (int i = cur + 1; i < pages.Count; i++)
+                if (AxisStart(pages[i], z) > s0 + 0.5) return i;
+            return -1;
+        }
+        int prev = -1;
+        for (int i = cur - 1; i >= 0; i--)
+            if (AxisStart(pages[i], z) < s0 - 0.5) { prev = i; break; }
+        if (prev < 0) return -1;
+        // 后退要落到上一排的【首】页：落在右页会把整排的左边一页留在视口外。
+        double sPrev = AxisStart(pages[prev], z);
+        while (prev > 0 && Math.Abs(AxisStart(pages[prev - 1], z) - sPrev) <= 0.5) prev--;
+        return prev;
+    }
+
+    /// <summary>页在主轴上的起点/终点（屏幕像素，已乘缩放）。</summary>
+    private double AxisStart(GpuPageInfo p, double z)
+        => (IsHorizontalLayout ? p.LayoutRect.X : p.LayoutRect.Y) * z;
+
+    private double AxisEnd(GpuPageInfo p, double z)
+        => AxisStart(p, z) + (IsHorizontalLayout ? p.LayoutRect.Width : p.LayoutRect.Height) * z;
 
     /// <summary>设置缩放百分比（10–400），以视口中心为锚。 animate=true 走逐帧 ChangeView + 实时重光栅平滑缩放（锚点严格不动、缩小不黑边、渐进清晰）； animate=false 瞬时跳变（右键拖拽缩放等连续交互用，紧跟鼠标）。</summary>
     public void SetZoomPercent(double percent, bool animate = false)
@@ -850,6 +912,16 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         GetScrollBounds(z, out double maxH, out double maxV, Viewer.ViewportWidth, Viewer.ViewportHeight);
         return horizontal ? maxH : maxV;
     }
+
+    /// <summary>纵向把某页页顶对齐到屏幕最上沿（标题栏下沿）所需的滚动偏移。
+    /// 绘制公式是 screen = cy + Top·z − v，取 v = cy + Top·z 时页顶恰好落在 screen 0。
+    /// 首页与中间页一律用它；末页改用 EndScrollOffset（页尾贴视口底）。</summary>
+    private double TopAlignOffset(double topDip, double z)
+        => Math.Max(0, EffectiveCenterY(z, _vpH) + (topDip - PageGap / 2.0) * z);
+
+    /// <summary>横向把某页左缘对齐到视口左缘所需的滚动偏移（末列改用 EndScrollOffset 贴视口右缘）。</summary>
+    private double LeftAlignOffset(double leftDip, double z)
+        => Math.Max(0, (leftDip - PageGapHorizontal / 2.0) * z);
 
     private void GetCenterOffsets(double zoom, out double centerX, out double centerY, double vpW, double vpH)
     {
@@ -2631,6 +2703,9 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         this.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Root_PointerWheelChanged), true);
         // 按住波浪键两次点击建线：松开它 = 取消待接态。挂根上，只要焦点在白板里就能收到（KeyUp）。
         this.AddHandler(UIElement.KeyUpEvent, new KeyEventHandler(Root_KeyUp), true);
+        // 视口内持焦时，ScrollViewer 的类处理会先吞掉翻页/空格/方向键，Page 级加速器因此根本不会被调用
+        // （点一下 PDF 就把焦点交给了视口）。必须在隧道阶段提前接管，交回宿主同一份导航逻辑。
+        this.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler(Root_PreviewKeyDown), true);
         Spacer.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(Viewer_PointerWheelBlocker), true);
         // 编辑态【文本按下】通道：RichEditBox 会把 PointerPressed 标记 Handled ⇒ Viewer_PointerPressed 收不到。
         // ⚠ 边框控件（滚动条 / 四角 / 四边中点 / 四边中段）的按下【不在这里】：其命中带已被 SyncCanvasEditHitCarve
@@ -6220,6 +6295,29 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
     private void Root_KeyUp(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key == ConnArmTriggerKey || e.OriginalKey == ConnArmTriggerKey) CancelCanvasConnArm();
+    }
+
+    /// <summary>宿主的导航入口（返回是否已消费该键）。焦点落在视口子树内时由 Root_PreviewKeyDown 调用。</summary>
+    public Func<VirtualKey, bool>? NavKeySink { get; set; }
+
+    /// <summary>隧道阶段接管视口内的导航键：ScrollViewer 持焦时它的类处理会先把翻页键滚掉并标 Handled，
+    /// Page 级 KeyboardAccelerator 因此完全收不到（点一下 PDF 之后 PgDn/PgUp 立即失效且不自愈）。
+    /// 只在焦点位于视口子树内时接管，其它焦点仍走加速器 —— 两条路径互斥，不会双触发。</summary>
+    private void Root_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Handled) return;
+        var sink = NavKeySink;
+        if (sink == null) return;
+        if (FocusManager.GetFocusedElement(XamlRoot) is not DependencyObject focused) return;
+        if (!IsInsideSelf(focused)) return;
+        if (sink(e.Key)) e.Handled = true;
+    }
+
+    private bool IsInsideSelf(DependencyObject node)
+    {
+        for (var cur = node; cur != null; cur = VisualTreeHelper.GetParent(cur))
+            if (ReferenceEquals(cur, this)) return true;
+        return false;
     }
 
     /// <summary>开始"改线"：拖动已有连线时断开离指针更近的一端（等距则断终点 to），复用新建连线的预览状态机（固定端 → 指针）。 起手即取消全部选中（本线或别的卡片/线）：胶囊随选中态一起收起，拖动期间不再随动；完成后按指针位置重判悬浮态（见 CommitCanvasEdgeReroute）。</summary>
