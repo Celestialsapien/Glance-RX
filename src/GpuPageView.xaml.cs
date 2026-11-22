@@ -629,17 +629,22 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
             : (IsHorizontalLayout
                 ? LeftAlignOffset(pages[index].LayoutRect.Left, z)
                 : TopAlignOffset(pages[index].LayoutRect.Top, z));
-        // 复用滚轮弹簧：以"当前【显示位置】(_live* 权威镜像) → 该页起点"的差量作为一次滚动步进，
-        // 关键：差量基准必须用 _live*（当前真实显示偏移），【不能】用弹簧 _scroll*.Target —— 缩放/
-        if (IsHorizontalLayout) AddWheelScroll(target - _liveH, 0);
-        else                     AddWheelScroll(0, target - _liveV);
+        // 复用滚轮弹簧（累积语义）：差量基准取【接力点】—— 动画在飞时用已排定的目标，否则用当前显示位置。
+        // 连按时只有按目标接力，目标才会精确落成"上一页起点 + 一页"；用显示位置做基准会把"到下一页的距离"
+        // 重复累加，前进过冲（按 3 次翻 5 页）、后退回吐（按 3 次退 2 页）—— 一屏装不下整页时两边不对称。
+        double baseH = _isWheelScrolling ? _scrollH.Target : _liveH;
+        double baseV = _isWheelScrolling ? _scrollV.Target : _liveV;
+        if (IsHorizontalLayout) AddWheelScroll(target - baseH, 0);
+        else                     AddWheelScroll(0, target - baseV);
     }
 
     /// <summary>沿主轴取与当前显示位置相邻的页索引：direction &gt; 0 取下一页，否则取上一页；没有相邻页返回 -1。
     /// ⚠ 翻页目标不能由"页码 ± 1"算：页码是取整到页的显示值，布局切换后它可能仍停在上一页，
     /// 于是算出的落点与当前位置重合 —— 弹簧位移 0，连按也只前进一页，且不会自愈。
-    /// 当前页按"与主轴可见区重叠最长"判定（与页码回显同一条判据）；对开/书籍同排两页共用主轴起点，
-    /// 故前进落在下一排首列、后退落在上一排首列（整排跳）。</summary>
+    /// 当前页按"与主轴可见区重叠最长"判定；对开/书籍同排两页共用主轴起点，故前进落在下一排首列、
+    /// 后退落在上一排首列（整排跳）。
+    /// ⚠ 定位用【接力点】：滚动动画在飞时取已排定的目标，否则取当前显示位置。连按时必须按目标接力，
+    /// 否则每次都按"还没走到的那一屏"重算同一页（按 3 次只翻 1 页）。</summary>
     public int NextPageFromView(int direction)
     {
         var pages = _pages;
@@ -647,8 +652,10 @@ public sealed partial class GpuPageView : UserControl, GlanceRX.Rendering.ITileR
         double z = CurrentZoom;
         if (z <= 0) z = 1.0;
         bool horiz = IsHorizontalLayout;
+        double hRef = _isWheelScrolling ? _scrollH.Target : _liveH;
+        double vRef = _isWheelScrolling ? _scrollV.Target : _liveV;
         // 主轴可见区：纵向的页坐标以内容顶端为原点，可见区顶端须扣掉居中/顶端偏移。
-        double lead = horiz ? _liveH : _liveV - EffectiveCenterY(z, _vpH);
+        double lead = horiz ? hRef : vRef - EffectiveCenterY(z, _vpH);
         double span = horiz ? _vpW : _vpH;
 
         int cur = 0;
